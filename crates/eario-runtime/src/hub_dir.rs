@@ -3,6 +3,7 @@
 //! ```text
 //! <hub dir>/
 //! ├── registry.json     installed dashboards
+//! ├── bin/<slug>/       the hub's copy of each installed executable
 //! ├── run/<slug>.json   one per running dashboard, written by the dashboard
 //! └── logs/<slug>.log   output of each dashboard
 //! ```
@@ -142,6 +143,13 @@ impl HubDir {
         self.root.join("logs")
     }
 
+    /// Directory holding the hub's copy of an installed executable. Fails
+    /// unless `slug` is a slug.
+    pub fn bin_dir(&self, slug: &str) -> Result<PathBuf, HubDirError> {
+        check_slug(slug)?;
+        Ok(self.root.join("bin").join(slug))
+    }
+
     /// Path of the run file of a dashboard. Fails unless `slug` is a slug, so
     /// a name never escapes the directory.
     pub fn run_file_path(&self, slug: &str) -> Result<PathBuf, HubDirError> {
@@ -191,17 +199,12 @@ impl HubDir {
 
     /// Writes the run file of a dashboard atomically.
     pub fn write_run_file(&self, slug: &str, run: &RunFile) -> Result<(), HubDirError> {
-        write_json_atomic(&self.run_file_path(slug)?, run)
+        write_run_file_at(&self.run_file_path(slug)?, run)
     }
 
     /// Removes the run file of a dashboard. A missing file is not an error.
     pub fn remove_run_file(&self, slug: &str) -> Result<(), HubDirError> {
-        let path = self.run_file_path(slug)?;
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(HubDirError::Io { path, source }),
-        }
+        remove_run_file_at(&self.run_file_path(slug)?)
     }
 
     /// Slugs that have a run file, sorted. Files whose name is not a slug are
@@ -226,6 +229,44 @@ impl HubDir {
         slugs.sort();
         Ok(slugs)
     }
+}
+
+/// Writes a run file atomically at `path`, creating its directory when
+/// missing.
+///
+/// A dashboard started with `--eario-child <run file>` writes there the path
+/// its hub chose, normally [`HubDir::run_file_path`].
+pub fn write_run_file_at(path: &Path, run: &RunFile) -> Result<(), HubDirError> {
+    write_json_atomic(path, run)
+}
+
+/// Removes the run file at `path`. A missing file is not an error.
+pub fn remove_run_file_at(path: &Path) -> Result<(), HubDirError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(HubDirError::Io { path: path.to_owned(), source }),
+    }
+}
+
+/// Copies the file `from` to `to` through a temporary file beside `to`, then
+/// a rename, so `to` is never left half-written. Creates the directory of
+/// `to` when missing. An error names `to`, or `from` when it cannot be read.
+pub fn copy_atomic(from: &Path, to: &Path) -> Result<(), HubDirError> {
+    if let Some(directory) = to.parent() {
+        fs::create_dir_all(directory)
+            .map_err(|source| HubDirError::Io { path: directory.to_owned(), source })?;
+    }
+    // Checked first, so an unreadable source is named as such.
+    fs::metadata(from).map_err(|source| HubDirError::Io { path: from.to_owned(), source })?;
+    let temporary = temporary_path(to);
+    // `fs::copy` keeps the permissions, so an executable stays executable.
+    if let Err(source) = fs::copy(from, &temporary).and_then(|_| rename_retrying(&temporary, to)) {
+        // Best effort: the failure to report is the first one.
+        let _ = fs::remove_file(&temporary);
+        return Err(HubDirError::Io { path: to.to_owned(), source });
+    }
+    Ok(())
 }
 
 fn check_slug(slug: &str) -> Result<(), HubDirError> {
@@ -257,12 +298,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), HubDirE
     if let Some(directory) = path.parent() {
         fs::create_dir_all(directory).map_err(io_error)?;
     }
-    // Process id and a per-process counter: two writers, in this process or
-    // another, never share a temporary file.
-    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut temporary_name = path.file_name().unwrap_or_default().to_os_string();
-    temporary_name.push(format!(".{}-{sequence}.tmp", std::process::id()));
-    let temporary = path.with_file_name(temporary_name);
+    let temporary = temporary_path(path);
     if let Err(source) =
         fs::write(&temporary, text).and_then(|()| rename_retrying(&temporary, path))
     {
@@ -271,6 +307,16 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), HubDirE
         return Err(io_error(source));
     }
     Ok(())
+}
+
+/// A temporary file beside `path`, named after it, the process id and a
+/// per-process counter: two writers, in this process or another, never share
+/// a temporary file.
+fn temporary_path(path: &Path) -> PathBuf {
+    let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut temporary_name = path.file_name().unwrap_or_default().to_os_string();
+    temporary_name.push(format!(".{}-{sequence}.tmp", std::process::id()));
+    path.with_file_name(temporary_name)
 }
 
 /// Distinguishes the temporary files of concurrent writes in one process.
@@ -334,6 +380,15 @@ pub async fn probe(address: &str, token: &str) -> bool {
         return false;
     }
     tokio::time::timeout(PROBE_TIMEOUT, probe_request(address, token)).await.unwrap_or(false)
+}
+
+/// [`probe`] for a caller outside an asynchronous runtime, such as the
+/// command line of a dashboard executable. Runs the probe on a runtime of its
+/// own, so it must not be called from asynchronous code. Fails only when that
+/// runtime cannot be created.
+pub fn probe_blocking(address: &str, token: &str) -> io::Result<bool> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    Ok(runtime.block_on(probe(address, token)))
 }
 
 async fn probe_request(address: SocketAddr, token: &str) -> bool {
@@ -461,6 +516,7 @@ mod tests {
             let error = hub.run_file_path(name).err();
             assert_eq!(error.map(|error| error.code()), Some("hub_invalid_slug"), "{name}");
             assert!(hub.log_path(name).is_err(), "{name}");
+            assert!(hub.bin_dir(name).is_err(), "{name}");
         }
     }
 
@@ -500,6 +556,41 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temporaries, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn run_file_at_a_given_path_round_trips() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("run").join("alpha.json");
+        write_run_file_at(&path, &run_file())?;
+        assert_eq!(HubDir::at(directory.path()).read_run_file("alpha")?, Some(run_file()));
+        remove_run_file_at(&path)?;
+        remove_run_file_at(&path)?;
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn copy_replaces_the_destination_and_names_a_missing_source() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path());
+        let source = directory.path().join("source.bin");
+        fs::write(&source, b"new")?;
+        let destination = hub.bin_dir("alpha")?.join("alpha.exe");
+        copy_atomic(&source, &destination)?;
+        fs::write(&source, b"newer")?;
+        copy_atomic(&source, &destination)?;
+        assert_eq!(fs::read(&destination)?, b"newer");
+        let names: Vec<_> = fs::read_dir(hub.bin_dir("alpha")?)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(names, ["alpha.exe"], "no temporary file may remain");
+
+        let missing = directory.path().join("missing.bin");
+        let error = copy_atomic(&missing, &destination).err().ok_or("missing source")?;
+        assert!(error.to_string().contains("missing.bin"), "{error}");
+        assert_eq!(fs::read(&destination)?, b"newer");
         Ok(())
     }
 
@@ -565,6 +656,13 @@ mod tests {
         server.shutdown();
         server.wait().await?;
         assert!(!probe(&address, "anything").await, "closed port");
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_probe_answers_outside_a_runtime() -> TestResult {
+        assert!(!probe_blocking("127.0.0.1:1", "token")?);
+        assert!(!probe_blocking("not an address", "token")?);
         Ok(())
     }
 }

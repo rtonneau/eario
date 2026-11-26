@@ -178,6 +178,33 @@ pub enum ServeError {
     /// The server task ended abnormally.
     #[error("the server task ended abnormally: {0}")]
     Task(String),
+    /// The log file of a dashboard started by a hub could not be opened.
+    #[error("could not open the log file {path}: {source}")]
+    LogFile {
+        /// The log file.
+        path: PathBuf,
+        /// The underlying failure.
+        source: io::Error,
+    },
+    /// The run file of a dashboard started by a hub could not be written or
+    /// removed.
+    #[error(transparent)]
+    RunFile(#[from] HubDirError),
+}
+
+impl ServeError {
+    /// Stable, machine-readable code of the error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Runtime(_)
+            | Self::Bind { .. }
+            | Self::Token(_)
+            | Self::Serve(_)
+            | Self::Task(_) => "serve_failed",
+            Self::LogFile { .. } => "log_file_failed",
+            Self::RunFile(error) => error.code(),
+        }
+    }
 }
 
 /// Reason a file of the hub directory could not be read, written or checked.

@@ -152,6 +152,7 @@ fn dashboard() -> (Dashboard, DatasetId, DatasetId) {
     let (dose_axis, mean_axis) = (State::new("dose_axis"), State::new("mean_axis"));
 
     let dashboard = Dashboard::new("Signal Lab")
+        .version(env!("CARGO_PKG_VERSION"))
         .computation(moving_average())
         .computation(histogram())
         .computation(group_summary())

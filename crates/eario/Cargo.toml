@@ -24,6 +24,8 @@ eario-runtime.workspace = true
 eario-mcp = { workspace = true, optional = true }
 serde_json.workspace = true
 thiserror.workspace = true
+# Logs of a dashboard started by a hub; already a dependency of eario-runtime.
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util"] }

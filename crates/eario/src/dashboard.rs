@@ -6,13 +6,16 @@ use std::path::PathBuf;
 
 use eario_core::{
     ComponentId, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetId, DatasetSlot,
-    DatasetSource, Dependency, PageSpec, ParamBinding, RowSpec, SPEC_VERSION,
+    DatasetSource, Dependency, LAUNCH_PROTOCOL_VERSION, Manifest, PageSpec, ParamBinding, RowSpec,
+    SPEC_VERSION,
 };
 use eario_data::{Computation, ComputationRegistry};
+use eario_runtime::hub_dir::HubDir;
 use eario_runtime::{App, AppOptions, ServerConfig, preferences};
 use serde_json::Value;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, LaunchError, Result};
+use crate::launch::{self, CHILD_ARGUMENT, Launch};
 use crate::state::State;
 use crate::widgets::Widget;
 
@@ -92,6 +95,7 @@ impl Derived {
 /// Describe the pages, then call [`Dashboard::run`].
 pub struct Dashboard {
     title: String,
+    version: Option<String>,
     pages: Vec<Page>,
     files: Vec<(DatasetId, PathBuf)>,
     /// The computations, in the order they were registered. Two sharing a
@@ -111,6 +115,7 @@ impl Dashboard {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
+            version: None,
             pages: Vec::new(),
             files: Vec::new(),
             computations: Vec::new(),
@@ -120,6 +125,14 @@ impl Dashboard {
             #[cfg(feature = "mcp")]
             mcp: false,
         }
+    }
+
+    /// Declares the version of the dashboard, shown by a hub and printed in
+    /// its manifest. Pass `env!("CARGO_PKG_VERSION")` to use the version of
+    /// the package. Without it the version is unknown.
+    pub fn version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
     }
 
     /// Adds a page. `build` receives the empty page and returns it filled.
@@ -314,12 +327,76 @@ impl Dashboard {
         Ok((app, config))
     }
 
+    /// What the executable says about itself to a hub, printed by
+    /// `--eario-manifest`: the title, its slug, the version given to
+    /// [`Dashboard::version`] and the versions of Eario and of the launch
+    /// contract.
+    pub fn manifest(&self) -> Manifest {
+        Manifest {
+            name: self.title.clone(),
+            slug: eario_core::slug(&self.title),
+            version: self.version.clone(),
+            eario_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol: LAUNCH_PROTOCOL_VERSION,
+            description: String::new(),
+        }
+    }
+
     /// Serves the dashboard and opens it in the browser. Returns when the
     /// user quits the application or presses Ctrl+C.
+    ///
+    /// The command line can ask for something else, without code from the
+    /// application (the launch contract with a hub):
+    ///
+    /// - `--eario-manifest`: prints [`Dashboard::manifest`] as JSON and
+    ///   returns, without loading any file.
+    /// - `--eario-install [--yes]`: copies this executable into the hub
+    ///   directory (`EARIO_HUB_DIR`, or `hub` in Eario's configuration
+    ///   directory) and records it in the hub's registry, after a
+    ///   confirmation in the terminal that `--yes` skips.
+    /// - `--eario-uninstall [--yes]`: removes that copy and its entry.
+    /// - `--eario-child <run file>`: serves for a hub, with no browser, no
+    ///   Ctrl+C handler and nothing written on standard output; logs to the
+    ///   hub's `logs/<slug>.log` and announces its address in the run file
+    ///   until it stops. Files given to [`Dashboard::load_file`] whose path is
+    ///   exactly one of these two arguments are not loaded.
+    ///
+    /// Install and uninstall are refused while the dashboard runs from the
+    /// hub. Other arguments are left to the application.
     pub fn run(self) -> Result<()> {
-        let (app, config) = self.build()?;
-        eario_runtime::run(app, config)?;
-        Ok(())
+        match launch::parse(std::env::args_os().skip(1))? {
+            Launch::Standalone => {
+                let (app, config) = self.build()?;
+                eario_runtime::run(app, config)?;
+                Ok(())
+            }
+            Launch::Manifest => Ok(launch::print_manifest(&self.manifest())?),
+            Launch::Install { yes } => Ok(launch::install(&self.manifest(), yes)?),
+            Launch::Uninstall { yes } => Ok(launch::uninstall(&self.manifest(), yes)?),
+            Launch::Child { run_file } => self.run_child(run_file),
+        }
+    }
+
+    /// Serves for a hub; see [`Dashboard::run`]. Logging starts first, so a
+    /// failure to build the application is in the log file the hub shows.
+    fn run_child(mut self, run_file: PathBuf) -> Result<()> {
+        let slug = eario_core::slug(&self.title);
+        let log_file =
+            HubDir::resolve().and_then(|hub| hub.log_path(&slug)).map_err(LaunchError::from)?;
+        eario_runtime::init_file_logging(&log_file)?;
+        tracing::info!(%slug, run_file = %run_file.display(), "starting for a hub");
+
+        // The application may have turned its own arguments into files.
+        self.files.retain(|(_, path)| {
+            path.as_os_str() != CHILD_ARGUMENT && path.as_os_str() != run_file.as_os_str()
+        });
+        let result = self.build().and_then(|(app, config)| {
+            eario_runtime::run_child(app, config, &run_file).map_err(Error::from)
+        });
+        if let Err(error) = &result {
+            tracing::error!(code = error.code(), %error, "the dashboard stopped on an error");
+        }
+        result
     }
 }
 
@@ -380,6 +457,17 @@ mod tests {
                 .row([scatter_chart(view.clone(), &x, &y).id("main-chart")])
                 .row([data_table(view)])
         })
+    }
+
+    #[test]
+    fn manifest_describes_the_dashboard() {
+        let manifest = explorer().version("1.2.3").manifest();
+        assert_eq!(manifest.name, "Explorer");
+        assert_eq!(manifest.slug, "explorer");
+        assert_eq!(manifest.version.as_deref(), Some("1.2.3"));
+        assert_eq!(manifest.eario_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.protocol, LAUNCH_PROTOCOL_VERSION);
+        assert_eq!(explorer().manifest().version, None);
     }
 
     #[test]

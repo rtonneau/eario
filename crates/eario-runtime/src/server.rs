@@ -3,13 +3,16 @@
 //! [`start`] binds the loopback interface and serves an [`App`]; it does not
 //! open a browser or install signal handlers, so it can be embedded in tests
 //! or, later, a desktop shell. [`run`] is the blocking entry point of an
-//! ordinary dashboard executable.
+//! ordinary dashboard executable, and [`run_child`] that of a dashboard
+//! started by a hub, which logs with [`init_file_logging`].
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use axum::Router;
+use eario_core::{LAUNCH_PROTOCOL_VERSION, RunFile};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -17,6 +20,8 @@ use tokio::task::JoinHandle;
 use crate::app::App;
 use crate::error::ServeError;
 use crate::http::{self, Security};
+use crate::hub_dir;
+use crate::log_file::{LOG_FILE_LIMIT, RotatingFile};
 
 /// Time given to open connections to finish once shutdown is requested.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -83,6 +88,11 @@ pub struct RunningServer {
 }
 
 impl RunningServer {
+    /// Socket address the server listens on, for example `127.0.0.1:49152`.
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+
     /// Address of the server, for example `http://127.0.0.1:49152`.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.address)
@@ -201,6 +211,75 @@ pub fn run(app: App, config: ServerConfig) -> Result<(), ServeError> {
         println!("{title} stopped.");
         Ok(())
     })
+}
+
+/// Serves `app` for a hub: the blocking entry point of a dashboard started
+/// with `--eario-child <run file>`.
+///
+/// Unlike [`run`], it prints nothing, opens no browser whatever `config`
+/// says, and installs no Ctrl+C handler. Once listening it writes the run file
+/// at `run_file` atomically; it returns after `POST /api/shutdown` (*Quit* in
+/// the interface, or the hub), having removed the run file. Call
+/// [`init_file_logging`] first, so its log goes to the hub's log file.
+pub fn run_child(app: App, config: ServerConfig, run_file: &Path) -> Result<(), ServeError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(ServeError::Runtime)?;
+    runtime.block_on(async move {
+        let server = start(app, ServerConfig { open_browser: false, ..config }).await?;
+        let record = RunFile {
+            protocol: LAUNCH_PROTOCOL_VERSION,
+            pid: std::process::id(),
+            address: server.address().to_string(),
+            token: server.token().to_owned(),
+            started_at: unix_seconds(),
+        };
+        if let Err(error) = hub_dir::write_run_file_at(run_file, &record) {
+            server.shutdown();
+            // The failure to report is the run file's; the server is only
+            // being stopped because nobody can reach it without that file.
+            let _ = server.wait().await;
+            return Err(error.into());
+        }
+        tracing::info!(run_file = %run_file.display(), address = %record.address, "run file written");
+
+        let served = server.wait().await;
+        let removed = hub_dir::remove_run_file_at(run_file);
+        tracing::info!(run_file = %run_file.display(), "stopped");
+        served?;
+        Ok(removed?)
+    })
+}
+
+/// Seconds since the Unix epoch; 0 when the clock is set before it, which
+/// only affects the start time the hub displays.
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// Installs a log subscriber writing to `path`, for a dashboard started by a
+/// hub, unless the application installed its own.
+///
+/// The file is appended to and rotated past 1 MiB: the full file is renamed
+/// with `.1` appended, replacing the previous one. `EARIO_LOG` sets the
+/// filter; the default is `info`, so the file shows when the server started
+/// and stopped.
+pub fn init_file_logging(path: &Path) -> Result<(), ServeError> {
+    let file = RotatingFile::open(path, LOG_FILE_LIMIT)
+        .map_err(|source| ServeError::LogFile { path: path.to_owned(), source })?;
+    let filter = tracing_subscriber::EnvFilter::try_from_env("EARIO_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // Fails when a subscriber is already installed, which is fine.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(Mutex::new(file))
+        .try_init();
+    Ok(())
 }
 
 /// Installs a log subscriber writing to standard error, unless the
