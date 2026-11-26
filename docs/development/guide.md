@@ -222,6 +222,26 @@ example. Regenerating produces identical files.
 
 Never add real data.
 
+## Minimum Rust version
+
+Eario supports Rust 1.95 and later: `rust-version` in `[workspace.package]`,
+inherited by every crate. 1.95 is the floor set by the dependencies
+(`sysinfo` declares it). The CI job "Rust (minimum version)" builds the
+workspace and runs its tests with exactly that toolchain; clippy and rustfmt
+run on stable only.
+
+To test it locally:
+
+```text
+rustup toolchain install 1.95 --profile minimal
+cargo +1.95 test --workspace --all-features
+```
+
+The version is raised only on purpose, in a pull request that says why: a
+dependency that needs a newer compiler, or a language feature worth it. A
+dependency upgrade that needs a newer compiler fails the job, which forces
+that decision.
+
 ## Dependency checks
 
 ```text

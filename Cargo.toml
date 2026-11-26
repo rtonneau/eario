@@ -16,6 +16,9 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+# Minimum supported Rust version, tested in CI. Raised only on purpose:
+# see docs/development/guide.md, "Minimum Rust version".
+rust-version = "1.95"
 repository = "https://github.com/rtonneau/eario"
 homepage = "https://github.com/rtonneau/eario"
 authors = ["The Eario contributors"]
