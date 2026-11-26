@@ -1,0 +1,77 @@
+{
+  "session_id": "2026-11-26__custom-rust-logic",
+  "feature_name": "custom-rust-logic",
+  "scratch_dir": ".scratch/tests/2026-11-26__custom-rust-logic",
+  "created_at": "2026-11-26T10:28:36.281Z",
+  "template_version": 2,
+  "history": [
+    {
+      "at": "2026-11-26T10:28:36.281Z",
+      "event": "session_started",
+      "phase": "grill",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T10:43:30.952Z",
+      "event": "auto_started",
+      "phase": "grill",
+      "detail": {
+        "target": "finish",
+        "steps": "write:grill → plan → write:plan → ship → finish"
+      }
+    },
+    {
+      "at": "2026-11-26T10:44:05.668Z",
+      "event": "grill_written",
+      "phase": "plan-not-started",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T10:44:05.798Z",
+      "event": "plan_started",
+      "phase": "plan",
+      "files": [
+        "02-plan/plan.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T10:45:46.149Z",
+      "event": "branch_created",
+      "phase": "plan",
+      "detail": {
+        "branch": "feat/custom-rust-logic",
+        "base": "main"
+      }
+    },
+    {
+      "at": "2026-11-26T10:45:46.210Z",
+      "event": "plan_written",
+      "phase": "ship",
+      "files": [
+        "02-plan/plan.md",
+        "02-plan/tickets/01-polars-lazy-reexport.md",
+        "02-plan/tickets/02-derived-dataset-contract.md",
+        "02-plan/tickets/03-computation-registry-and-evaluation.md",
+        "02-plan/tickets/04-mcp-derived-cache-only.md",
+        "02-plan/tickets/05-typed-state-and-builder.md",
+        "02-plan/tickets/06-new-input-kinds.md",
+        "02-plan/tickets/07-signal-lab-example.md",
+        "02-plan/tickets/08-m1-documentation.md"
+      ],
+      "detail": {
+        "tickets": 8
+      }
+    }
+  ],
+  "current_phase": "ship",
+  "git": {
+    "branch": "feat/custom-rust-logic",
+    "base_branch": "main",
+    "branch_created_at": "2026-11-26T10:45:46.149Z",
+    "pr_url": null
+  }
+}

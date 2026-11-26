@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "github": {
+    "enabled": true,
+    "detected_at": "2026-11-26T10:28:36.276Z"
+  },
+  "jev": {
+    "enabled": false,
+    "consent": false,
+    "detected_at": "2026-11-26T10:28:36.276Z"
+  }
+}
