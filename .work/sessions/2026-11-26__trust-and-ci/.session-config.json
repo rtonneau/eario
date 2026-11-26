@@ -1,0 +1,261 @@
+{
+  "session_id": "2026-11-26__trust-and-ci",
+  "feature_name": "trust-and-ci",
+  "scratch_dir": ".scratch/tests/2026-11-26__trust-and-ci",
+  "created_at": "2026-11-26T19:48:49.843Z",
+  "template_version": 2,
+  "history": [
+    {
+      "at": "2026-11-26T19:48:49.843Z",
+      "event": "session_started",
+      "phase": "grill",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T19:59:39.743Z",
+      "event": "handoff_saved",
+      "phase": "grill",
+      "files": [
+        "HANDOFF.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T20:07:18.654Z",
+      "event": "grill_written",
+      "phase": "plan-not-started",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T20:07:29.280Z",
+      "event": "auto_started",
+      "phase": "plan-not-started",
+      "detail": {
+        "target": "finish",
+        "steps": "plan → write:plan → ship → finish"
+      }
+    },
+    {
+      "at": "2026-11-26T20:07:29.460Z",
+      "event": "plan_started",
+      "phase": "plan",
+      "files": [
+        "02-plan/plan.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T20:08:12.039Z",
+      "event": "branch_created",
+      "phase": "plan",
+      "detail": {
+        "branch": "test/trust-and-ci",
+        "base": "main"
+      }
+    },
+    {
+      "at": "2026-11-26T20:08:12.087Z",
+      "event": "plan_written",
+      "phase": "ship",
+      "files": [
+        "02-plan/plan.md",
+        "02-plan/tickets/01-cargo-deny.md",
+        "02-plan/tickets/02-msrv.md",
+        "02-plan/tickets/03-playwright-e2e.md",
+        "02-plan/tickets/04-axe-accessibility.md",
+        "02-plan/tickets/05-xtask-bench.md",
+        "02-plan/tickets/06-m2-docs.md"
+      ],
+      "detail": {
+        "tickets": 6
+      }
+    },
+    {
+      "at": "2026-11-26T20:08:25.173Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/01-cargo-deny.md",
+        "03-implement/01-cargo-deny/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-cargo-deny"
+      }
+    },
+    {
+      "at": "2026-11-26T20:13:12.383Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/01-cargo-deny/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-cargo-deny",
+        "commit": "81a802a"
+      }
+    },
+    {
+      "at": "2026-11-26T20:13:18.362Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-msrv.md",
+        "03-implement/02-msrv/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-msrv"
+      }
+    },
+    {
+      "at": "2026-11-26T20:17:46.792Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-msrv/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-msrv",
+        "commit": "e5cb117"
+      }
+    },
+    {
+      "at": "2026-11-26T20:17:53.106Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/03-playwright-e2e.md",
+        "03-implement/03-playwright-e2e/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-playwright-e2e"
+      }
+    },
+    {
+      "at": "2026-11-26T20:23:47.351Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-playwright-e2e/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-playwright-e2e",
+        "commit": "ae1aaf8"
+      }
+    },
+    {
+      "at": "2026-11-26T20:23:53.786Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-axe-accessibility.md",
+        "03-implement/04-axe-accessibility/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-axe-accessibility"
+      }
+    },
+    {
+      "at": "2026-11-26T20:27:10.408Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-axe-accessibility/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-axe-accessibility",
+        "commit": "6557279"
+      }
+    },
+    {
+      "at": "2026-11-26T20:27:21.879Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/05-xtask-bench.md",
+        "03-implement/05-xtask-bench/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-xtask-bench"
+      }
+    },
+    {
+      "at": "2026-11-26T20:35:25.424Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/05-xtask-bench/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-xtask-bench",
+        "commit": "52a559f"
+      }
+    },
+    {
+      "at": "2026-11-26T20:35:31.142Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-m2-docs.md",
+        "03-implement/06-m2-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-m2-docs"
+      }
+    },
+    {
+      "at": "2026-11-26T20:41:40.511Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/06-m2-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-m2-docs",
+        "commit": "df47cfe"
+      }
+    },
+    {
+      "at": "2026-11-26T20:41:54.251Z",
+      "event": "changelog_written",
+      "phase": "finish-pending",
+      "detail": {
+        "bump": "minor"
+      }
+    },
+    {
+      "at": "2026-11-26T20:42:04.488Z",
+      "event": "pr_opened",
+      "phase": "finish-pending",
+      "detail": {
+        "url": "https://github.com/rtonneau/eario/pull/2"
+      }
+    },
+    {
+      "at": "2026-11-26T20:41:58.803Z",
+      "event": "session_finished",
+      "phase": "finished",
+      "files": [
+        "INDEX.md"
+      ]
+    }
+  ],
+  "current_phase": "finished",
+  "git": {
+    "branch": "test/trust-and-ci",
+    "base_branch": "main",
+    "branch_created_at": "2026-11-26T20:08:12.039Z",
+    "pr_url": "https://github.com/rtonneau/eario/pull/2"
+  },
+  "ship_mode": "inline",
+  "changelog": {
+    "bump": "minor",
+    "floor": "minor",
+    "reason": null,
+    "bullets": 5,
+    "path": ".work/changelog/2026-11-26__trust-and-ci.md",
+    "written_at": "2026-11-26T20:41:54.231Z"
+  },
+  "finished_at": "2026-11-26T20:41:58.803Z"
+}

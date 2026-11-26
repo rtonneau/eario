@@ -21,3 +21,7 @@ Thumbs.db
 # Local agent state
 .claude/
 .scratch/
+
+# Playwright output (frontend/)
+frontend/test-results/
+frontend/playwright-report/

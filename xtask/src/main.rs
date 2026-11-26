@@ -3,6 +3,7 @@
 //! Written in Rust so the same commands work on Windows and Linux without a
 //! shell. Run `cargo xtask help` for the list.
 
+mod bench;
 mod fixtures;
 
 use std::env;
@@ -22,8 +23,14 @@ Commands:
   fixtures     Regenerate the test data in fixtures/
   large-csv    Generate fixtures/generated/large.csv (1,000,000 rows, not tracked)
   test         Run the Rust and frontend tests
-  check        Run every check CI runs: format, lints, tests, type check
+  check        Run the CI checks: format, lints, tests, docs, type check
+               (not the browser tests, cargo deny or the minimum Rust version)
   dist         Build the frontend, then the data-explorer example in release mode
+  e2e          Build the frontend and the examples, then run the browser tests
+               (Playwright, Chromium). --prebuilt-frontend: keep the frontend
+               already in crates/eario-runtime/frontend-dist
+  bench        Run the benchmarks and write docs/benchmarks/<date>.md with the
+               results, the machine and the commit
   help         Show this message
 ";
 
@@ -38,6 +45,8 @@ fn main() -> ExitCode {
         "test" => test(),
         "check" => check(),
         "dist" => dist(),
+        "bench" => bench::run(),
+        "e2e" => e2e(env::args().skip(2).any(|argument| argument == "--prebuilt-frontend")),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
             Ok(())
@@ -61,9 +70,20 @@ fn repository_root() -> PathBuf {
 
 /// Runs a program and fails when it does.
 fn run(program: &str, arguments: &[&str], directory: &Path) -> TaskResult {
+    run_with_env(program, arguments, directory, &[])
+}
+
+/// Runs a program with extra environment variables and fails when it does.
+fn run_with_env(
+    program: &str,
+    arguments: &[&str],
+    directory: &Path,
+    variables: &[(&str, &Path)],
+) -> TaskResult {
     println!("> {program} {}", arguments.join(" "));
     let status = Command::new(program)
         .args(arguments)
+        .envs(variables.iter().copied())
         .current_dir(directory)
         .status()
         .map_err(|error| format!("could not start `{program}`: {error}"))?;
@@ -79,10 +99,11 @@ fn cargo(arguments: &[&str]) -> TaskResult {
     run(&cargo, arguments, &repository_root())
 }
 
+/// On Windows npm is a script, which `Command` only finds by its full name.
+const NPM: &str = if cfg!(windows) { "npm.cmd" } else { "npm" };
+
 fn npm(arguments: &[&str]) -> TaskResult {
-    // On Windows npm is a script, which `Command` only finds by its full name.
-    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    run(npm, arguments, &repository_root().join("frontend"))
+    run(NPM, arguments, &repository_root().join("frontend"))
 }
 
 fn setup() -> TaskResult {
@@ -114,6 +135,35 @@ fn check() -> TaskResult {
     cargo(&["doc", "--workspace", "--no-deps", "--all-features"])?;
     npm(&["run", "check"])?;
     npm(&["run", "test"])
+}
+
+/// Builds the examples the browser tests start, installs Chromium for
+/// Playwright if it is missing, and runs the tests in `frontend/e2e`.
+fn e2e(prebuilt_frontend: bool) -> TaskResult {
+    if prebuilt_frontend {
+        // Still needed: Playwright itself is a frontend dependency.
+        if !repository_root().join("frontend/node_modules").exists() {
+            setup()?;
+        }
+    } else {
+        frontend()?;
+    }
+    cargo(&["build", "--package", "data-explorer", "--package", "signal-lab"])?;
+    npm(&["exec", "--", "playwright", "install", "chromium"])?;
+    // Executables land in <target>/debug. A relative CARGO_TARGET_DIR is
+    // relative to the repository root, where cargo ran; `join` keeps an
+    // absolute one as is.
+    let target = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || repository_root().join("target"),
+        |directory| repository_root().join(directory),
+    );
+    let bin_dir = target.join("debug");
+    run_with_env(
+        NPM,
+        &["run", "e2e"],
+        &repository_root().join("frontend"),
+        &[("EARIO_E2E_BIN_DIR", &bin_dir)],
+    )
 }
 
 fn dist() -> TaskResult {

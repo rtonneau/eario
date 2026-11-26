@@ -26,7 +26,10 @@
     {#if data.type === 'data_table'}
       {@const table = data.table}
       {@const last = table.offset + table.rows.length}
-      <div class="scroll-x rows">
+      <!-- A scrolling region must be reachable by keyboard to scroll it (WCAG 2.1.1);
+           the region role and label make the focus stop meaningful. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div class="scroll-x rows" role="region" aria-label="Rows" tabindex="0">
         <table>
           <thead>
             <tr>

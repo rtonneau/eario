@@ -95,6 +95,9 @@ Implemented and tested:
 - A single executable with the frontend embedded; works offline.
 - Loopback-only server with Host and Origin validation and a session token.
 - Clear import and validation errors.
+- Verified in CI on Linux and Windows: tests, browser tests in Chromium with
+  an accessibility check (WCAG 2.1 AA, axe-core), dependency licences and
+  advisories (`cargo deny`), and the minimum supported Rust version, 1.95.
 
 Experimental:
 
@@ -113,7 +116,7 @@ assistant, a visual dashboard editor, a desktop shell. See the
 ## Quick start
 
 Eario is not published on crates.io yet. To try it from a checkout you need a
-stable [Rust toolchain](https://rustup.rs) and [Node.js](https://nodejs.org)
+[Rust toolchain](https://rustup.rs) (1.95 or later) and [Node.js](https://nodejs.org)
 (developed with version 25; it is only needed to build the frontend from
 source).
 
@@ -188,6 +191,7 @@ the [decision records](docs/adr/README.md).
 ```text
 cargo xtask setup      # install frontend dependencies
 cargo xtask check      # format, lints, tests, docs, frontend type check and tests
+cargo xtask e2e        # browser tests in Chromium, with accessibility checks
 cargo xtask help       # all commands
 ```
 
@@ -195,8 +199,8 @@ See the [development guide](docs/development/guide.md).
 
 ## Roadmap
 
-Custom Rust computations are done. The next milestones are continuous
-verification, standalone and hub operation, and import, chart and
+Custom Rust computations and continuous verification are done. The next
+milestones are standalone and hub operation, and import, chart and
 transformation types. The full list is in the
 [roadmap](docs/roadmap.md).
 

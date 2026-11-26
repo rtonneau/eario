@@ -23,7 +23,10 @@
         <div><dt>Columns</dt><dd>{formatNumber(info.columns.length)}</dd></div>
         <div><dt>File size</dt><dd>{formatBytes(info.source_bytes)}</dd></div>
       </dl>
-      <div class="scroll-x columns">
+      <!-- A scrolling region must be reachable by keyboard to scroll it (WCAG 2.1.1);
+           the region role and label make the focus stop meaningful. -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+      <div class="scroll-x columns" role="region" aria-label="Columns" tabindex="0">
         <table>
           <thead>
             <tr>

@@ -1,0 +1,58 @@
+# cargo-deny configuration: `cargo deny check`. Runs in CI ("Dependencies").
+# Policy and how to change it: docs/development/guide.md, "Dependency checks".
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities are always errors. An unmaintained crate is reported only when
+# a workspace crate depends on it directly: a transitive one is the upstream's
+# decision, and a hard failure would block every pull request on it.
+unmaintained = "workspace"
+yanked = "warn"
+ignore = [
+    # quick-xml 0.39 reaches the build only through polars -> polars-io (cloud,
+    # always on with polars-lazy) -> object_store, which parses XML responses
+    # of S3 and Azure. Eario never does network I/O and reads local files and
+    # bytes only, so this XML parser never runs. calamine (XLSX) uses
+    # quick-xml 0.42, which is fixed. Remove both entries once polars moves to
+    # an object_store that requires quick-xml >= 0.41.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.39 only via object_store cloud XML, never reached; see comment" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.39 only via object_store cloud XML, never reached; see comment" },
+]
+
+[licenses]
+# Exactly the licences in the dependency tree when the check was added
+# (2026-11-26). A dependency under any other licence fails until it is
+# reviewed and added here in a pull request that says why.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    # File-level copyleft: modified MPL files stay MPL; compatible with
+    # distributing a statically linked executable.
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies between workspace crates have no version wildcard problem.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

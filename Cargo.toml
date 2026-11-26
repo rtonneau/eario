@@ -16,6 +16,9 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+# Minimum supported Rust version, tested in CI. Raised only on purpose:
+# see docs/development/guide.md, "Minimum Rust version".
+rust-version = "1.95"
 repository = "https://github.com/rtonneau/eario"
 homepage = "https://github.com/rtonneau/eario"
 authors = ["The Eario contributors"]
@@ -66,6 +69,8 @@ http-body-util = "0.1"
 tempfile = "3"
 criterion = { version = "0.8", default-features = false }
 rust_xlsxwriter = "0.104"
+# xtask only: machine description of benchmark results. Already built for polars.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

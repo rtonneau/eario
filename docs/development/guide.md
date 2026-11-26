@@ -58,8 +58,10 @@ backtraces, and your own crates keep full debug information.
 | `cargo xtask fixtures` | Regenerates the files in `fixtures/`. |
 | `cargo xtask large-csv` | Writes `fixtures/generated/large.csv`, one million rows, not tracked by git. |
 | `cargo xtask test` | Runs Rust and frontend tests. |
-| `cargo xtask check` | Runs everything CI runs. |
+| `cargo xtask check` | Runs every CI check except the browser tests, `cargo deny` and the minimum-version build. |
 | `cargo xtask dist` | Builds the frontend, then `data-explorer` in release mode. |
+| `cargo xtask e2e` | Builds the frontend and the examples, then runs the browser tests in Chromium. |
+| `cargo xtask bench` | Runs the benchmarks and records the results in `docs/benchmarks/<date>.md`. |
 
 Environment variables read by an Eario application:
 
@@ -206,10 +208,35 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
 | Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
+| Browser tests | `frontend/e2e/*.spec.ts` | The real examples in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, and inputs that recompute a derived dataset in Rust. |
 
-There is no automated test in a real browser yet. During the bootstrap the
-dashboard was checked by hand with headless Chrome screenshots. Adding
-Playwright is a roadmap item.
+### Browser tests
+
+```text
+cargo xtask e2e
+```
+
+builds the frontend, then `data-explorer` and `signal-lab` in debug mode,
+installs Playwright's Chromium if it is missing, and runs the tests in
+`frontend/e2e` (`npm run e2e`). Each test starts its own example process with
+`EARIO_NO_BROWSER=1` on a port chosen by the system. It reads the address
+(with the session token) that the process prints, so the tests go through the
+same host, origin and token checks as a user. `--prebuilt-frontend` keeps the
+frontend already in `crates/eario-runtime/frontend-dist`; CI uses it.
+`EARIO_E2E_BIN_DIR` points the tests at other executables.
+
+Wait on what the user sees (roles, labels, `role="status"` text), never on
+a fixed delay. `cargo xtask check` does not run these tests, because they
+need a browser; CI runs them in the "End-to-end (Chromium)" job, on ubuntu.
+On Linux, Chromium's system libraries come from
+`npx playwright install --with-deps chromium`.
+
+Every visited state is also checked for accessibility with axe-core
+(`frontend/e2e/axe.ts`, `expectAccessible`): every WCAG 2.1 A and AA rule, in
+the light and the dark theme. Any violation fails the test, and no rule is
+disabled. The helper sets the theme on the root element directly, so the
+tests never write the user's saved preferences. Call `expectAccessible` after
+each new state a test reaches.
 
 ### Fixtures
 
@@ -222,6 +249,48 @@ example. Regenerating produces identical files.
 
 Never add real data.
 
+## Minimum Rust version
+
+Eario supports Rust 1.95 and later: `rust-version` in `[workspace.package]`,
+inherited by every crate. 1.95 is the floor set by the dependencies
+(`sysinfo` declares it). The CI job "Rust (minimum version)" builds the
+workspace and runs its tests with exactly that toolchain; clippy and rustfmt
+run on stable only.
+
+To test it locally:
+
+```text
+rustup toolchain install 1.95 --profile minimal
+cargo +1.95 test --workspace --all-features
+```
+
+The version is raised only on purpose, in a pull request that says why: a
+dependency that needs a newer compiler, or a language feature worth it. A
+dependency upgrade that needs a newer compiler fails the job, which forces
+that decision.
+
+## Dependency checks
+
+```text
+cargo install --locked cargo-deny   # once
+cargo deny check
+```
+
+checks every dependency against `deny.toml`. CI runs it in the
+"Dependencies" job.
+
+- **Licences:** an explicit allow-list. It holds the permissive licences in the
+  tree, plus MPL-2.0 (file-level copyleft, compatible with distributing an
+  executable). A dependency under any other licence fails the check. Add a
+  licence only in a pull request that names the crate and says why it is
+  acceptable.
+- **Advisories:** a RustSec vulnerability fails the check. An unmaintained
+  crate fails only when a workspace crate depends on it directly. A yanked
+  version is a warning. An `ignore` entry needs a reason that explains why the
+  vulnerable code is never reached, and a condition for removing it.
+- **Sources:** crates.io only; no git dependency or other registry.
+- **Bans:** duplicate versions of a crate are warnings, not errors.
+
 ## Benchmarks
 
 ```text
@@ -229,8 +298,20 @@ cargo bench -p eario-data
 ```
 
 covers CSV import, XLSX import, filtering, statistics, chart preparation and
-table-page serialization on generated tables. No result is recorded in the
-repository: numbers depend on the machine.
+table-page serialization on generated tables.
+
+```text
+cargo xtask bench
+```
+
+runs the same benchmarks, then writes `docs/benchmarks/YYYY-MM-DD.md`
+(UTC date; a second run on the same day replaces that day's file). The file
+holds each benchmark's mean and 95 % confidence interval, plus what the
+numbers depend on: CPU, cores, memory, operating system, compiler, and the
+commit (marked when the working tree had uncommitted changes). Results are
+recorded from a developer machine, never from CI: shared runners are too
+noisy to compare. Compare files only when they come from the same machine.
+Close other heavy programs while it runs.
 
 ## Release build
 
