@@ -95,6 +95,30 @@
         "ticket": "01-cargo-deny",
         "commit": "81a802a"
       }
+    },
+    {
+      "at": "2026-11-26T20:13:18.362Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-msrv.md",
+        "03-implement/02-msrv/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-msrv"
+      }
+    },
+    {
+      "at": "2026-11-26T20:17:46.792Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-msrv/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-msrv",
+        "commit": "e5cb117"
+      }
     }
   ],
   "current_phase": "ship",
