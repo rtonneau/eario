@@ -64,6 +64,30 @@
       "detail": {
         "tickets": 7
       }
+    },
+    {
+      "at": "2026-11-26T21:57:20.230Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/01-contract-and-hub-dir.md",
+        "03-implement/01-contract-and-hub-dir/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-hub-dir"
+      }
+    },
+    {
+      "at": "2026-11-26T22:06:33.732Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/01-contract-and-hub-dir/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-hub-dir",
+        "commit": "d1f35fb"
+      }
     }
   ],
   "current_phase": "ship",
@@ -72,5 +96,6 @@
     "base_branch": "main",
     "branch_created_at": "2026-11-26T21:57:12.706Z",
     "pr_url": null
-  }
+  },
+  "ship_mode": "delegate"
 }
