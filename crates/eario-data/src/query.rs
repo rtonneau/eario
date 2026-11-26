@@ -3,6 +3,8 @@
 //! Every function takes a table and returns either a derived table or one of
 //! the contract types of `eario-core`. None of them modifies its input.
 
+use std::collections::BTreeSet;
+
 use eario_core::{
     ChartData, ChartMark, ColumnInfo, ColumnKind, ColumnStats, Filter, FilterOp, FilterValue,
     StatsTable, TablePage,
@@ -248,6 +250,53 @@ pub fn statistics(frame: &DataFrame) -> Result<StatsTable, DataError> {
     Ok(StatsTable { rows: row_count(frame), columns })
 }
 
+/// The distinct values of a column, as [`distinct_values`] returns them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistinctValues {
+    /// The values, as text, sorted, at most the requested number.
+    pub values: Vec<String>,
+    /// Whether the column holds more distinct values than were returned.
+    pub truncated: bool,
+}
+
+/// Lists the distinct values of a column as text, sorted, keeping the first
+/// `limit` of them. Missing values are left out.
+///
+/// The column is deduplicated in its own type first. The distinct values of
+/// a column that is not text are then all converted to text, so that step
+/// grows with the number of distinct values. The sorted selection keeps at
+/// most `limit` values, as owned strings, whatever that number.
+pub fn distinct_values(
+    frame: &DataFrame,
+    name: &str,
+    limit: usize,
+) -> Result<DistinctValues, DataError> {
+    let distinct = find_column(frame, name)?.unique()?;
+    let text =
+        if distinct.dtype().is_string() { distinct } else { distinct.cast(&DataType::String)? };
+    let mut values = BTreeSet::new();
+    let mut truncated = false;
+    for value in text.str()?.iter().flatten() {
+        if values.len() < limit {
+            values.insert(value.to_owned());
+            continue;
+        }
+        // Full: only a value sorting before the last one kept enters, and
+        // pushes that one out.
+        let Some(last) = values.last() else {
+            truncated = true;
+            continue;
+        };
+        if value > last.as_str() {
+            truncated = true;
+        } else if value < last.as_str() && values.insert(value.to_owned()) {
+            values.pop_last();
+            truncated = true;
+        }
+    }
+    Ok(DistinctValues { values: values.into_iter().collect(), truncated })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +453,44 @@ mod tests {
         assert_eq!(counts.count, 4);
         assert_eq!(counts.null_count, 1);
         assert_eq!(counts.mean, Some(32.5));
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_values_are_sorted_text_without_missing_values() -> TestResult {
+        let frame = sample_frame()?;
+        let samples = distinct_values(&frame, "sample", 10)?;
+        assert_eq!(
+            samples,
+            DistinctValues { values: vec!["a".into(), "b".into(), "c".into()], truncated: false }
+        );
+        let counts = distinct_values(&frame, "counts", 10)?;
+        assert_eq!(counts.values, ["10", "30", "40", "50"]);
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_values_are_capped_and_report_the_truncation() -> TestResult {
+        let frame = sample_frame()?;
+        let first = distinct_values(&frame, "sample", 2)?;
+        assert_eq!(first, DistinctValues { values: vec!["a".into(), "b".into()], truncated: true });
+        let exact = distinct_values(&frame, "sample", 3)?;
+        assert!(!exact.truncated);
+
+        // The smallest values are kept whatever the order of the rows.
+        let descending =
+            DataFrame::new(5, vec![Column::new("name".into(), ["z", "y", "b", "z", "a"])])?;
+        let smallest = distinct_values(&descending, "name", 2)?;
+        assert_eq!(
+            smallest,
+            DistinctValues { values: vec!["a".into(), "b".into()], truncated: true }
+        );
+        let none = distinct_values(&descending, "name", 0)?;
+        assert_eq!(none, DistinctValues { values: Vec::new(), truncated: true });
+        assert!(matches!(
+            distinct_values(&frame, "missing", 3),
+            Err(DataError::UnknownColumn(name)) if name == "missing"
+        ));
         Ok(())
     }
 }

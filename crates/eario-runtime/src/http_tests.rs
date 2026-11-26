@@ -10,7 +10,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use eario_core::{
     ChartMark, ComponentId, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetId,
-    DatasetSlot, DatasetSource, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, StateKey, Theme,
+    DatasetSlot, DatasetSource, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, SelectOptions,
+    StateKey, Theme,
 };
 use eario_data::polars::prelude::Column;
 use eario_data::{Computation, ComputationRegistry, ComputeError, DataFrame, Dataset};
@@ -1108,6 +1109,307 @@ async fn inputs_are_reconciled_through_a_state_another_derived_dataset_reconcile
     assert_eq!(options["options"], json!(["a"]));
     let (status_code, data) = harness.get("/api/components/chart/data").await?;
     assert_eq!((status_code, &data["type"]), (StatusCode::OK, &json!("chart")), "{data}");
+    let (_, info) = harness.get("/api/app").await?;
+    assert_eq!((&info["revision"], &info["state"]), (&update["revision"], &update["state"]));
+    Ok(())
+}
+
+/// A dashboard with one input of each kind. `head` is derived: the first
+/// `bins` rows of `data`; the select `head_sample` offers its samples, so it
+/// is reconciled whenever `head` is recomputed.
+fn inputs_harness() -> Result<Harness, Box<dyn std::error::Error>> {
+    let data = DatasetId::new("data");
+    let head = DatasetId::new("head");
+    let component =
+        |id: &str, kind| ComponentSpec { id: ComponentId::new(id), title: None, span: 4, kind };
+    let state = StateKey::new;
+    let samples = |dataset: &DatasetId, default: Option<&str>| ComponentKind::Select {
+        label: "Sample".to_owned(),
+        state: state(if dataset == &data { "sample" } else { "head_sample" }),
+        options: SelectOptions::Column { dataset: dataset.clone(), column: "sample".to_owned() },
+        default: default.map(str::to_owned),
+    };
+    let items = vec![
+        component("import", ComponentKind::FileImport { dataset: data.clone() }),
+        component(
+            "bins",
+            ComponentKind::NumberInput {
+                label: "Rows".to_owned(),
+                state: state("bins"),
+                min: Some(1.0),
+                max: Some(200.0),
+                step: None,
+                integer: true,
+                default: 2.0,
+            },
+        ),
+        component(
+            "window",
+            ComponentKind::Slider {
+                label: "Window".to_owned(),
+                state: state("window"),
+                min: 0.0,
+                max: 1.0,
+                step: 0.1,
+                integer: false,
+                default: 0.3,
+            },
+        ),
+        component(
+            "title",
+            ComponentKind::TextInput {
+                label: "Title".to_owned(),
+                state: state("title"),
+                default: "Run".to_owned(),
+                max_length: 8,
+            },
+        ),
+        component(
+            "unit",
+            ComponentKind::Select {
+                label: "Unit".to_owned(),
+                state: state("unit"),
+                options: SelectOptions::Static(vec!["keV".to_owned(), "MeV".to_owned()]),
+                default: Some("keV".to_owned()),
+            },
+        ),
+        component("sample", samples(&data, Some("Mylar"))),
+        component("head_sample", samples(&head, None)),
+        component(
+            "outliers",
+            ComponentKind::Checkbox {
+                label: "Outliers".to_owned(),
+                state: state("outliers"),
+                default: false,
+            },
+        ),
+        component(
+            "head_table",
+            ComponentKind::DataTable { view: DataView::of(&head), page_size: 5 },
+        ),
+    ];
+    let spec = DashboardSpec {
+        spec_version: SPEC_VERSION,
+        title: "Inputs".to_owned(),
+        datasets: vec![
+            DatasetSlot {
+                id: data.clone(),
+                label: "Data".to_owned(),
+                source: DatasetSource::Imported,
+            },
+            DatasetSlot {
+                id: head,
+                label: "Head".to_owned(),
+                source: DatasetSource::Computed {
+                    function: "head".to_owned(),
+                    inputs: BTreeMap::from([("table".to_owned(), DataView::of(&data))]),
+                    params: BTreeMap::from([(
+                        "rows".to_owned(),
+                        ParamBinding::State(state("bins")),
+                    )]),
+                },
+            },
+        ],
+        pages: vec![PageSpec {
+            id: "main".to_owned(),
+            title: "Main".to_owned(),
+            rows: vec![RowSpec { items }],
+        }],
+    };
+    let mut computations = ComputationRegistry::default();
+    computations.register(
+        Computation::new("head", |ctx| {
+            let rows: u32 = ctx.param("rows")?;
+            Ok(ctx.input("table")?.head(Some(rows as usize)))
+        })
+        .input("table")
+        .param("rows"),
+    );
+    harness_for(spec, AppOptions { computations, ..AppOptions::default() })
+}
+
+#[tokio::test]
+async fn inputs_start_with_their_defaults() -> TestResult {
+    let harness = inputs_harness()?;
+    let (_, info) = harness.get("/api/app").await?;
+    assert_eq!(
+        info["state"],
+        json!({
+            "bins": 2,
+            "window": 0.3,
+            "title": "Run",
+            "unit": "keV",
+            "sample": null,
+            "head_sample": null,
+            "outliers": false,
+        })
+    );
+    assert!(info["state"]["bins"].is_i64(), "a whole number is stored as an integer");
+    assert_eq!(info["revision"], 0);
+
+    for id in ["bins", "window", "title", "outliers"] {
+        let (status_code, data) = harness.get(&format!("/api/components/{id}/data")).await?;
+        assert_eq!((status_code, data), (StatusCode::OK, json!({ "type": "input" })), "{id}");
+    }
+    let (_, unit) = harness.get("/api/components/unit/data").await?;
+    assert_eq!(unit, json!({ "type": "select", "options": ["keV", "MeV"], "truncated": false }));
+    let (_, sample) = harness.get("/api/components/sample/data").await?;
+    assert_eq!(sample["type"], "empty", "no dataset yet");
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_input_accepts_a_valid_value_and_rejects_an_invalid_one() -> TestResult {
+    let harness = inputs_harness()?;
+    harness.upload("measurements.csv", CSV).await?;
+    let (_, before) = harness.get("/api/app").await?;
+
+    let invalid = [
+        ("bins", json!(2.5), "2.5 is not a whole number"),
+        ("bins", json!(0), "0 is below the minimum 1"),
+        ("bins", json!(201), "201 is above the maximum 200"),
+        ("bins", json!("5"), "expected a number"),
+        ("window", json!(0.35), "not one of the accepted values"),
+        ("window", json!(1.5), "above the maximum 1"),
+        ("title", json!("far too long"), "12 characters, more than the maximum of 8"),
+        ("title", json!(3), "expected a text"),
+        ("unit", json!("eV"), "is not one of the options: keV, MeV"),
+        ("unit", Value::Null, "is not one of the options"),
+        ("sample", json!("Gold"), "`Gold` is not one of the values of `sample` on offer"),
+        ("sample", json!(1), "expected a value of `sample`"),
+        ("outliers", json!("yes"), "expected true or false"),
+    ];
+    for (key, value, reason) in invalid {
+        let (status_code, error) = harness.put(&format!("/api/state/{key}"), value).await?;
+        assert_eq!(status_code, StatusCode::UNPROCESSABLE_ENTITY, "{key}: {error}");
+        assert_eq!(error["code"], "invalid_state_value", "{key}");
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.starts_with(&format!("invalid value for state `{key}`")), "{message}");
+        assert!(message.contains(reason), "{key}: {message}");
+    }
+    let (_, after) = harness.get("/api/app").await?;
+    assert_eq!(after, before, "rejected values change nothing");
+
+    let valid = [
+        ("bins", json!(5), json!(5)),
+        ("bins", json!(30.0), json!(30)),
+        ("window", json!(0.7), json!(0.7)),
+        ("title", json!("Run 2"), json!("Run 2")),
+        ("unit", json!("MeV"), json!("MeV")),
+        ("sample", json!("Au-thin"), json!("Au-thin")),
+        ("sample", Value::Null, Value::Null),
+        ("outliers", json!(true), json!(true)),
+    ];
+    for (key, value, stored) in valid {
+        let (status_code, update) = harness.put(&format!("/api/state/{key}"), value).await?;
+        assert_eq!(status_code, StatusCode::OK, "{key}: {update}");
+        assert_eq!(update["state"][key], stored, "{key}");
+    }
+    let (_, info) = harness.get("/api/app").await?;
+    assert!(info["state"]["bins"].is_i64(), "30.0 is stored as the integer 30");
+    Ok(())
+}
+
+#[tokio::test]
+async fn select_from_a_column_offers_its_distinct_values_and_follows_the_dataset() -> TestResult {
+    let harness = inputs_harness()?;
+    let (_, update) = harness.upload("measurements.csv", CSV).await?;
+    assert_eq!(update["state"]["sample"], "Mylar", "the default, which is on offer");
+    assert!(ids(&update["invalidated"]).contains(&"sample"));
+    let (_, data) = harness.get("/api/components/sample/data").await?;
+    assert_eq!(
+        data,
+        json!({
+            "type": "select",
+            "options": ["Au-thin", "Mylar", "Si-ref", "Ta-backing"],
+            "truncated": false,
+        })
+    );
+
+    // The default is no longer on offer: the first value is chosen.
+    let (_, update) = harness.upload("other.csv", "sample,x\nZr,1\nCu,2\nZr,3\n").await?;
+    assert_eq!(update["state"]["sample"], "Cu");
+
+    // Without the column, nothing is on offer and the select says why.
+    let (_, update) = harness.upload("plain.csv", "x\n1\n").await?;
+    assert_eq!(update["state"]["sample"], Value::Null);
+    let (status_code, error) = harness.get("/api/components/sample/data").await?;
+    assert_eq!(
+        (status_code, &error["code"]),
+        (StatusCode::UNPROCESSABLE_ENTITY, &json!("unknown_column"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn select_from_a_column_accepts_no_value_before_its_dataset_has_a_table() -> TestResult {
+    let harness = inputs_harness()?;
+    let cases = [
+        ("sample", "no values are on offer until a table is loaded into dataset `data`"),
+        ("head_sample", "no values are on offer until dataset `head` is computed"),
+    ];
+    for (key, reason) in cases {
+        let (status_code, error) =
+            harness.put(&format!("/api/state/{key}"), json!("Mylar")).await?;
+        assert_eq!(status_code, StatusCode::UNPROCESSABLE_ENTITY, "{key}: {error}");
+        assert_eq!(error["code"], "invalid_state_value");
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.ends_with(reason), "{message}");
+        let (status_code, _) = harness.put(&format!("/api/state/{key}"), Value::Null).await?;
+        assert_eq!(status_code, StatusCode::OK, "{key}: null is accepted");
+    }
+    let (_, info) = harness.get("/api/app").await?;
+    assert_eq!((&info["state"]["sample"], &info["revision"]), (&Value::Null, &json!(0)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn select_from_a_column_offers_at_most_a_thousand_values() -> TestResult {
+    let harness = inputs_harness()?;
+    let values: Vec<String> = (0..=1000).map(|value| value.to_string()).collect();
+    let csv = format!("sample\n{}\n", values.join("\n"));
+    let (status_code, update) = harness.upload("many.csv", csv).await?;
+    assert_eq!(status_code, StatusCode::OK, "{update}");
+    let (_, data) = harness.get("/api/components/sample/data").await?;
+    assert_eq!(data["options"].as_array().map(Vec::len), Some(1000));
+    assert_eq!(data["truncated"], true);
+    // Sorted as text, "999" is the 1,001st value: it is not on offer.
+    assert_eq!(data["options"][999], "998");
+    let (status_code, error) = harness.put("/api/state/sample", json!("999")).await?;
+    assert_eq!(status_code, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    let (status_code, _) = harness.put("/api/state/sample", json!("998")).await?;
+    assert_eq!(status_code, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn select_bound_to_a_derived_dataset_is_reconciled_when_it_is_recomputed() -> TestResult {
+    let harness = inputs_harness()?;
+    // `head` holds the first 2 rows: Si-ref and Au-thin.
+    let (_, update) = harness.upload("measurements.csv", CSV).await?;
+    assert_eq!(update["state"]["head_sample"], "Au-thin", "the first value of `head`");
+    let (_, data) = harness.get("/api/components/head_sample/data").await?;
+    assert_eq!(data["options"], json!(["Au-thin", "Si-ref"]));
+
+    let (status_code, _) = harness.put("/api/state/head_sample", json!("Mylar")).await?;
+    assert_eq!(status_code, StatusCode::UNPROCESSABLE_ENTITY, "Mylar is not in `head`");
+    let (status_code, _) = harness.put("/api/state/head_sample", json!("Si-ref")).await?;
+    assert_eq!(status_code, StatusCode::OK);
+
+    // 4 rows: every sample is on offer, and the choice is kept.
+    let (_, update) = harness.put("/api/state/bins", json!(4)).await?;
+    assert_eq!(update["state"]["head_sample"], "Si-ref");
+    let (status_code, _) = harness.put("/api/state/head_sample", json!("Mylar")).await?;
+    assert_eq!(status_code, StatusCode::OK);
+
+    // 1 row: only Si-ref is left, so the select falls back to it.
+    let (_, update) = harness.put("/api/state/bins", json!(1)).await?;
+    assert_eq!(update["state"]["head_sample"], "Si-ref");
+    let invalidated = ids(&update["invalidated"]);
+    assert!(
+        invalidated.contains(&"head_sample") && invalidated.contains(&"head_table"),
+        "{invalidated:?}"
+    );
     let (_, info) = harness.get("/api/app").await?;
     assert_eq!((&info["revision"], &info["state"]), (&update["revision"], &update["state"]));
     Ok(())

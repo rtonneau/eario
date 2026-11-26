@@ -131,7 +131,8 @@ impl From<AppError> for Failure {
             | AppError::UndeclaredComputationInput { .. }
             | AppError::MissingComputationInput { .. }
             | AppError::UndeclaredComputationParameter { .. }
-            | AppError::MissingComputationParameter { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            | AppError::MissingComputationParameter { .. }
+            | AppError::SelectDependsOnItsState { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Data(_) => StatusCode::UNPROCESSABLE_ENTITY,
         };
         if status.is_server_error() {

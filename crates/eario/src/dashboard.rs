@@ -344,6 +344,11 @@ fn kind_name(kind: &ComponentKind) -> &'static str {
         ComponentKind::DataTable { .. } => "data-table",
         ComponentKind::Chart { .. } => "chart",
         ComponentKind::Statistics { .. } => "statistics",
+        ComponentKind::NumberInput { .. } => "number-input",
+        ComponentKind::Slider { .. } => "slider",
+        ComponentKind::TextInput { .. } => "text-input",
+        ComponentKind::Select { .. } => "select",
+        ComponentKind::Checkbox { .. } => "checkbox",
     }
 }
 

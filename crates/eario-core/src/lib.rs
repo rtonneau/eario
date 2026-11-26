@@ -26,5 +26,6 @@ pub use payload::{
 };
 pub use spec::{
     ChartMark, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, DatasetSource,
-    Dependency, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, SpecError,
+    Dependency, NumberConstraints, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, SelectOptions,
+    SpecError,
 };

@@ -13,7 +13,7 @@ use std::sync::Mutex;
 
 use eario_core::{
     ComponentKind, DashboardSpec, DataView, DatasetId, DatasetInfo, DatasetSource, Dependency,
-    DerivedStatus, ParamBinding, StateKey, StateMap,
+    DerivedStatus, ParamBinding, SelectOptions, StateKey, StateMap,
 };
 use eario_data::{
     Computation, ComputationRegistry, ComputeContext, ComputeError, DataFrame, query,
@@ -151,13 +151,14 @@ pub(crate) fn derived_slots(
             });
         };
         check_bindings(&id, computation, inputs, params)?;
-        let dependencies = spec
+        let dependencies: Vec<Dependency> = spec
             .dataset_dependencies(&id)
             .into_iter()
             .filter(|dependency| {
                 !matches!(dependency, Dependency::Dataset(input) if derived.contains(input))
             })
             .collect();
+        check_selects(spec, &id, &dependencies)?;
         slots.push(DerivedSlot {
             computation: computation.clone(),
             inputs: inputs.clone(),
@@ -211,9 +212,34 @@ fn check_bindings(
     Ok(())
 }
 
+/// Checks that no select offering the values of the derived dataset `id`
+/// writes a state entry among its `dependencies`: such a select gets no value
+/// until the dataset is computed, and the dataset waits for that value.
+fn check_selects(
+    spec: &DashboardSpec,
+    id: &DatasetId,
+    dependencies: &[Dependency],
+) -> Result<(), AppError> {
+    for component in spec.components() {
+        if let ComponentKind::Select {
+            state, options: SelectOptions::Column { dataset, .. }, ..
+        } = &component.kind
+            && dataset == id
+            && dependencies.contains(&Dependency::State(state.clone()))
+        {
+            return Err(AppError::SelectDependsOnItsState {
+                state: state.clone(),
+                dataset: id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The state entries written by the inputs bound to the dataset `id`: the
-/// column selections and filter inputs reading it, which are reconciled
-/// with its table when that table changes.
+/// column selections, filter inputs and selects offering the values of a
+/// column reading it, which are reconciled with its table when that table
+/// changes.
 pub(crate) fn bound_states<'a>(
     spec: &'a DashboardSpec,
     id: &'a DatasetId,
@@ -221,6 +247,7 @@ pub(crate) fn bound_states<'a>(
     spec.components().filter_map(move |component| match &component.kind {
         ComponentKind::ColumnSelect { dataset, state, .. }
         | ComponentKind::FilterInput { dataset, state }
+        | ComponentKind::Select { state, options: SelectOptions::Column { dataset, .. }, .. }
             if dataset == id =>
         {
             Some(state)
@@ -412,6 +439,50 @@ mod tests {
             let named = ["`table`", "`extra`", "`bins`"].iter().any(|name| message.contains(name));
             assert!(named, "{message}");
         }
+    }
+
+    /// `spec` with the parameter `bins` of `derived` bound to the state
+    /// `bins`, and a select writing `state` offering the values of `derived`.
+    fn select_on_derived(state: &str) -> DashboardSpec {
+        let mut spec = spec("summarize", &["table"], &["bins"]);
+        if let DatasetSource::Computed { params, .. } = &mut spec.datasets[1].source {
+            params.insert("bins".to_owned(), ParamBinding::State(StateKey::new("bins")));
+        }
+        let select = |id: &str, state: &str, options| ComponentSpec {
+            id: ComponentId::new(id),
+            title: None,
+            span: 6,
+            kind: ComponentKind::Select {
+                label: id.to_owned(),
+                state: StateKey::new(state),
+                options,
+                default: None,
+            },
+        };
+        let column =
+            SelectOptions::Column { dataset: DatasetId::new("derived"), column: "x".to_owned() };
+        let mut items = vec![select("choice", state, column)];
+        if state != "bins" {
+            // Something must write `bins`.
+            items.push(select("bins", "bins", SelectOptions::Static(vec!["1".to_owned()])));
+        }
+        spec.pages[0].rows.push(RowSpec { items });
+        spec
+    }
+
+    #[test]
+    fn select_offering_a_dataset_that_reads_its_own_state_is_rejected() {
+        let error = rejection(select_on_derived("bins"));
+        assert_eq!(error.as_ref().map(AppError::code), Some("select_depends_on_its_state"));
+        assert!(matches!(
+            &error,
+            Some(AppError::SelectDependsOnItsState { state, dataset })
+                if state.as_str() == "bins" && dataset.as_str() == "derived"
+        ));
+        let message = error.map(|error| error.to_string()).unwrap_or_default();
+        assert!(message.contains("state `bins`") && message.contains("`derived`"), "{message}");
+
+        assert!(rejection(select_on_derived("other")).is_none(), "another state is fine");
     }
 
     #[test]

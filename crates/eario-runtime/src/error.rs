@@ -108,6 +108,17 @@ pub enum AppError {
         /// The declared parameter nothing is bound to.
         parameter: String,
     },
+    /// A select offers the values of a derived dataset that depends on the
+    /// state the select writes, so it could never be given a first value.
+    #[error(
+        "the select writing state `{state}` offers values of derived dataset `{dataset}`, which depends on `{state}` itself; offer the values of a dataset that does not read `{state}`, or bind the computation to another state"
+    )]
+    SelectDependsOnItsState {
+        /// The state the select writes.
+        state: StateKey,
+        /// The derived dataset whose values it offers.
+        dataset: DatasetId,
+    },
     /// A computation returned an error or panicked. Nothing was cached, and
     /// the application keeps running.
     #[error("computation `{name}` failed: {message}")]
@@ -138,6 +149,7 @@ impl AppError {
             Self::MissingComputationInput { .. } => "missing_computation_input",
             Self::UndeclaredComputationParameter { .. } => "undeclared_computation_parameter",
             Self::MissingComputationParameter { .. } => "missing_computation_parameter",
+            Self::SelectDependsOnItsState { .. } => "select_depends_on_its_state",
             Self::Computation { .. } => "computation_failed",
         }
     }

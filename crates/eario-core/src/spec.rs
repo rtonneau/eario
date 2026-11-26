@@ -206,6 +206,229 @@ pub enum ComponentKind {
         /// Rows to summarize.
         view: DataView,
     },
+    /// Lets the user type a number.
+    NumberInput {
+        /// Label of the input.
+        label: String,
+        /// State entry receiving the number.
+        state: StateKey,
+        /// Smallest accepted value; any when absent.
+        min: Option<f64>,
+        /// Largest accepted value; any when absent.
+        max: Option<f64>,
+        /// Accepted values are `min` (0 when absent) plus a whole number of
+        /// steps; any value when absent.
+        step: Option<f64>,
+        /// Accept whole numbers only.
+        integer: bool,
+        /// Value the state entry starts with.
+        default: f64,
+    },
+    /// Lets the user choose a number between two bounds by dragging.
+    Slider {
+        /// Label of the input.
+        label: String,
+        /// State entry receiving the number.
+        state: StateKey,
+        /// Smallest value.
+        min: f64,
+        /// Largest value.
+        max: f64,
+        /// Distance between two neighbouring values, counted from `min`.
+        step: f64,
+        /// Accept whole numbers only.
+        integer: bool,
+        /// Value the state entry starts with.
+        default: f64,
+    },
+    /// Lets the user type a line of text.
+    TextInput {
+        /// Label of the input.
+        label: String,
+        /// State entry receiving the text.
+        state: StateKey,
+        /// Text the state entry starts with.
+        default: String,
+        /// Largest number of characters accepted.
+        max_length: u32,
+    },
+    /// Lets the user choose one value from a list.
+    Select {
+        /// Label of the input.
+        label: String,
+        /// State entry receiving the chosen value.
+        state: StateKey,
+        /// Where the values on offer come from.
+        options: SelectOptions,
+        /// Value chosen at start-up, or when the values on offer change and
+        /// no longer include the current one. When absent, or not on offer,
+        /// the first value is chosen.
+        default: Option<String>,
+    },
+    /// Lets the user switch an option on or off.
+    Checkbox {
+        /// Label of the input.
+        label: String,
+        /// State entry receiving `true` or `false`.
+        state: StateKey,
+        /// Value the state entry starts with.
+        default: bool,
+    },
+}
+
+/// The values a [`ComponentKind::Select`] offers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum SelectOptions {
+    /// A fixed list, in the order given.
+    Static(Vec<String>),
+    /// The distinct values of a column of a dataset, sorted, as text. The
+    /// list follows the dataset when it changes.
+    Column {
+        /// Dataset holding the column.
+        dataset: DatasetId,
+        /// Name of the column.
+        column: String,
+    },
+}
+
+/// The rules a number entered in a [`ComponentKind::NumberInput`] or a
+/// [`ComponentKind::Slider`] must follow. Not part of the specification:
+/// see [`ComponentKind::number_constraints`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NumberConstraints {
+    /// Smallest accepted value, if any.
+    pub min: Option<f64>,
+    /// Largest accepted value, if any.
+    pub max: Option<f64>,
+    /// Accepted values are `min` (0 when absent) plus a whole number of
+    /// steps, if set.
+    pub step: Option<f64>,
+    /// Accept whole numbers only.
+    pub integer: bool,
+}
+
+/// Largest magnitude up to which every whole number is an exact `f64`: 2^53.
+const MAX_EXACT_INTEGER: u64 = 1 << 53;
+
+/// `number` as an `i64`, if it is a whole number within ±2^53.
+fn exact_integer(number: f64) -> Option<i64> {
+    let exact = number.fract() == 0.0 && number.abs() <= MAX_EXACT_INTEGER as f64;
+    // Exact: whole and within ±2^53.
+    exact.then_some(number as i64)
+}
+
+impl NumberConstraints {
+    /// Checks a JSON value against the rules and returns it as the state
+    /// entry stores it: a whole number is stored as a JSON integer, so a
+    /// computation can read it as `i64` or `u32`.
+    ///
+    /// An integer input accepts whole numbers within ±2^53 only, so that
+    /// they compare exactly with its bounds.
+    ///
+    /// The error says what is wrong, in words meant for the user.
+    pub fn check(&self, value: &Value) -> Result<Value, String> {
+        let Some(number) = value.as_f64() else {
+            return Err(format!("expected a number, got {value}"));
+        };
+        if !number.is_finite() {
+            return Err(format!("{number} is not a finite number"));
+        }
+        // For an integer input, the value as an exact integer.
+        let whole = if self.integer {
+            if number.fract() != 0.0 {
+                return Err(format!("{number} is not a whole number"));
+            }
+            // Read exactly when the JSON text holds an integer: `number` may
+            // be rounded.
+            let too_large = match value.as_i64() {
+                Some(integer) => integer.unsigned_abs() > MAX_EXACT_INTEGER,
+                None => number.abs() > MAX_EXACT_INTEGER as f64,
+            };
+            if too_large {
+                return Err(format!(
+                    "{value} is too large for a whole-number input, which holds numbers within ±2^53"
+                ));
+            }
+            // Exact: `number` is whole and within ±2^53, so it fits an `i64`.
+            Some(value.as_i64().unwrap_or(number as i64))
+        } else {
+            None
+        };
+        if let Some(min) = self.min
+            && number < min
+        {
+            return Err(format!("{number} is below the minimum {min}"));
+        }
+        if let Some(max) = self.max
+            && number > max
+        {
+            return Err(format!("{number} is above the maximum {max}"));
+        }
+        if let Some(step) = self.step {
+            let base = self.min.unwrap_or(0.0);
+            let on_step = match (whole, exact_integer(base), exact_integer(step)) {
+                // Whole value, base and step: exact integer arithmetic. The
+                // operands are within ±2^53, so `i128` cannot overflow.
+                (Some(whole), Some(base), Some(step)) if step > 0 => {
+                    (i128::from(whole) - i128::from(base)) % i128::from(step) == 0
+                }
+                _ => {
+                    let nearest = base + ((number - base) / step).round() * step;
+                    // The distance to the nearest accepted value, in value
+                    // units, may only be the rounding of the arithmetic
+                    // above: a few units of the last place of the operands,
+                    // and a tiny share of a step for decimal steps such as
+                    // 0.1.
+                    let tolerance = 4.0 * f64::EPSILON * number.abs().max(base.abs()) + 1e-9 * step;
+                    (number - nearest).abs() <= tolerance
+                }
+            };
+            if !on_step {
+                return Err(format!(
+                    "{number} is not one of the accepted values, which go from {base} in steps of {step}"
+                ));
+            }
+        }
+        Ok(whole.map_or_else(|| value.clone(), Value::from))
+    }
+
+    /// Checks the rules themselves and the default value of the input.
+    fn check_definition(&self, default: f64) -> Result<(), String> {
+        let named = [("minimum", self.min), ("maximum", self.max), ("step", self.step)];
+        for (name, bound) in named.into_iter().filter_map(|(name, bound)| Some((name, bound?))) {
+            if !bound.is_finite() {
+                return Err(format!("the {name} is not a finite number"));
+            }
+            if !self.integer {
+                continue;
+            }
+            if bound.fract() != 0.0 {
+                return Err(format!(
+                    "the {name} {bound} is not a whole number, but the input accepts whole numbers only"
+                ));
+            }
+            if bound.abs() > MAX_EXACT_INTEGER as f64 {
+                return Err(format!(
+                    "the {name} {bound} is beyond ±2^53, the whole numbers an input holds exactly"
+                ));
+            }
+        }
+        if let (Some(min), Some(max)) = (self.min, self.max)
+            && min > max
+        {
+            return Err(format!("the minimum {min} is above the maximum {max}"));
+        }
+        if let Some(step) = self.step
+            && step <= 0.0
+        {
+            return Err(format!("the step {step} is not positive"));
+        }
+        self.check(&Value::from(default))
+            .map(drop)
+            .map_err(|reason| format!("the default {reason}"))
+    }
 }
 
 /// The rows a component reads: a dataset, optionally filtered.
@@ -263,7 +486,15 @@ impl ComponentKind {
     /// An input component does not depend on the state entry it writes.
     pub fn dependencies(&self) -> Vec<Dependency> {
         match self {
-            Self::Text { .. } => Vec::new(),
+            Self::Text { .. }
+            | Self::NumberInput { .. }
+            | Self::Slider { .. }
+            | Self::TextInput { .. }
+            | Self::Checkbox { .. } => Vec::new(),
+            Self::Select { options, .. } => match options {
+                SelectOptions::Static(_) => Vec::new(),
+                SelectOptions::Column { dataset, .. } => vec![Dependency::Dataset(dataset.clone())],
+            },
             Self::FileImport { dataset }
             | Self::DatasetInfo { dataset }
             | Self::ColumnSelect { dataset, .. }
@@ -281,8 +512,104 @@ impl ComponentKind {
     /// Returns the state entry the component writes, for input components.
     pub fn written_state(&self) -> Option<&StateKey> {
         match self {
-            Self::ColumnSelect { state, .. } | Self::FilterInput { state, .. } => Some(state),
+            Self::ColumnSelect { state, .. }
+            | Self::FilterInput { state, .. }
+            | Self::NumberInput { state, .. }
+            | Self::Slider { state, .. }
+            | Self::TextInput { state, .. }
+            | Self::Select { state, .. }
+            | Self::Checkbox { state, .. } => Some(state),
+            Self::Text { .. }
+            | Self::FileImport { .. }
+            | Self::DatasetInfo { .. }
+            | Self::DataTable { .. }
+            | Self::Chart { .. }
+            | Self::Statistics { .. } => None,
+        }
+    }
+
+    /// The value the state entry written by an input starts with: its
+    /// default. It is `null` for a column selection, a filter input and a
+    /// select offering the values of a column, which get a value when their
+    /// dataset is loaded, and for components that write no state.
+    ///
+    /// The kind is expected to have passed [`DashboardSpec::validate`].
+    pub fn initial_state(&self) -> Value {
+        match self {
+            Self::NumberInput { integer: true, default, .. }
+            | Self::Slider { integer: true, default, .. } => {
+                // Exact once validated: the default is whole and within ±2^53.
+                Value::from(*default as i64)
+            }
+            Self::NumberInput { default, .. } | Self::Slider { default, .. } => {
+                Value::from(*default)
+            }
+            Self::TextInput { default, .. } => Value::String(default.clone()),
+            Self::Checkbox { default, .. } => Value::Bool(*default),
+            Self::Select { options: SelectOptions::Static(values), default, .. } => default
+                .as_ref()
+                .filter(|default| values.contains(default))
+                .or_else(|| values.first())
+                .map_or(Value::Null, |value| Value::String(value.clone())),
+            _ => Value::Null,
+        }
+    }
+
+    /// The rules a number entered in a number input or a slider follows;
+    /// `None` for other components.
+    pub fn number_constraints(&self) -> Option<NumberConstraints> {
+        match self {
+            Self::NumberInput { min, max, step, integer, .. } => {
+                Some(NumberConstraints { min: *min, max: *max, step: *step, integer: *integer })
+            }
+            Self::Slider { min, max, step, integer, .. } => Some(NumberConstraints {
+                min: Some(*min),
+                max: Some(*max),
+                step: Some(*step),
+                integer: *integer,
+            }),
             _ => None,
+        }
+    }
+
+    /// Checks the definition of an input: its bounds, its default and its
+    /// options. The error says what is wrong.
+    fn check_input(&self) -> Result<(), String> {
+        match self {
+            Self::NumberInput { default, .. } | Self::Slider { default, .. } => {
+                match self.number_constraints() {
+                    Some(constraints) => constraints.check_definition(*default),
+                    None => Ok(()),
+                }
+            }
+            Self::TextInput { default, max_length, .. } => {
+                if *max_length == 0 {
+                    return Err("the maximum length is zero".to_owned());
+                }
+                let length = default.chars().count();
+                if length > *max_length as usize {
+                    return Err(format!(
+                        "the default has {length} characters, more than the maximum length {max_length}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::Select { options: SelectOptions::Static(values), default, .. } => {
+                if values.is_empty() {
+                    return Err("the list of options is empty".to_owned());
+                }
+                let mut seen = BTreeSet::new();
+                if let Some(duplicate) = values.iter().find(|value| !seen.insert(value.as_str())) {
+                    return Err(format!("option `{duplicate}` is listed more than once"));
+                }
+                match default {
+                    Some(default) if !values.contains(default) => {
+                        Err(format!("the default `{default}` is not one of the options"))
+                    }
+                    _ => Ok(()),
+                }
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -348,6 +675,15 @@ pub enum SpecError {
     /// A table shows zero rows per page.
     #[error("component `{0}` has a page size of zero")]
     ZeroPageSize(ComponentId),
+    /// An input is defined inconsistently: bounds in the wrong order, a
+    /// default it would reject, an empty list of options.
+    #[error("input `{component}` is not valid: {reason}")]
+    InvalidInput {
+        /// The input.
+        component: ComponentId,
+        /// What is wrong.
+        reason: String,
+    },
     /// An input of a derived dataset refers to a dataset slot that is not
     /// declared.
     #[error(
@@ -477,6 +813,10 @@ impl DashboardSpec {
             if let ComponentKind::DataTable { page_size: 0, .. } = component.kind {
                 return Err(SpecError::ZeroPageSize(component.id.clone()));
             }
+            component.kind.check_input().map_err(|reason| SpecError::InvalidInput {
+                component: component.id.clone(),
+                reason,
+            })?;
             if let Some(state) = component.kind.written_state()
                 && !written_states.insert(state)
             {
@@ -989,6 +1329,250 @@ mod tests {
         spec.datasets[1].source = derived("f", &[("in", DataView::of(&summary))], &[]);
         let dependencies = spec.dataset_dependencies(&summary);
         assert_eq!(dependencies, BTreeSet::from([Dependency::Dataset(summary)]));
+    }
+
+    fn bins() -> ComponentKind {
+        ComponentKind::NumberInput {
+            label: "Bins".to_owned(),
+            state: StateKey::new("bins"),
+            min: Some(1.0),
+            max: Some(200.0),
+            step: Some(1.0),
+            integer: true,
+            default: 20.0,
+        }
+    }
+
+    fn window() -> ComponentKind {
+        ComponentKind::Slider {
+            label: "Window".to_owned(),
+            state: StateKey::new("window"),
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+            integer: false,
+            default: 0.3,
+        }
+    }
+
+    fn group(options: SelectOptions, default: Option<&str>) -> ComponentKind {
+        ComponentKind::Select {
+            label: "Group".to_owned(),
+            state: StateKey::new("group"),
+            options,
+            default: default.map(str::to_owned),
+        }
+    }
+
+    fn colours() -> SelectOptions {
+        SelectOptions::Static(vec!["red".to_owned(), "green".to_owned()])
+    }
+
+    /// `sample_spec` plus one component of `kind`, named `input`.
+    fn with_input(kind: ComponentKind) -> DashboardSpec {
+        let mut spec = sample_spec();
+        spec.pages[0].rows[0].items.push(component("input", kind));
+        spec
+    }
+
+    fn input_rejection(kind: ComponentKind) -> String {
+        match with_input(kind).validate() {
+            Err(SpecError::InvalidInput { component, reason }) if component.as_str() == "input" => {
+                reason
+            }
+            other => format!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inputs_start_with_their_default_and_write_their_state() {
+        let text = ComponentKind::TextInput {
+            label: "Title".to_owned(),
+            state: StateKey::new("title"),
+            default: "Run 1".to_owned(),
+            max_length: 40,
+        };
+        let outliers = ComponentKind::Checkbox {
+            label: "Outliers".to_owned(),
+            state: StateKey::new("outliers"),
+            default: true,
+        };
+        let cases = [
+            (bins(), "bins", serde_json::json!(20)),
+            (window(), "window", serde_json::json!(0.3)),
+            (text, "title", serde_json::json!("Run 1")),
+            (outliers, "outliers", serde_json::json!(true)),
+            (group(colours(), Some("green")), "group", serde_json::json!("green")),
+            (group(colours(), None), "group", serde_json::json!("red")),
+        ];
+        for (kind, state, initial) in cases {
+            assert_eq!(kind.written_state().map(StateKey::as_str), Some(state));
+            assert_eq!(kind.initial_state(), initial, "{state}");
+            assert!(kind.dependencies().is_empty(), "{state}");
+            assert_eq!(with_input(kind).validate(), Ok(()), "{state}");
+        }
+    }
+
+    #[test]
+    fn select_from_a_column_depends_on_its_dataset_and_starts_unset() {
+        let kind = group(
+            SelectOptions::Column { dataset: DatasetId::new("data"), column: "sample".to_owned() },
+            None,
+        );
+        assert_eq!(kind.dependencies(), [Dependency::Dataset(DatasetId::new("data"))]);
+        assert_eq!(kind.initial_state(), Value::Null);
+        assert_eq!(with_input(kind.clone()).validate(), Ok(()));
+
+        let mut spec = with_input(kind);
+        spec.datasets.clear();
+        assert!(matches!(spec.validate(), Err(SpecError::UnknownDataset { .. })));
+    }
+
+    #[test]
+    fn select_options_are_tagged() -> Result<(), serde_json::Error> {
+        assert_eq!(
+            serde_json::to_value(colours())?,
+            serde_json::json!({ "type": "static", "value": ["red", "green"] })
+        );
+        let column =
+            SelectOptions::Column { dataset: DatasetId::new("data"), column: "sample".to_owned() };
+        assert_eq!(
+            serde_json::to_value(&column)?,
+            serde_json::json!({ "type": "column", "value": { "dataset": "data", "column": "sample" } })
+        );
+        let spec = with_input(group(column, Some("Si")));
+        let restored: DashboardSpec = serde_json::from_str(&serde_json::to_string(&spec)?)?;
+        assert_eq!(restored, spec);
+        Ok(())
+    }
+
+    #[test]
+    fn inconsistent_input_definitions_are_rejected_with_a_reason() {
+        let number = |min: f64, max: f64, step: Option<f64>, integer: bool, default: f64| {
+            ComponentKind::NumberInput {
+                label: "N".to_owned(),
+                state: StateKey::new("n"),
+                min: Some(min),
+                max: Some(max),
+                step,
+                integer,
+                default,
+            }
+        };
+        let cases = [
+            (number(5.0, 1.0, None, false, 3.0), "the minimum 5 is above the maximum 1"),
+            (number(1.0, 200.0, None, false, 300.0), "the default 300 is above the maximum 200"),
+            (number(0.0, 1.0, Some(0.0), false, 0.0), "the step 0 is not positive"),
+            (number(0.5, 10.0, None, true, 1.0), "the minimum 0.5 is not a whole number"),
+            (number(0.0, 10.0, Some(2.0), true, 3.0), "the default 3 is not one of the accepted"),
+            (number(0.0, f64::INFINITY, None, false, 1.0), "the maximum is not a finite number"),
+            (
+                number(-1e16, 10.0, None, true, 1.0),
+                "the minimum -10000000000000000 is beyond ±2^53, the whole numbers an input holds exactly",
+            ),
+            (
+                ComponentKind::TextInput {
+                    label: "T".to_owned(),
+                    state: StateKey::new("t"),
+                    default: "too long".to_owned(),
+                    max_length: 3,
+                },
+                "the default has 8 characters, more than the maximum length 3",
+            ),
+            (
+                ComponentKind::TextInput {
+                    label: "T".to_owned(),
+                    state: StateKey::new("t"),
+                    default: String::new(),
+                    max_length: 0,
+                },
+                "the maximum length is zero",
+            ),
+            (group(SelectOptions::Static(Vec::new()), None), "the list of options is empty"),
+            (group(colours(), Some("blue")), "the default `blue` is not one of the options"),
+            (
+                group(SelectOptions::Static(vec!["a".to_owned(), "a".to_owned()]), None),
+                "option `a` is listed more than once",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let reason = input_rejection(kind);
+            assert!(reason.starts_with(expected), "{reason}");
+        }
+        let message =
+            SpecError::InvalidInput { component: ComponentId::new("bins"), reason: "x".to_owned() };
+        assert_eq!(message.to_string(), "input `bins` is not valid: x");
+    }
+
+    #[test]
+    fn number_constraints_check_range_step_and_integrality() {
+        let constraints = bins().number_constraints();
+        let check = |value: Value| constraints.map(|constraints| constraints.check(&value));
+        assert_eq!(check(serde_json::json!(30)), Some(Ok(serde_json::json!(30))));
+        assert_eq!(check(serde_json::json!(30.0)), Some(Ok(serde_json::json!(30))), "normalized");
+        assert_eq!(
+            check(serde_json::json!(2.5)),
+            Some(Err("2.5 is not a whole number".to_owned()))
+        );
+        assert_eq!(check(serde_json::json!(0)), Some(Err("0 is below the minimum 1".to_owned())));
+        assert_eq!(
+            check(serde_json::json!(201)),
+            Some(Err("201 is above the maximum 200".to_owned()))
+        );
+        assert_eq!(
+            check(serde_json::json!("20")),
+            Some(Err(r#"expected a number, got "20""#.to_owned()))
+        );
+
+        let whole = NumberConstraints { min: None, max: None, step: None, integer: true };
+        assert_eq!(
+            whole.check(&serde_json::json!(1.5)),
+            Err("1.5 is not a whole number".to_owned())
+        );
+        let exact = 1_i64 << 53;
+        assert_eq!(whole.check(&serde_json::json!(exact)), Ok(serde_json::json!(exact)));
+        assert_eq!(whole.check(&serde_json::json!(-exact)), Ok(serde_json::json!(-exact)));
+        for beyond in
+            [serde_json::json!(exact + 1), serde_json::json!(i64::MAX), serde_json::json!(u64::MAX)]
+        {
+            let error = whole.check(&beyond).err().unwrap_or_default();
+            assert!(error.contains("is too large for a whole-number input"), "{beyond}: {error}");
+        }
+        assert!(whole.check(&serde_json::json!(1e300)).is_err());
+        // 2^53 + 1 reads as 2^53 in `f64`: without the check it would pass
+        // a maximum of 2^53.
+        let bounded = NumberConstraints { max: Some(exact as f64), ..whole };
+        assert!(bounded.check(&serde_json::json!(exact + 1)).is_err());
+
+        let decimal = window().number_constraints();
+        let check = |value: f64| decimal.map(|decimal| decimal.check(&Value::from(value)).is_ok());
+        assert_eq!(check(0.7), Some(true), "0.7 is 7 steps of 0.1 despite rounding");
+        assert_eq!(check(0.35), Some(false));
+
+        // The tolerance is in value units, not in steps.
+        let units = NumberConstraints { min: None, max: None, step: Some(1.0), integer: false };
+        assert!(units.check(&serde_json::json!(600_000_000.5)).is_err());
+        assert!(units.check(&serde_json::json!(600_000_000.0)).is_ok());
+        let tenths = NumberConstraints { min: Some(1e9), step: Some(0.1), ..units };
+        assert!(tenths.check(&serde_json::json!(1_000_000_000.3)).is_ok());
+        assert!(tenths.check(&serde_json::json!(1_000_000_000.35)).is_err());
+
+        // Integer inputs check the step exactly, whatever its size.
+        let integer = |step: f64| NumberConstraints {
+            min: Some(0.0),
+            max: None,
+            step: Some(step),
+            integer: true,
+        };
+        assert!(integer(1e9).check(&serde_json::json!(3_000_000_001_i64)).is_err());
+        assert!(integer(1e9).check(&serde_json::json!(3_000_000_000_i64)).is_ok());
+        assert!(integer(3.0).check(&serde_json::json!(9_007_199_254_740_991_i64)).is_err());
+        assert_eq!(
+            integer(3.0).check(&serde_json::json!(9_007_199_254_740_990_i64)),
+            Ok(serde_json::json!(9_007_199_254_740_990_i64))
+        );
+        assert_eq!(bins().number_constraints().map(|c| c.integer), Some(true));
+        assert_eq!(ComponentKind::Text { text: String::new() }.number_constraints(), None);
     }
 
     #[test]

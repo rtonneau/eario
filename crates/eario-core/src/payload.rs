@@ -15,7 +15,10 @@ use crate::spec::{ChartMark, DashboardSpec};
 /// The application state: one JSON value per state entry.
 ///
 /// A column selection holds a column name or `null`; a filter input holds a
-/// [`Filter`](crate::Filter) or `null`.
+/// [`Filter`](crate::Filter) or `null`; a number input or a slider holds a
+/// number, a text input a string, a checkbox a boolean, and a select one of
+/// its options (or `null` while a select offering the values of a column has
+/// no dataset).
 pub type StateMap = BTreeMap<StateKey, Value>;
 
 /// Everything the frontend needs to render a dashboard on start-up.
@@ -120,6 +123,17 @@ pub enum ComponentData {
     Statistics {
         /// One row of statistics per numeric column.
         stats: StatsTable,
+    },
+    /// Data of a number input, a slider, a text input or a checkbox: none.
+    /// What they accept is in the specification.
+    Input,
+    /// Data of a select: the values on offer.
+    Select {
+        /// Values the user can choose from, in order.
+        options: Vec<String>,
+        /// Whether the column holds more distinct values than are offered;
+        /// only the first ones, in sorted order, are.
+        truncated: bool,
     },
 }
 
@@ -276,6 +290,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ComponentData::Text)?,
             serde_json::json!({ "type": "text" })
+        );
+        let select = ComponentData::Select { options: vec!["Si".to_owned()], truncated: true };
+        assert_eq!(
+            serde_json::to_value(&select)?,
+            serde_json::json!({ "type": "select", "options": ["Si"], "truncated": true })
         );
         Ok(())
     }

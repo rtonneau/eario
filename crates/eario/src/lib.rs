@@ -59,7 +59,7 @@ pub use eario_data::polars;
 pub use eario_runtime as runtime;
 pub use error::{Error, Result};
 pub use state::{State, filtered};
-pub use widgets::Widget;
+pub use widgets::{NumberType, Widget};
 
 /// Everything an ordinary dashboard needs, in one import.
 pub mod prelude {
@@ -67,8 +67,9 @@ pub mod prelude {
     pub use eario_data::{Computation, ComputeContext, ComputeError};
 
     pub use crate::widgets::{
-        Widget, column_select, data_table, dataset_info, file_import, filter_input, line_chart,
-        numeric_column_select, scatter_chart, statistics, text,
+        Widget, checkbox, column_select, data_table, dataset_info, file_import, filter_input,
+        line_chart, number_input, numeric_column_select, scatter_chart, select, select_from_column,
+        slider, statistics, text, text_input,
     };
     pub use crate::{Dashboard, Page, Result, State, filtered};
 }
