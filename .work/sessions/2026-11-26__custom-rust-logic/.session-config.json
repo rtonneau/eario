@@ -182,6 +182,30 @@
         "ticket": "04-mcp-derived-cache-only",
         "commit": "3ec0627"
       }
+    },
+    {
+      "at": "2026-11-26T14:12:47.124Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/05-typed-state-and-builder.md",
+        "03-implement/05-typed-state-and-builder/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-typed-state-and-builder"
+      }
+    },
+    {
+      "at": "2026-11-26T14:54:03.218Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/05-typed-state-and-builder/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-typed-state-and-builder",
+        "commit": "b855fa8"
+      }
     }
   ],
   "current_phase": "ship",
