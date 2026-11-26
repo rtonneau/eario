@@ -33,6 +33,8 @@ use crate::error::AppError;
 use crate::preferences::PreferenceStore;
 
 /// Reason shown by components whose dataset has nothing loaded yet.
+const NOT_COMPUTED: &str =
+    "this derived dataset is computed when the dashboard displays it, not on request.";
 const NO_DATASET: &str = "No dataset loaded yet.";
 
 /// Settings of an [`App`] that are not part of the dashboard specification.
@@ -113,6 +115,15 @@ impl<T> Outcome<T> {
             Self::Empty(reason) => Ok(ComponentData::Empty { reason }),
         }
     }
+}
+
+/// Whether reading a derived dataset may compute it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Compute a derived dataset whose cached table is not up to date.
+    Compute,
+    /// Read the cached table only; a derived dataset without one is empty.
+    CachedOnly,
 }
 
 /// What reconciliation does with a filter input whose dataset changed.
@@ -206,8 +217,25 @@ impl App {
     /// computed if its cached table is not up to date.
     pub fn dataset_frame(&self, id: &DatasetId) -> Result<DataFrame, AppError> {
         self.check_slot(id)?;
-        match self.slot_table(id)? {
+        match self.slot_table(id, Access::Compute)? {
             Outcome::Ready(frame) => Ok(frame),
+            Outcome::Empty(_) => Err(AppError::DatasetNotLoaded(id.clone())),
+        }
+    }
+
+    /// Returns the table of a slot, unfiltered, without computing anything.
+    ///
+    /// For a derived dataset this is the cached table; when it is not
+    /// computed for the current state the result is
+    /// [`AppError::NotComputed`]. Agents read through this method, so a
+    /// read never runs a computation.
+    pub fn cached_dataset_frame(&self, id: &DatasetId) -> Result<DataFrame, AppError> {
+        self.check_slot(id)?;
+        match self.slot_table(id, Access::CachedOnly)? {
+            Outcome::Ready(frame) => Ok(frame),
+            Outcome::Empty(_) if self.derived_slot(id).is_some() => {
+                Err(AppError::NotComputed(id.clone()))
+            }
             Outcome::Empty(_) => Err(AppError::DatasetNotLoaded(id.clone())),
         }
     }
@@ -468,7 +496,7 @@ impl App {
         if !value.is_null() {
             // Only computes a derived dataset whose cached table is stale, so
             // the check below can read it; its outcome is read again there.
-            self.slot_table(dataset)?;
+            self.slot_table(dataset, Access::Compute)?;
         }
 
         let mut session = self.write();
@@ -493,30 +521,54 @@ impl App {
     ///
     /// `offset` is the first row of the requested page; only tables use it.
     pub fn component_data(&self, id: &ComponentId, offset: u32) -> Result<ComponentData, AppError> {
+        self.component_data_with(id, offset, Access::Compute)
+    }
+
+    /// Like [`component_data`](Self::component_data), but never computes a
+    /// derived dataset: a component reading one without a cached table gets
+    /// [`ComponentData::Empty`] saying it is not computed yet.
+    pub fn cached_component_data(
+        &self,
+        id: &ComponentId,
+        offset: u32,
+    ) -> Result<ComponentData, AppError> {
+        self.component_data_with(id, offset, Access::CachedOnly)
+    }
+
+    fn component_data_with(
+        &self,
+        id: &ComponentId,
+        offset: u32,
+        access: Access,
+    ) -> Result<ComponentData, AppError> {
         let component =
             self.inner.spec.component(id).ok_or_else(|| AppError::UnknownComponent(id.clone()))?;
 
         match &component.kind {
             ComponentKind::Text { .. } => Ok(ComponentData::Text),
             ComponentKind::FileImport { dataset } | ComponentKind::DatasetInfo { dataset } => {
-                self.dataset_info(dataset)?.show(|info| Ok(ComponentData::Dataset { info }))
+                self.dataset_info(dataset, access)?.show(|info| Ok(ComponentData::Dataset { info }))
             }
             ComponentKind::ColumnSelect { dataset, numeric_only, .. } => {
-                self.slot_table(dataset)?.show(|frame| {
+                self.slot_table(dataset, access)?.show(|frame| {
                     Ok(ComponentData::ColumnSelect {
                         options: column_options(&frame, *numeric_only),
                     })
                 })
             }
-            ComponentKind::FilterInput { dataset, .. } => self.slot_table(dataset)?.show(|frame| {
-                Ok(ComponentData::FilterInput { columns: query::column_infos(&frame) })
-            }),
-            ComponentKind::DataTable { view, page_size } => self.resolve_view(view)?.show(|rows| {
-                let table =
-                    query::table_page(&rows.frame, offset, *page_size, rows.unfiltered_rows)?;
-                Ok(ComponentData::DataTable { table })
-            }),
-            ComponentKind::Statistics { view } => self.resolve_view(view)?.show(|rows| {
+            ComponentKind::FilterInput { dataset, .. } => {
+                self.slot_table(dataset, access)?.show(|frame| {
+                    Ok(ComponentData::FilterInput { columns: query::column_infos(&frame) })
+                })
+            }
+            ComponentKind::DataTable { view, page_size } => {
+                self.resolve_view(view, access)?.show(|rows| {
+                    let table =
+                        query::table_page(&rows.frame, offset, *page_size, rows.unfiltered_rows)?;
+                    Ok(ComponentData::DataTable { table })
+                })
+            }
+            ComponentKind::Statistics { view } => self.resolve_view(view, access)?.show(|rows| {
                 Ok(ComponentData::Statistics { stats: query::statistics(&rows.frame)? })
             }),
             ComponentKind::Chart { view, mark, x, y, max_points } => {
@@ -527,7 +579,7 @@ impl App {
                     };
                     (column(x), column(y))
                 };
-                self.resolve_view(view)?.show(|rows| {
+                self.resolve_view(view, access)?.show(|rows| {
                     let (Some(x_column), Some(y_column)) = (x_column, y_column) else {
                         return Ok(ComponentData::Empty {
                             reason: "Choose two numeric columns to plot.".to_owned(),
@@ -542,8 +594,16 @@ impl App {
     }
 
     /// Describes the dataset of a slot, computing a derived one if needed.
-    fn dataset_info(&self, id: &DatasetId) -> Result<Outcome<DatasetInfo>, AppError> {
+    fn dataset_info(
+        &self,
+        id: &DatasetId,
+        access: Access,
+    ) -> Result<Outcome<DatasetInfo>, AppError> {
         if let Some(slot) = self.derived_slot(id) {
+            if access == Access::CachedOnly {
+                let cached = self.current_frame(&self.read(), id).cloned();
+                return Ok(Outcome::Ready(slot.info(cached.as_ref())));
+            }
             return Ok(self.derived_table(slot)?.map(|frame| slot.info(Some(&frame))));
         }
         let info = self.read().datasets.get(id).map(|dataset| dataset.info(id));
@@ -565,8 +625,15 @@ impl App {
     }
 
     /// The table of a slot, computing a derived dataset if needed.
-    fn slot_table(&self, id: &DatasetId) -> Result<Outcome<DataFrame>, AppError> {
+    fn slot_table(&self, id: &DatasetId, access: Access) -> Result<Outcome<DataFrame>, AppError> {
         if let Some(slot) = self.derived_slot(id) {
+            if access == Access::CachedOnly {
+                let cached = self.current_frame(&self.read(), id).cloned();
+                return Ok(cached.map_or_else(
+                    || Outcome::Empty(format!("Not computed yet: {NOT_COMPUTED}")),
+                    Outcome::Ready,
+                ));
+            }
             return self.derived_table(slot);
         }
         let frame = self.read().datasets.get(id).map(|dataset| dataset.frame().clone());
@@ -600,7 +667,7 @@ impl App {
         };
         let mut inputs = BTreeMap::new();
         for (name, view) in &slot.inputs {
-            match self.resolve_view(view)? {
+            match self.resolve_view(view, Access::Compute)? {
                 Outcome::Ready(rows) => inputs.insert(name.clone(), rows.frame),
                 Outcome::Empty(reason) => return Ok(Outcome::Empty(reason)),
             };
@@ -651,8 +718,8 @@ impl App {
     /// Produces the rows of a view, or why there are none.
     ///
     /// The session lock is released before the filter runs.
-    fn resolve_view(&self, view: &DataView) -> Result<Outcome<ViewRows>, AppError> {
-        let frame = match self.slot_table(&view.dataset)? {
+    fn resolve_view(&self, view: &DataView, access: Access) -> Result<Outcome<ViewRows>, AppError> {
+        let frame = match self.slot_table(&view.dataset, access)? {
             Outcome::Ready(frame) => frame,
             Outcome::Empty(reason) => return Ok(Outcome::Empty(reason)),
         };

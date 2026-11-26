@@ -46,6 +46,12 @@ pub enum AppError {
     /// A file or a table was sent to a dataset slot that a computation fills.
     #[error("dataset `{0}` is derived by a computation; nothing can be imported or loaded into it")]
     DerivedDataset(DatasetId),
+    /// A read that must not compute asked for a derived dataset whose table
+    /// is not computed for the current state.
+    #[error(
+        "derived dataset `{0}` is not computed yet; the dashboard computes it when a component displays it"
+    )]
+    NotComputed(DatasetId),
     /// A derived dataset names a computation the application did not register.
     #[error(
         "dataset `{dataset}` is derived by computation `{computation}`, which is not registered"
@@ -126,6 +132,7 @@ impl AppError {
             Self::InvalidStateValue { .. } => "invalid_state_value",
             Self::Preferences { .. } => "preferences_not_stored",
             Self::DerivedDataset(_) => "derived_dataset",
+            Self::NotComputed(_) => "dataset_not_computed",
             Self::UnknownComputation { .. } => "unknown_computation",
             Self::UndeclaredComputationInput { .. } => "undeclared_computation_input",
             Self::MissingComputationInput { .. } => "missing_computation_input",

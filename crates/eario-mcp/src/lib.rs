@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use eario_core::{ComponentId, DatasetId};
+use eario_core::{ComponentId, DatasetId, DerivedStatus};
 use eario_data::query;
 use eario_runtime::{App, AppError};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -28,7 +28,9 @@ pub const MAX_PREVIEW_ROWS: u32 = 100;
 
 const INSTRUCTIONS: &str = "Read-only access to a running Eario dashboard application. \
      Start with describe_dashboard and list_datasets. Row access is paginated: \
-     preview_dataset returns at most 100 rows per call.";
+     preview_dataset returns at most 100 rows per call. A derived dataset is read from its \
+     cached table only: tools never run a computation, and report a derived dataset as not \
+     computed yet until the dashboard has computed it.";
 
 /// Builds the `/mcp` route serving `app`.
 ///
@@ -63,6 +65,14 @@ struct ComponentSummary<'a> {
     id: &'a str,
     title: Option<&'a str>,
     definition: &'a eario_core::ComponentKind,
+}
+
+/// Summary of one derived dataset, as returned by `describe_dashboard`.
+#[derive(Serialize)]
+struct DerivedSummary {
+    id: String,
+    computation: String,
+    status: DerivedStatus,
 }
 
 /// Summary of one page, as returned by `describe_dashboard`.
@@ -155,10 +165,24 @@ impl EarioTools {
                     .collect(),
             })
             .collect();
+        // Read from what is cached: nothing is computed.
+        let derived: Vec<DerivedSummary> = self
+            .app
+            .datasets()
+            .into_iter()
+            .filter_map(|dataset| {
+                Some(DerivedSummary {
+                    id: dataset.id.to_string(),
+                    computation: dataset.source_name,
+                    status: dataset.derived?,
+                })
+            })
+            .collect();
         to_json(&serde_json::json!({
             "title": info.spec.title,
             "eario_version": info.eario_version,
             "pages": pages,
+            "derived_datasets": derived,
             "state": info.state,
         }))
     }
@@ -184,7 +208,7 @@ impl EarioTools {
         let app = self.app.clone();
         let limit = request.limit.unwrap_or(20).min(MAX_PREVIEW_ROWS);
         let page = blocking(move || {
-            let frame = app.dataset_frame(&DatasetId::new(request.dataset_id))?;
+            let frame = app.cached_dataset_frame(&DatasetId::new(request.dataset_id))?;
             let rows = query::row_count(&frame);
             Ok(query::table_page(&frame, request.offset, limit, rows)?)
         })
@@ -203,7 +227,7 @@ impl EarioTools {
     ) -> Result<String, ErrorData> {
         let app = self.app.clone();
         let stats = blocking(move || {
-            let frame = app.dataset_frame(&DatasetId::new(request.dataset_id))?;
+            let frame = app.cached_dataset_frame(&DatasetId::new(request.dataset_id))?;
             Ok(query::statistics(&frame)?)
         })
         .await?;
@@ -221,7 +245,7 @@ impl EarioTools {
     ) -> Result<String, ErrorData> {
         let app = self.app.clone();
         let data = blocking(move || {
-            app.component_data(&ComponentId::new(request.component_id), request.offset)
+            app.cached_component_data(&ComponentId::new(request.component_id), request.offset)
         })
         .await?;
         to_json(&data)
@@ -234,5 +258,236 @@ impl ServerHandler for EarioTools {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("eario", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use eario_core::{
+        ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, DatasetSource,
+        PageSpec, RowSpec, SPEC_VERSION,
+    };
+    use eario_data::polars::prelude::Column;
+    use eario_data::{Computation, ComputationRegistry, Dataset};
+    use eario_runtime::AppOptions;
+
+    use super::*;
+
+    /// A dashboard whose `derived` dataset copies `data` through a counted
+    /// computation, displayed by the table `table`.
+    fn tools() -> Result<(EarioTools, Arc<AtomicUsize>), Box<dyn std::error::Error>> {
+        let data = DatasetId::new("data");
+        let derived = DatasetId::new("derived");
+        let spec = DashboardSpec {
+            spec_version: SPEC_VERSION,
+            title: "Derived".to_owned(),
+            datasets: vec![
+                DatasetSlot {
+                    id: data.clone(),
+                    label: "Data".to_owned(),
+                    source: DatasetSource::Imported,
+                },
+                DatasetSlot {
+                    id: derived.clone(),
+                    label: "Derived".to_owned(),
+                    source: DatasetSource::Computed {
+                        function: "copy".to_owned(),
+                        inputs: BTreeMap::from([("table".to_owned(), DataView::of(&data))]),
+                        params: BTreeMap::new(),
+                    },
+                },
+            ],
+            pages: vec![PageSpec {
+                id: "main".to_owned(),
+                title: "Main".to_owned(),
+                rows: vec![RowSpec {
+                    items: vec![ComponentSpec {
+                        id: ComponentId::new("table"),
+                        title: None,
+                        span: 12,
+                        kind: ComponentKind::DataTable {
+                            view: DataView::of(&derived),
+                            page_size: 10,
+                        },
+                    }],
+                }],
+            }],
+        };
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let mut computations = ComputationRegistry::default();
+        computations.register(
+            Computation::new("copy", move |ctx| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(ctx.input("table")?.clone())
+            })
+            .input("table"),
+        );
+        let app = App::new(spec, AppOptions { computations, ..AppOptions::default() })?;
+        let frame = eario_data::DataFrame::new(2, vec![Column::new("x".into(), [1.0, 2.0])])?;
+        app.load_dataset(&data, Dataset::from_frame("x.csv", frame)?)?;
+        Ok((EarioTools::new(app), runs))
+    }
+
+    fn json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_str(text)
+    }
+
+    fn dataset_request() -> Parameters<DatasetRequest> {
+        Parameters(DatasetRequest { dataset_id: "derived".to_owned() })
+    }
+
+    fn component_request() -> Parameters<ComponentRequest> {
+        Parameters(ComponentRequest { component_id: "table".to_owned(), offset: 0 })
+    }
+
+    #[tokio::test]
+    async fn not_computed_derived_dataset_is_listed_and_never_computed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tools, runs) = tools()?;
+
+        let datasets = json(&tools.list_datasets()?)?;
+        assert_eq!(datasets[1]["id"], "derived");
+        assert_eq!(datasets[1]["source_name"], "copy");
+        assert_eq!(datasets[1]["derived"], "not_computed");
+        let dashboard = json(&tools.describe_dashboard()?)?;
+        let summary = &dashboard["derived_datasets"][0];
+        assert_eq!(
+            (summary["id"].as_str(), summary["computation"].as_str(), summary["status"].as_str()),
+            (Some("derived"), Some("copy"), Some("not_computed"))
+        );
+
+        let preview =
+            Parameters(PreviewRequest { dataset_id: "derived".to_owned(), offset: 0, limit: None });
+        let error = tools.preview_dataset(preview).await.err().map(|e| e.message.to_string());
+        assert!(error.is_some_and(|message| message.contains("not computed yet")));
+        let error = tools.dataset_statistics(dataset_request()).await.err();
+        assert!(error.is_some_and(|e| e.message.contains("not computed yet")));
+        let component = json(&tools.get_component_data(component_request()).await?)?;
+        assert_eq!(component["type"], "empty");
+        assert!(component["reason"].as_str().is_some_and(|r| r.contains("Not computed yet")));
+
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "no MCP call ran the computation");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cached_derived_dataset_is_read_without_another_computation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tools, runs) = tools()?;
+        // The dashboard displays the table, which computes and caches it.
+        tools.app.component_data(&ComponentId::new("table"), 0)?;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        let dashboard = json(&tools.describe_dashboard()?)?;
+        assert_eq!(dashboard["derived_datasets"][0]["status"], "computed");
+        let preview =
+            Parameters(PreviewRequest { dataset_id: "derived".to_owned(), offset: 0, limit: None });
+        let page = json(&tools.preview_dataset(preview).await?)?;
+        assert_eq!(page["total_rows"], 2);
+        let stats = json(&tools.dataset_statistics(dataset_request()).await?)?;
+        assert!(stats.to_string().contains("\"x\""));
+        let component = json(&tools.get_component_data(component_request()).await?)?;
+        assert_eq!(component["type"], "data_table");
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "MCP reads used the cache");
+        Ok(())
+    }
+
+    fn preview_request(dataset: &str) -> Parameters<PreviewRequest> {
+        Parameters(PreviewRequest { dataset_id: dataset.to_owned(), offset: 0, limit: None })
+    }
+
+    fn is_not_computed(error: Option<ErrorData>) -> bool {
+        error.is_some_and(|error| error.message.contains("not computed yet"))
+    }
+
+    #[tokio::test]
+    async fn stale_cache_is_reported_as_not_computed() -> Result<(), Box<dyn std::error::Error>> {
+        let (tools, runs) = tools()?;
+        tools.app.component_data(&ComponentId::new("table"), 0)?;
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+        // Re-importing the input makes the cached table stale.
+        let frame = eario_data::DataFrame::new(1, vec![Column::new("x".into(), [9.0])])?;
+        tools.app.load_dataset(&DatasetId::new("data"), Dataset::from_frame("y.csv", frame)?)?;
+
+        let dashboard = json(&tools.describe_dashboard()?)?;
+        assert_eq!(dashboard["derived_datasets"][0]["status"], "not_computed");
+        assert!(is_not_computed(tools.preview_dataset(preview_request("derived")).await.err()));
+        assert!(is_not_computed(tools.dataset_statistics(dataset_request()).await.err()));
+        let component = json(&tools.get_component_data(component_request()).await?)?;
+        assert_eq!(component["type"], "empty");
+        assert!(component["reason"].as_str().is_some_and(|r| r.contains("Not computed yet")));
+
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "no MCP call recomputed the stale table");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chained_derived_datasets_are_never_computed() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let data = DatasetId::new("data");
+        let (a, b) = (DatasetId::new("a"), DatasetId::new("b"));
+        let computed = |function: &str, input: &DatasetId| DatasetSource::Computed {
+            function: function.to_owned(),
+            inputs: BTreeMap::from([("table".to_owned(), DataView::of(input))]),
+            params: BTreeMap::new(),
+        };
+        let slot =
+            |id: &DatasetId, source| DatasetSlot { id: id.clone(), label: id.to_string(), source };
+        let spec = DashboardSpec {
+            spec_version: SPEC_VERSION,
+            title: "Chain".to_owned(),
+            datasets: vec![
+                slot(&data, DatasetSource::Imported),
+                slot(&a, computed("first", &data)),
+                slot(&b, computed("second", &a)),
+            ],
+            pages: vec![PageSpec {
+                id: "main".to_owned(),
+                title: "Main".to_owned(),
+                rows: vec![RowSpec {
+                    items: vec![ComponentSpec {
+                        id: ComponentId::new("stats"),
+                        title: None,
+                        span: 12,
+                        kind: ComponentKind::Statistics { view: DataView::of(&b) },
+                    }],
+                }],
+            }],
+        };
+        let first_runs = Arc::new(AtomicUsize::new(0));
+        let second_runs = Arc::new(AtomicUsize::new(0));
+        let mut computations = ComputationRegistry::default();
+        for (name, runs) in [("first", &first_runs), ("second", &second_runs)] {
+            let counted = Arc::clone(runs);
+            computations.register(
+                Computation::new(name, move |ctx| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(ctx.input("table")?.clone())
+                })
+                .input("table"),
+            );
+        }
+        let app = App::new(spec, AppOptions { computations, ..AppOptions::default() })?;
+        let frame = eario_data::DataFrame::new(2, vec![Column::new("x".into(), [1.0, 2.0])])?;
+        app.load_dataset(&data, Dataset::from_frame("x.csv", frame)?)?;
+        let tools = EarioTools::new(app);
+
+        assert!(is_not_computed(tools.preview_dataset(preview_request("b")).await.err()));
+        let request = Parameters(DatasetRequest { dataset_id: "b".to_owned() });
+        assert!(is_not_computed(tools.dataset_statistics(request).await.err()));
+        let request = Parameters(ComponentRequest { component_id: "stats".to_owned(), offset: 0 });
+        let component = json(&tools.get_component_data(request).await?)?;
+        assert_eq!(component["type"], "empty");
+        assert!(component["reason"].as_str().is_some_and(|r| r.contains("Not computed yet")));
+
+        assert_eq!(first_runs.load(Ordering::SeqCst), 0, "`a` was not computed");
+        assert_eq!(second_runs.load(Ordering::SeqCst), 0, "`b` was not computed");
+        Ok(())
     }
 }

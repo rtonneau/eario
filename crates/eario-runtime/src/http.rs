@@ -118,7 +118,9 @@ impl From<AppError> for Failure {
             AppError::UnknownComponent(_)
             | AppError::UnknownDataset(_)
             | AppError::UnknownState(_) => StatusCode::NOT_FOUND,
-            AppError::DatasetNotLoaded(_) | AppError::DerivedDataset(_) => StatusCode::CONFLICT,
+            AppError::DatasetNotLoaded(_)
+            | AppError::DerivedDataset(_)
+            | AppError::NotComputed(_) => StatusCode::CONFLICT,
             AppError::InvalidStateValue { .. } | AppError::Computation { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
