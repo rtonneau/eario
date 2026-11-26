@@ -102,7 +102,7 @@ async function backend(input: RequestInfo | URL, init?: RequestInit): Promise<Re
   requests.push({ method, url, body: typeof init?.body === 'string' ? init.body : null });
 
   if (url === '/api/app') {
-    return json(info);
+    return json({ kind: 'dashboard', ...info });
   }
   const component = /^\/api\/components\/([^/]+)\/data/.exec(url);
   if (component) {

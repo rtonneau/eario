@@ -3,7 +3,7 @@
 // from the Rust contract types.
 
 import type { ApiError } from './generated/ApiError';
-import type { AppInfo } from './generated/AppInfo';
+import type { AppResponse } from './generated/AppResponse';
 import type { ComponentData } from './generated/ComponentData';
 import type { Preferences } from './generated/Preferences';
 import type { StateUpdate } from './generated/StateUpdate';
@@ -101,7 +101,7 @@ async function request<T>(method: string, path: string, body?: BodyInit, json = 
 const segment = encodeURIComponent;
 
 export const api = {
-  app: () => request<AppInfo>('GET', '/app'),
+  app: () => request<AppResponse>('GET', '/app'),
 
   setState: (key: string, value: JsonValue) =>
     request<StateUpdate>('PUT', `/state/${segment(key)}`, JSON.stringify(value), true),

@@ -8,6 +8,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
+use axum::routing::get;
 use eario_core::{
     ChartMark, ComponentId, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetId,
     DatasetSlot, DatasetSource, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, SelectOptions,
@@ -22,7 +23,7 @@ use tower::ServiceExt;
 
 use crate::app::{App, AppOptions};
 use crate::error::AppError;
-use crate::http::{Security, TOKEN_HEADER, router};
+use crate::http::{Security, TOKEN_HEADER, dashboard_api, router};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -106,7 +107,7 @@ fn harness_for(
     let app = App::new(spec, options)?;
     let security = Arc::new(Security::for_port(TOKEN.to_owned(), PORT, None));
     let (sender, shutdown) = watch::channel(false);
-    let router = router(app.clone(), security, sender, UPLOAD_LIMIT, None);
+    let router = router(dashboard_api(app.clone(), UPLOAD_LIMIT), security, sender, None);
     Ok(Harness { router, app, shutdown })
 }
 
@@ -246,11 +247,103 @@ async fn request_from_own_origin_is_accepted() -> TestResult {
     Ok(())
 }
 
+/// A server around a route set that is not a dashboard's, as a hub is.
+fn custom_routes_harness() -> (Router, watch::Receiver<bool>) {
+    let routes = Router::new()
+        .route("/app", get(|| async { axum::Json(json!({ "kind": "hub" })) }))
+        .route("/ping", get(|| async { "pong" }))
+        .with_state(());
+    let security = Arc::new(Security::for_port(TOKEN.to_owned(), PORT, None));
+    let (sender, shutdown) = watch::channel(false);
+    (router(routes, security, sender, None), shutdown)
+}
+
+async fn custom_send(
+    router: &Router,
+    request: Request<Body>,
+) -> Result<(StatusCode, Vec<u8>), Box<dyn std::error::Error>> {
+    let response = router.clone().oneshot(request).await?;
+    let status = response.status();
+    Ok((status, response.into_body().collect().await?.to_bytes().to_vec()))
+}
+
+#[tokio::test]
+async fn custom_route_set_is_served_with_the_token() -> TestResult {
+    let (router, _) = custom_routes_harness();
+    let (status, body) =
+        custom_send(&router, request(Method::GET, "/api/ping").body(Body::empty())?).await?;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, b"pong".as_slice()));
+    let (status, body) =
+        custom_send(&router, request(Method::GET, "/api/app").body(Body::empty())?).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(serde_json::from_slice::<Value>(&body)?, json!({ "kind": "hub" }));
+    let (status, _) =
+        custom_send(&router, request(Method::GET, "/api/nothing").body(Body::empty())?).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_route_set_without_a_token_is_unauthorized() -> TestResult {
+    let (router, _) = custom_routes_harness();
+    let missing =
+        Request::builder().uri("/api/ping").header(header::HOST, HOST).body(Body::empty())?;
+    assert_eq!(custom_send(&router, missing).await?.0, StatusCode::UNAUTHORIZED);
+    let wrong = Request::builder()
+        .uri("/api/ping")
+        .header(header::HOST, HOST)
+        .header(TOKEN_HEADER, "not-the-token")
+        .body(Body::empty())?;
+    assert_eq!(custom_send(&router, wrong).await?.0, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_route_set_rejects_another_host_and_a_foreign_origin() -> TestResult {
+    let (router, _) = custom_routes_harness();
+    for host in ["attacker.example:4780", "127.0.0.1:9999", "127.0.0.1"] {
+        let other_host = Request::builder()
+            .uri("/api/ping")
+            .header(header::HOST, host)
+            .header(TOKEN_HEADER, TOKEN)
+            .body(Body::empty())?;
+        assert_eq!(custom_send(&router, other_host).await?.0, StatusCode::FORBIDDEN, "{host}");
+    }
+    let foreign = request(Method::GET, "/api/ping")
+        .header(header::ORIGIN, "http://evil.example")
+        .body(Body::empty())?;
+    assert_eq!(custom_send(&router, foreign).await?.0, StatusCode::FORBIDDEN);
+    let own = request(Method::GET, "/api/ping")
+        .header(header::ORIGIN, "http://127.0.0.1:4780")
+        .body(Body::empty())?;
+    assert_eq!(custom_send(&router, own).await?.0, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_route_set_shares_shutdown_and_the_frontend() -> TestResult {
+    let (router, shutdown) = custom_routes_harness();
+    let page = Request::builder().uri("/").header(header::HOST, HOST).body(Body::empty())?;
+    assert_eq!(custom_send(&router, page).await?.0, StatusCode::OK);
+    let unauthenticated = Request::builder()
+        .method(Method::POST)
+        .uri("/api/shutdown")
+        .header(header::HOST, HOST)
+        .body(Body::empty())?;
+    assert_eq!(custom_send(&router, unauthenticated).await?.0, StatusCode::UNAUTHORIZED);
+    assert!(!*shutdown.borrow());
+    let quit = request(Method::POST, "/api/shutdown").body(Body::empty())?;
+    assert_eq!(custom_send(&router, quit).await?.0, StatusCode::NO_CONTENT);
+    assert!(*shutdown.borrow());
+    Ok(())
+}
+
 #[tokio::test]
 async fn app_info_starts_with_empty_state() -> TestResult {
     let harness = harness()?;
     let (status, info) = harness.get("/api/app").await?;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(info["kind"], "dashboard");
     assert_eq!(info["spec"]["title"], "Test");
     assert_eq!(info["state"], json!({ "filter": null, "x": null, "y": null }));
     assert_eq!(info["revision"], 0);

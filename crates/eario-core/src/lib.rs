@@ -27,8 +27,8 @@ pub use launch::{
     RunFile, is_slug, slug,
 };
 pub use payload::{
-    ApiError, AppInfo, ChartData, ColumnInfo, ColumnKind, ColumnStats, ComponentData, DatasetInfo,
-    DerivedStatus, Preferences, StateMap, StateUpdate, StatsTable, TablePage, Theme,
+    ApiError, AppInfo, AppResponse, ChartData, ColumnInfo, ColumnKind, ColumnStats, ComponentData,
+    DatasetInfo, DerivedStatus, Preferences, StateMap, StateUpdate, StatsTable, TablePage, Theme,
 };
 pub use spec::{
     ChartMark, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, DatasetSource,

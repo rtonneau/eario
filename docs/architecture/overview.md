@@ -252,7 +252,7 @@ those of `eario-core`.
 
 | Method and path | Body | Answer |
 | --- | --- | --- |
-| `GET /api/app` | | `AppInfo` |
+| `GET /api/app` | | `AppResponse`: the `AppInfo` of a dashboard with `"kind": "dashboard"`, or a hub's `HubInfo` with `"kind": "hub"` |
 | `PUT /api/state/{key}` | a JSON value | `StateUpdate` |
 | `GET /api/components/{id}/data?offset=N` | | `ComponentData` |
 | `POST /api/datasets/{id}/upload?filename=F` | the raw file | `StateUpdate` |

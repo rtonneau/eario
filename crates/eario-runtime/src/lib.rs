@@ -29,4 +29,7 @@ pub mod server;
 
 pub use app::{App, AppOptions};
 pub use error::{AppError, HubDirError, ServeError};
-pub use server::{RunningServer, ServerConfig, init_file_logging, run, run_child, start};
+pub use server::{
+    RunningServer, ServerConfig, ShutdownHandle, init_file_logging, run, run_child, start,
+    start_routes,
+};
