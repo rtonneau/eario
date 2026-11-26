@@ -15,7 +15,10 @@
       {#if data.stats.columns.length === 0}
         <p class="muted">The dataset has no numeric column.</p>
       {:else}
-        <div class="scroll-x">
+        <!-- A scrolling region must be reachable by keyboard to scroll it (WCAG 2.1.1);
+             the region role and label make the focus stop meaningful. -->
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div class="scroll-x" role="region" aria-label="Statistics" tabindex="0">
           <table>
             <caption class="visually-hidden">
               Descriptive statistics of {formatNumber(data.stats.rows)} rows

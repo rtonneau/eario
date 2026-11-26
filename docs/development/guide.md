@@ -207,7 +207,7 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
 | Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
-| Browser tests | `frontend/e2e/*.spec.ts` | The real examples in Chromium: import through the file picker, chart drawn in its canvas, filter, table pagination, and inputs that recompute a derived dataset in Rust. |
+| Browser tests | `frontend/e2e/*.spec.ts` | The real examples in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, and inputs that recompute a derived dataset in Rust. |
 
 ### Browser tests
 
@@ -229,6 +229,13 @@ a fixed delay. `cargo xtask check` does not run these tests, because they
 need a browser; CI runs them in the "End-to-end (Chromium)" job, on ubuntu.
 On Linux, Chromium's system libraries come from
 `npx playwright install --with-deps chromium`.
+
+Every visited state is also checked for accessibility with axe-core
+(`frontend/e2e/axe.ts`, `expectAccessible`): every WCAG 2.1 A and AA rule, in
+the light and the dark theme. Any violation fails the test, and no rule is
+disabled. The helper sets the theme on the root element directly, so the
+tests never write the user's saved preferences. Call `expectAccessible` after
+each new state a test reaches.
 
 ### Fixtures
 

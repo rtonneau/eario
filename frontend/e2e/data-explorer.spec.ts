@@ -1,9 +1,11 @@
 import { expect, fixture, test } from './app';
+import { expectAccessible } from './axe';
 
 test.describe('data-explorer', () => {
   test('imports a file through the file picker', async ({ page, launch }) => {
     await launch('data-explorer');
     await expect(page.getByText('No file loaded yet.')).toBeVisible();
+    await expectAccessible(page, 'no file loaded');
 
     await page
       .getByLabel('Choose a CSV, TSV or XLSX file, or drop it here')
@@ -11,6 +13,7 @@ test.describe('data-explorer', () => {
 
     await expect(page.getByText('Loaded: measurements.csv')).toBeVisible();
     await expect(page.getByText('Computed over 40 rows.')).toBeVisible();
+    await expectAccessible(page, 'file imported');
   });
 
   test('draws the scatter plot in a canvas', async ({ page, launch }) => {
@@ -27,6 +30,7 @@ test.describe('data-explorer', () => {
     const box = await canvas.boundingBox();
     expect(box?.width ?? 0).toBeGreaterThan(100);
     expect(box?.height ?? 0).toBeGreaterThan(100);
+    await expectAccessible(page, 'chart drawn');
   });
 
   test('filters rows and shows the result everywhere', async ({ page, launch }) => {
@@ -41,6 +45,7 @@ test.describe('data-explorer', () => {
     await expect(page.getByRole('status').filter({ hasText: 'Showing rows where' })).toBeVisible();
     const statistics = page.getByText(/^Computed over \d+ rows\.$/);
     await expect(statistics).not.toHaveText('Computed over 40 rows.');
+    await expectAccessible(page, 'filter applied');
 
     await page.getByRole('button', { name: 'Clear' }).click();
     await expect(page.getByText('No filter: all rows are shown.')).toBeVisible();
@@ -54,10 +59,12 @@ test.describe('data-explorer', () => {
     const pager = page.getByRole('status').filter({ hasText: /^Rows / });
     await expect(pager).toHaveText('Rows 1–50 of 144');
     await expect(page.getByRole('button', { name: 'Previous' })).toBeDisabled();
+    await expectAccessible(page, 'table, first page');
 
     await page.getByRole('button', { name: 'Next' }).click();
     await expect(pager).toHaveText('Rows 51–100 of 144');
     await expect(page.getByRole('row').nth(1).getByRole('cell').first()).toHaveText('51');
+    await expectAccessible(page, 'table, second page');
 
     await page.getByRole('button', { name: 'Previous' }).click();
     await expect(pager).toHaveText('Rows 1–50 of 144');
