@@ -16,5 +16,7 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+.scratch/
+
 # Local agent state
 .claude/
