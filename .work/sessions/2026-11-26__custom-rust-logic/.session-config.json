@@ -254,9 +254,33 @@
         "ticket": "07-signal-lab-example",
         "commit": "4f3de70"
       }
+    },
+    {
+      "at": "2026-11-26T16:44:20.090Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/08-m1-documentation.md",
+        "03-implement/08-m1-documentation/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "08-m1-documentation"
+      }
+    },
+    {
+      "at": "2026-11-26T16:52:08.480Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/08-m1-documentation/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "08-m1-documentation",
+        "commit": "69e70d7"
+      }
     }
   ],
-  "current_phase": "ship",
+  "current_phase": "finish-pending",
   "git": {
     "branch": "feat/custom-rust-logic",
     "base_branch": "main",
