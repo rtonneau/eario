@@ -3,8 +3,9 @@
   "project": "Eario",
   "updated": "2026-11-26",
   "leads": {
-    "next": "M1, M2 and M3 are all unblocked; M3 first keeps new dashboards hub-ready",
-    "later": "the rest follow the roadmap order; M11 waits on M3"
+    "now": "M1 + M2 are merged but not tagged",
+    "next": "M3 first, so new dashboards stay hub-ready",
+    "later": "roadmap order; M11 waits on M3"
   },
   "items": [
     {
@@ -36,10 +37,10 @@
       "id": "D",
       "title": "Commit hub direction docs",
       "status": "done",
-      "state": "COMMITTED a82c789 · NOT PUSHED",
+      "state": "IN MAIN a82c789",
       "points": [
         "`docs/roadmap.md`: two ways to run, new M3",
-        "`docs/adr/0011-standalone-and-hub.md` (Proposed)",
+        "`docs/adr/0011-standalone-and-hub.md`",
         "`docs/project-status.md`, ADR index"
       ],
       "needs": [
@@ -47,7 +48,7 @@
       ],
       "details": {
         "history": [
-          "commit `a82c789` on `main`, not pushed"
+          "commit `a82c789`, in `origin/main`"
         ],
         "links": [
           {
@@ -60,13 +61,13 @@
           }
         ]
       },
-      "source": "git status"
+      "source": "git merge-base --is-ancestor origin/main"
     },
     {
       "id": "A",
       "title": "Accept ADR 0011 (standalone + hub)",
       "status": "done",
-      "state": "ACCEPTED · COMMITTED c8ce388 · NOT PUSHED",
+      "state": "ACCEPTED · IN MAIN c8ce388",
       "points": [
         "Hub quits: dashboards **keep running**, re-attach via run files",
         "Updates: **in place**, one entry per slug",
@@ -78,7 +79,7 @@
       ],
       "details": {
         "history": [
-          "commit `c8ce388` on `main`, not pushed"
+          "commit `c8ce388`, in `origin/main`"
         ],
         "links": [
           {
@@ -87,44 +88,103 @@
           }
         ]
       },
-      "source": "docs/adr/0011-standalone-and-hub.md"
+      "source": "git merge-base --is-ancestor origin/main"
     },
     {
       "id": "M1",
       "title": "Custom Rust logic",
-      "status": "next",
-      "state": "PLANNED · UNBLOCKED",
+      "status": "done",
+      "state": "MERGED #1",
       "points": [
-        "Named Rust functions in `App` (ADR 0001)",
-        "Derived datasets as slots",
-        "Number, text, slider, select, checkbox inputs",
-        "Cache keyed by dependency revision",
-        "Typed state handles",
-        "Second example with a custom computation"
+        "Named Rust computations, derived datasets",
+        "Number, slider, text, select, checkbox inputs",
+        "Derived-table cache keyed by dependency revisions",
+        "Typed `State<T>`, `eario::polars`",
+        "`signal-lab` example; MCP reads cache only"
       ],
       "needs": [
         "M0"
       ],
-      "command": "/gps start custom-rust-logic",
-      "source": "docs/roadmap.md M1"
+      "source": "PR #1",
+      "details": {
+        "history": [
+          "gps session `2026-11-26__custom-rust-logic` · Complete · [session](sessions/2026-11-26__custom-rust-logic/INDEX.md)",
+          "PR #1 merged 2026-11-26",
+          "CI run 45887497489 on `main` · success"
+        ],
+        "tickets": [
+          "✅ 01 polars-lazy-reexport — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/01-polars-lazy-reexport.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/01-polars-lazy-reexport/commit-log.md)",
+          "✅ 02 derived-dataset-contract — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/02-derived-dataset-contract.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/02-derived-dataset-contract/commit-log.md)",
+          "✅ 03 computation-registry-and-evaluation — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/03-computation-registry-and-evaluation.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/03-computation-registry-and-evaluation/commit-log.md)",
+          "✅ 04 mcp-derived-cache-only — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/04-mcp-derived-cache-only.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/04-mcp-derived-cache-only/commit-log.md)",
+          "✅ 05 typed-state-and-builder — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/05-typed-state-and-builder.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/05-typed-state-and-builder/commit-log.md)",
+          "✅ 06 new-input-kinds — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/06-new-input-kinds.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/06-new-input-kinds/commit-log.md)",
+          "✅ 07 signal-lab-example — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/07-signal-lab-example.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/07-signal-lab-example/commit-log.md)",
+          "✅ 08 m1-documentation — [spec](sessions/2026-11-26__custom-rust-logic/02-plan/tickets/08-m1-documentation.md) · [log](sessions/2026-11-26__custom-rust-logic/03-implement/08-m1-documentation/commit-log.md)"
+        ],
+        "links": [
+          {
+            "label": "PR #1",
+            "url": "https://github.com/rtonneau/eario/pull/1"
+          }
+        ]
+      }
     },
     {
       "id": "M2",
       "title": "Trust and continuous verification",
-      "status": "next",
-      "state": "PLANNED · FIRST BULLET DONE",
+      "status": "done",
+      "state": "MERGED #2",
       "points": [
-        "~~First CI run on Linux~~ (green on ubuntu + windows)",
-        "Playwright end-to-end tests",
-        "`cargo deny`, MSRV in CI",
-        "Automated accessibility check",
-        "Dated benchmarks on a reference machine"
+        "Playwright tests: `cargo xtask e2e`",
+        "axe-core check, both themes",
+        "`cargo deny` in CI",
+        "MSRV 1.95 tested in CI",
+        "Dated benchmarks: `cargo xtask bench`"
       ],
       "needs": [
         "M0"
       ],
-      "command": "/gps start trust-and-ci",
-      "source": "docs/roadmap.md M2; gh run 45779398561"
+      "source": "PR #2",
+      "details": {
+        "history": [
+          "gps session `2026-11-26__trust-and-ci` · Complete · [session](sessions/2026-11-26__trust-and-ci/INDEX.md)",
+          "PR #2 merged 2026-11-26",
+          "CI run 45894832349 on `main` · all 7 jobs success"
+        ],
+        "tickets": [
+          "✅ 01 cargo-deny — [spec](sessions/2026-11-26__trust-and-ci/02-plan/tickets/01-cargo-deny.md) · [log](sessions/2026-11-26__trust-and-ci/03-implement/01-cargo-deny/commit-log.md)",
+          "✅ 02 msrv — [spec](sessions/2026-11-26__trust-and-ci/02-plan/tickets/02-msrv.md) · [log](sessions/2026-11-26__trust-and-ci/03-implement/02-msrv/commit-log.md)",
+          "✅ 03 playwright-e2e — [spec](sessions/2026-11-26__trust-and-ci/02-plan/tickets/03-playwright-e2e.md) · [log](sessions/2026-11-26__trust-and-ci/03-implement/03-playwright-e2e/commit-log.md)",
+          "✅ 04 axe-accessibility — [spec](sessions/2026-11-26__trust-and-ci/02-plan/tickets/04-axe-accessibility.md) · [log](sessions/2026-11-26__trust-and-ci/03-implement/04-axe-accessibility/commit-log.md)",
+          "✅ 05 xtask-bench — [spec](sessions/2026-11-26__trust-and-ci/02-plan/tickets/05-xtask-bench.md) · [log](sessions/2026-11-26__trust-and-ci/03-implement/05-xtask-bench/commit-log.md)",
+          "✅ 06 m2-docs — [spec](sessions/2026-11-26__trust-and-ci/02-plan/tickets/06-m2-docs.md) · [log](sessions/2026-11-26__trust-and-ci/03-implement/06-m2-docs/commit-log.md)"
+        ],
+        "links": [
+          {
+            "label": "PR #2",
+            "url": "https://github.com/rtonneau/eario/pull/2"
+          }
+        ]
+      }
+    },
+    {
+      "id": "R",
+      "title": "First release",
+      "status": "now",
+      "state": "2 fragments unreleased · no tag",
+      "points": [
+        "Fragments for M1 and M2, both minor bump",
+        "Version 0.1.0, unreleased",
+        "`release.yml` has never run",
+        "crates.io publish stays in M11"
+      ],
+      "needs": [
+        "M1",
+        "M2"
+      ],
+      "command": "/gps release",
+      "source": "gather; docs/project-status.md; gh run list --workflow release.yml"
     },
     {
       "id": "M3",
@@ -150,7 +210,7 @@
       "id": "M4",
       "title": "Data: import settings and transformations",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "Header row, separator, decimal comma, encoding, types",
         "Dates and times",
@@ -168,7 +228,7 @@
       "id": "M5",
       "title": "Charts",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "Histogram, bar, box plot, heatmap",
         "Log axes, units, titles",
@@ -184,7 +244,7 @@
       "id": "M6",
       "title": "Sessions",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "Save and reopen a session (ADR 0006)",
         "Missing or changed source files",
@@ -200,7 +260,7 @@
       "id": "M7",
       "title": "Long-running work",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "Background tasks, progress, cancellation (ADR 0002)",
         "Large imports off the request path",
@@ -215,7 +275,7 @@
       "id": "M8",
       "title": "Analysis",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "`eario-analysis`: correlation, regression, fitting",
         "Checked against reference results",
@@ -230,7 +290,7 @@
       "id": "M9",
       "title": "Agents",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "Mutating MCP tools with consent + audit (ADR 0009)",
         "MCP resources",
@@ -245,7 +305,7 @@
       "id": "M10",
       "title": "Python",
       "status": "later",
-      "state": "PLANNED · NOT NEXT",
+      "state": "PLANNED · UNBLOCKED · AFTER M3",
       "points": [
         "Managed subprocess, Arrow IPC (ADR 0007)"
       ],
@@ -270,6 +330,25 @@
         "M3"
       ],
       "source": "docs/roadmap.md M11"
+    },
+    {
+      "id": "L",
+      "title": "M1 and M2 leftovers",
+      "status": "open",
+      "state": "deferred · no plan",
+      "points": [
+        "Browser tests in Firefox and WebKit",
+        "Benchmark regression gate",
+        "Column select reading its own state is not rejected",
+        "Retry paths on stale versions are untested",
+        "Slider, text, checkbox not driven in Chromium"
+      ],
+      "needs": [
+        "M1",
+        "M2"
+      ],
+      "command": "/idea capture m1-m2-leftovers",
+      "source": "docs/roadmap.md M2; docs/project-status.md"
     },
     {
       "id": "F",
