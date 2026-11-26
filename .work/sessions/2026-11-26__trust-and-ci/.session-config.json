@@ -191,9 +191,33 @@
         "ticket": "05-xtask-bench",
         "commit": "52a559f"
       }
+    },
+    {
+      "at": "2026-11-26T20:35:31.142Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-m2-docs.md",
+        "03-implement/06-m2-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-m2-docs"
+      }
+    },
+    {
+      "at": "2026-11-26T20:41:40.511Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/06-m2-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-m2-docs",
+        "commit": "df47cfe"
+      }
     }
   ],
-  "current_phase": "ship",
+  "current_phase": "finish-pending",
   "git": {
     "branch": "test/trust-and-ci",
     "base_branch": "main",
