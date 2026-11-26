@@ -158,6 +158,30 @@
         "ticket": "03-computation-registry-and-evaluation",
         "commit": "830850f"
       }
+    },
+    {
+      "at": "2026-11-26T13:54:06.481Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-mcp-derived-cache-only.md",
+        "03-implement/04-mcp-derived-cache-only/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-mcp-derived-cache-only"
+      }
+    },
+    {
+      "at": "2026-11-26T14:12:41.201Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-mcp-derived-cache-only/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-mcp-derived-cache-only",
+        "commit": "3ec0627"
+      }
     }
   ],
   "current_phase": "ship",
