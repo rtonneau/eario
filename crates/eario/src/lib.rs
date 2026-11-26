@@ -36,6 +36,21 @@ pub mod widgets;
 pub use dashboard::{Dashboard, Page};
 pub use eario_core as core;
 pub use eario_data as data;
+/// Polars, the table library Eario is built on, at the version and with the
+/// features Eario uses, including the `lazy` API.
+///
+/// Write computations against this re-export rather than a separate `polars`
+/// dependency, so the tables you build are the ones Eario accepts.
+///
+/// ```
+/// use eario::polars::prelude::*;
+///
+/// let frame = df!("x" => [1.0, 2.0, 3.0, 4.0])?;
+/// let large = frame.lazy().filter(col("x").gt(lit(2.0))).collect()?;
+/// assert_eq!(large.height(), 2);
+/// # Ok::<(), PolarsError>(())
+/// ```
+pub use eario_data::polars;
 pub use eario_runtime as runtime;
 pub use error::{Error, Result};
 pub use widgets::Widget;

@@ -37,7 +37,7 @@ ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 
 # Data
 # Eager API only: the lazy engine roughly doubles the build and nothing uses it yet.
-polars = { version = "0.55", default-features = false, features = ["csv", "fmt"] }
+polars = { version = "0.55", default-features = false, features = ["csv", "fmt", "lazy"] }
 calamine = "0.38"
 
 # Runtime

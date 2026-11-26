@@ -19,6 +19,10 @@ pub mod query;
 pub mod reader;
 mod xlsx;
 
+/// The Polars crate this layer is built on, re-exported so that code written
+/// against Eario uses the same version and features (including `lazy`).
+pub use polars;
+
 pub use dataset::Dataset;
 pub use error::DataError;
 pub use polars::frame::DataFrame;
