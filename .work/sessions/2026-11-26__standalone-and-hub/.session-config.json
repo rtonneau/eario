@@ -88,6 +88,30 @@
         "ticket": "01-contract-and-hub-dir",
         "commit": "d1f35fb"
       }
+    },
+    {
+      "at": "2026-11-26T22:06:41.841Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-launch-contract.md",
+        "03-implement/02-launch-contract/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-launch-contract"
+      }
+    },
+    {
+      "at": "2026-11-26T22:51:16.717Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-launch-contract/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-launch-contract",
+        "commit": "dcda85c"
+      }
     }
   ],
   "current_phase": "ship",
