@@ -89,6 +89,30 @@
         "ticket": "01-polars-lazy-reexport",
         "commit": "37160a7"
       }
+    },
+    {
+      "at": "2026-11-26T10:54:18.984Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-derived-dataset-contract.md",
+        "03-implement/02-derived-dataset-contract/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-derived-dataset-contract"
+      }
+    },
+    {
+      "at": "2026-11-26T11:01:10.840Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-derived-dataset-contract/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-derived-dataset-contract",
+        "commit": "e14310a"
+      }
     }
   ],
   "current_phase": "ship",
@@ -98,5 +122,5 @@
     "branch_created_at": "2026-11-26T10:45:46.149Z",
     "pr_url": null
   },
-  "ship_mode": "inline"
+  "ship_mode": "delegate"
 }
