@@ -53,29 +53,36 @@ that limit, which is the largest one.
 ## M3. Standalone and hub
 
 Comes early so that every dashboard built from now on can be installed in a
-hub without being rebuilt. ADR 0011 must be accepted first.
+hub without being rebuilt. Design in ADR 0011 (accepted).
+
+First, decide the open question of ADR 0011: the hub's interface as a
+dedicated frontend view or as a `DashboardSpec` of Eario components.
 
 Launch contract, in every dashboard executable:
 
 - `--eario-manifest`: prints the manifest (name, slug, version, Eario and
   launch protocol versions) as JSON.
-- `--eario-child`: starts without a browser, prints a ready line with the
-  address and token, stops when standard input closes or on shutdown.
+- `--eario-child <run-file>`: starts without a browser or console, logs to a
+  file, writes the run file (process id, address, token) once listening,
+  removes it when it stops. Does not depend on the hub staying alive.
 - `--eario-install` and `--eario-uninstall`: register the executable in the
-  user's hub registry, after confirmation.
-- Manifest and ready line as `eario-core` contract types, with tests that run
+  user's hub registry, after confirmation; reinstalling a newer file of the
+  same slug replaces the entry, refused while it runs.
+- Manifest and run file as `eario-core` contract types, with tests that run
   a real example executable in each mode.
 
 The hub (`eario-hub` crate and executable):
 
 - Registry of installed dashboards, with the executable's hash checked
   before each start.
-- Interface: list, start, open, stop, uninstall; state of each child
-  (starting, running, stopped, failed with its last error).
+- Interface: list, start, open, stop, stop all, uninstall; state of each
+  child (starting, running, stopped, failed with its last log lines).
+- Quitting the hub leaves dashboards running; at start the hub re-attaches
+  to live run files and removes stale ones.
+- System tray on Windows, no console window for the hub or its children;
+  tray where supported on Linux and macOS, terminal otherwise.
 - Children started by registry identifier only; no route takes a path or
   arguments. Security document and AGENTS.md updated for this exception.
-- Children stopped cleanly when the hub quits, or the choice of ADR 0011's
-  open question applied.
 - Both examples installable and runnable from the hub, verified end to end.
 
 ## M4. Data: import settings and transformations
@@ -138,7 +145,8 @@ The hub (`eario-hub` crate and executable):
 - First release on crates.io, with the prebuilt frontend (ADR 0005).
 - Project scaffolding (`eario-cli`), generating a dashboard that is
   hub-ready.
-- A desktop shell (ADR 0010), hosting the hub as its main window.
+- A desktop shell (ADR 0010), hosting the hub as its main window
+  next to its tray icon.
 - Signing and installers, for the hub and for standalone dashboards.
 - Updating an installed dashboard from the hub.
 

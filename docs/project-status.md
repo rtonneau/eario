@@ -107,7 +107,8 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 - The interface is in English only.
 - Each dashboard runs only standalone. There is no hub to install several
   dashboards and start them from one place, and executables have no launch
-  contract for one yet (ADR 0011, roadmap M3).
+  contract for one yet. The design is accepted (ADR 0011); the work is
+  roadmap M3.
 - No minimum supported Rust version is defined; development uses stable 1.99.
 
 ## Naming
