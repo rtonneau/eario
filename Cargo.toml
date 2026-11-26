@@ -69,6 +69,8 @@ http-body-util = "0.1"
 tempfile = "3"
 criterion = { version = "0.8", default-features = false }
 rust_xlsxwriter = "0.104"
+# xtask only: machine description of benchmark results. Already built for polars.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

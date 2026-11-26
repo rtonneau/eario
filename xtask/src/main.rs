@@ -3,6 +3,7 @@
 //! Written in Rust so the same commands work on Windows and Linux without a
 //! shell. Run `cargo xtask help` for the list.
 
+mod bench;
 mod fixtures;
 
 use std::env;
@@ -28,6 +29,8 @@ Commands:
   e2e          Build the frontend and the examples, then run the browser tests
                (Playwright, Chromium). --prebuilt-frontend: keep the frontend
                already in crates/eario-runtime/frontend-dist
+  bench        Run the benchmarks and write docs/benchmarks/<date>.md with the
+               results, the machine and the commit
   help         Show this message
 ";
 
@@ -42,6 +45,7 @@ fn main() -> ExitCode {
         "test" => test(),
         "check" => check(),
         "dist" => dist(),
+        "bench" => bench::run(),
         "e2e" => e2e(env::args().skip(2).any(|argument| argument == "--prebuilt-frontend")),
         "help" | "--help" | "-h" => {
             print!("{HELP}");

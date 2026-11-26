@@ -61,6 +61,7 @@ backtraces, and your own crates keep full debug information.
 | `cargo xtask check` | Runs every CI check except the browser tests, `cargo deny` and the minimum-version build. |
 | `cargo xtask dist` | Builds the frontend, then `data-explorer` in release mode. |
 | `cargo xtask e2e` | Builds the frontend and the examples, then runs the browser tests in Chromium. |
+| `cargo xtask bench` | Runs the benchmarks and records the results in `docs/benchmarks/<date>.md`. |
 
 Environment variables read by an Eario application:
 
@@ -297,8 +298,20 @@ cargo bench -p eario-data
 ```
 
 covers CSV import, XLSX import, filtering, statistics, chart preparation and
-table-page serialization on generated tables. No result is recorded in the
-repository: numbers depend on the machine.
+table-page serialization on generated tables.
+
+```text
+cargo xtask bench
+```
+
+runs the same benchmarks, then writes `docs/benchmarks/YYYY-MM-DD.md`
+(UTC date; a second run on the same day replaces that day's file). The file
+holds each benchmark's mean and 95 % confidence interval, plus what the
+numbers depend on: CPU, cores, memory, operating system, compiler, and the
+commit (marked when the working tree had uncommitted changes). Results are
+recorded from a developer machine, never from CI: shared runners are too
+noisy to compare. Compare files only when they come from the same machine.
+Close other heavy programs while it runs.
 
 ## Release build
 

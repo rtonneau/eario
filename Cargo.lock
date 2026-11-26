@@ -4380,6 +4380,8 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "rust_xlsxwriter",
+ "serde_json",
+ "sysinfo",
 ]
 
 [[package]]

@@ -9,3 +9,5 @@ publish = false
 
 [dependencies]
 rust_xlsxwriter.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
