@@ -1,7 +1,8 @@
 # Project status
 
 Last updated: 26 November 2026, at the end of the bootstrap session.
-Version: 0.1.0, unreleased. Nothing is published on crates.io or GitHub yet.
+Version: 0.1.0, unreleased. Not published on crates.io. The source is public
+at https://github.com/rtonneau/eario.
 
 This document, with [architecture/overview.md](architecture/overview.md) and
 [roadmap.md](roadmap.md), is meant to let someone resume the work without the
@@ -104,19 +105,22 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 - The port and token change at each start, which is awkward for a
   permanently configured MCP client.
 - The interface is in English only.
+- Each dashboard runs only standalone. There is no hub to install several
+  dashboards and start them from one place, and executables have no launch
+  contract for one yet (ADR 0011, roadmap M3).
 - No minimum supported Rust version is defined; development uses stable 1.99.
 
 ## Naming
 
 - `eario` was free on crates.io on 26 November 2026. It is not reserved.
-- `rtonneau/eario` did not exist on GitHub on the same date.
+- `rtonneau/eario` was created on GitHub, public, on 26 November 2026.
 - An unrelated project uses the name: `ThomasDev-1/Eario`, a small Windows
   tray utility for audio routing. Different domain, not on crates.io. No
   trademark search was made.
 
 ## Repository state
 
-- A local git repository on branch `main` with the initial commit. No remote.
+- Branch `main`, pushed to `origin` (`github.com/rtonneau/eario`).
 - Not tracked: `target/`, `node_modules/`,
   `crates/eario-runtime/frontend-dist/` (build output), `fixtures/generated/`.
 
