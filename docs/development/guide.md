@@ -22,7 +22,31 @@ If you skip the frontend build, Rust still compiles: `eario-runtime`'s build
 script writes a placeholder page and prints a warning. The dashboard itself
 needs the real build.
 
-The first Rust build is long, mostly because of Polars.
+The first Rust build is long, mostly because of Polars (with its `lazy`
+feature).
+
+### Building with little memory or disk
+
+Compiling the Polars crates in parallel can exhaust memory (rustc aborts with
+`memory allocation ... failed`, or the host crashes). Limit the parallel jobs:
+
+```text
+CARGO_BUILD_JOBS=4 cargo xtask check
+```
+
+In PowerShell, set the variable first: `$env:CARGO_BUILD_JOBS = "4"`.
+
+The workspace `Cargo.toml` also sets
+
+```toml
+[profile.dev.package."*"]
+debug = "line-tables-only"
+```
+
+Full debug symbols for every dependency cost about 1 GB per test binary once
+Polars `lazy` is on. On Windows that filled the disk and ended in linker
+errors (`LNK1140`, `LNK1318`). Line tables are enough for readable
+backtraces, and your own crates keep full debug information.
 
 ## Commands
 
@@ -87,6 +111,81 @@ Frontend commands, run in `frontend/`:
 | `npm run check` | `svelte-check`: TypeScript and Svelte diagnostics. |
 | `npm run test` | Vitest, in jsdom. |
 
+## Writing a computation
+
+A computation is a named Rust function from tables and parameters to a table.
+Register it, then declare a derived dataset that binds its inputs and
+parameters. The complete example is
+[`examples/signal-lab`](../../examples/signal-lab/src/main.rs); this is the
+shape:
+
+```rust
+use eario::polars::prelude::*;
+use eario::prelude::*;
+
+fn above() -> Computation {
+    let threshold = State::<f64>::new("threshold");
+    Computation::new("above", move |ctx| {
+        let limit = ctx.param(&threshold)?; // typed by the handle
+        let rows = ctx.input("table")?.clone().lazy();
+        Ok(rows.filter(col("value").gt(lit(limit))).collect()?)
+    })
+    .input("table") // names the function reads, declared up front
+    .param("threshold")
+    .describe("The rows whose `value` exceeds `threshold`.")
+}
+
+fn dashboard() -> Dashboard {
+    let data = DatasetId::new("data");
+    let large = DatasetId::new("large");
+    let threshold = State::<f64>::new("threshold");
+
+    Dashboard::new("Threshold")
+        .computation(above())
+        .derived(&large, "above", |derived| {
+            derived.input("table", &data).param("threshold", &threshold)
+        })
+        .page("Rows", |page| {
+            page.row([file_import(&data).span(4), slider("Threshold", &threshold, 0.0..=100.0, 50.0)])
+                .row([data_table(&large)])
+        })
+}
+```
+
+What to know:
+
+- Every component reads `large` as it reads an imported dataset: a table, a
+  chart, statistics, a column select, a filter. A derived dataset can read
+  another one; the computations run in dependency order.
+- `.input` and `.param` on the `Computation` declare names; `derived.input`,
+  `.param` and `.literal` bind them. `App::new` (so `build()` and `run()`)
+  rejects an unknown computation, an undeclared or missing binding, an import
+  into a derived slot, a cycle, and a duplicate dataset or computation name.
+  Each error names the dataset and the computation.
+- A computation returns `Result<DataFrame, ComputeError>`. `ComputeError::new`
+  takes a message written for the user; a Polars error converts with `?`. An
+  error or a panic shows as an alert naming the computation and does not stop
+  the application.
+- A parameter whose state is still unset (`null`) makes the component say
+  which input to set. Give inputs a default to avoid that.
+- Results are cached by the revisions of the inputs, so a computation must
+  depend only on its declared inputs and parameters. It runs on a blocking
+  thread and has no progress reporting or cancellation yet.
+- `ctx.param(&state)` finds the parameter bound to that state in the derived
+  dataset being computed. If the computation is reused with literals or with
+  other states, read by name: `ctx.param::<f64>("threshold")`. A `&&str` or
+  `&Cow<str>` name does not compile as is: pass `*name` or `name.as_ref()`.
+- A select or column select bound to a derived dataset must not offer values
+  of a dataset that reads that select's own state.
+- To test a computation without a server, build a `ComputeContext::new(inputs,
+  params)` (from `eario::data`) and call `Computation::run`; use `bind_state`
+  when the computation reads parameters by handle. `signal-lab` does this.
+- MCP tools never run a computation (ADR 0009): a derived dataset becomes
+  readable by an agent once the dashboard has displayed it.
+
+After changing the frontend, rebuild it with `cargo xtask frontend`:
+`cargo xtask check` does not, and the embedded bundle is not tracked.
+
 ## The frontend/backend contract
 
 The types exchanged over HTTP are defined once, in `eario-core`. With the
@@ -118,7 +217,8 @@ Playwright is a roadmap item.
 a CSV and a TSV with numeric, text and missing values, an empty CSV, a CSV
 with a ragged line, an XLSX workbook with three worksheets (one with mixed
 types and a blank header, one empty), and a text file with an `.xlsx`
-extension. Regenerating produces identical files.
+extension. Two more, `time-series.csv` and `groups.csv`, feed the `signal-lab`
+example. Regenerating produces identical files.
 
 Never add real data.
 

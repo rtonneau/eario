@@ -18,5 +18,6 @@ rewriting history.
 | [0009](0009-mcp-integration.md) | A read-only MCP endpoint over the application services | Accepted |
 | [0010](0010-deployment.md) | One executable per dashboard, loopback server, browser interface | Accepted |
 | [0011](0011-standalone-and-hub.md) | Each dashboard runs standalone or from a hub | Accepted (interface technology open) |
+| [0012](0012-computations-and-derived-datasets.md) | Named computations and derived datasets | Accepted |
 
 "Proposed" means the direction is documented and nothing is implemented.

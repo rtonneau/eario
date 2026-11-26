@@ -47,21 +47,27 @@ a desktop shell) must see the same application.
   the loopback interface.
 - Two tabs share one session, but a change made in one is not pushed to the
   other until it reloads or interacts.
-- Every query recomputes from the dataset. Acceptable now: filtering a few
-  million rows takes milliseconds.
+- Imported tables and filtered views are recomputed at each query.
+  Acceptable: filtering a few million rows takes milliseconds. Only derived
+  datasets (ADR 0012) are cached.
 
 ## Path to the deferred capabilities
 
-- **Cached intermediate results:** cache the filtered table per `DataView`,
-  keyed by the revision of its dependencies. `App::resolve_view` is the single
-  place to add it.
+- **Cached intermediate results (done for derived datasets).** `App` keeps
+  one cache entry per derived slot, the latest result, keyed by the revisions
+  of the datasets and state entries it depends on, directly or through other
+  derived datasets. A dependency that changes while a computation runs
+  prevents that result from being cached. A filtered view of an imported
+  table is still recomputed at each query: `App::resolve_view` is where a
+  per-`DataView` cache would go if it is ever needed.
 - **Background computation, progress, cancellation:** a task registry in
   `App` plus a server-sent events channel, used for imports and analyses that
   take longer than an interaction. `StateUpdate` already carries a revision
   that such events can reference.
-- **Typed state:** state values are JSON, validated against the input that
-  owns them. Typed handles (`State<T>`) in the Rust API can be layered on
-  `StateKey` without changing the wire format.
+- **Typed state (done).** State values are JSON, validated against the input
+  that owns them. `eario::State<T>` wraps a `StateKey` with a type marker in
+  the Rust API, and widgets and computations (`ctx.param(&state)`) take it.
+  The wire format did not change.
 
 ## Open questions
 
