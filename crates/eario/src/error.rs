@@ -22,6 +22,21 @@ pub enum Error {
         /// The underlying failure.
         source: io::Error,
     },
+    /// Two computations were registered under the same name.
+    #[error("computation `{0}` is registered more than once; give each computation its own name")]
+    DuplicateComputation(String),
+}
+
+impl Error {
+    /// Stable, machine-readable code of the error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::App(error) => error.code(),
+            Self::Serve(_) => "serve_failed",
+            Self::ReadFile { .. } => "read_file_failed",
+            Self::DuplicateComputation(_) => "duplicate_computation",
+        }
+    }
 }
 
 /// Result of building or serving a dashboard.

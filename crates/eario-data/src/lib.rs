@@ -27,7 +27,9 @@ mod xlsx;
 /// against Eario uses the same version and features (including `lazy`).
 pub use polars;
 
-pub use compute::{Computation, ComputationRegistry, ComputeContext, ComputeError};
+pub use compute::{
+    Computation, ComputationRegistry, ComputeContext, ComputeError, Param, ParamRef,
+};
 pub use dataset::Dataset;
 pub use error::DataError;
 pub use polars::frame::DataFrame;

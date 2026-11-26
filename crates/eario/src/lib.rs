@@ -9,8 +9,8 @@
 //!
 //! fn main() -> eario::Result<()> {
 //!     let data = DatasetId::new("data");
-//!     let x = StateKey::new("x");
-//!     let y = StateKey::new("y");
+//!     let x = State::new("x");
+//!     let y = State::new("y");
 //!
 //!     Dashboard::new("Quick look")
 //!         .page("Explore", |page| {
@@ -26,14 +26,19 @@
 //! ```
 //!
 //! The builder produces a serializable [`DashboardSpec`](core::DashboardSpec);
-//! see [`Dashboard::spec`]. The crates behind this facade are re-exported as
-//! [`core`], [`data`] and [`runtime`].
+//! see [`Dashboard::spec`]. Custom Rust logic is a
+//! [`Computation`](data::Computation) registered with
+//! [`Dashboard::computation`]; a derived dataset declared with
+//! [`Dashboard::derived`] holds its table, and components read it like an
+//! imported one. The crates behind this facade are re-exported as [`core`],
+//! [`data`] and [`runtime`].
 
 mod dashboard;
 mod error;
+mod state;
 pub mod widgets;
 
-pub use dashboard::{Dashboard, Page};
+pub use dashboard::{Dashboard, Derived, Page};
 pub use eario_core as core;
 pub use eario_data as data;
 /// Polars, the table library Eario is built on, at the version and with the
@@ -53,15 +58,17 @@ pub use eario_data as data;
 pub use eario_data::polars;
 pub use eario_runtime as runtime;
 pub use error::{Error, Result};
+pub use state::{State, filtered};
 pub use widgets::Widget;
 
 /// Everything an ordinary dashboard needs, in one import.
 pub mod prelude {
-    pub use eario_core::{DataView, DatasetId, StateKey};
+    pub use eario_core::{DataView, DatasetId, Filter, StateKey};
+    pub use eario_data::{Computation, ComputeContext, ComputeError};
 
     pub use crate::widgets::{
         Widget, column_select, data_table, dataset_info, file_import, filter_input, line_chart,
         numeric_column_select, scatter_chart, statistics, text,
     };
-    pub use crate::{Dashboard, Page, Result};
+    pub use crate::{Dashboard, Page, Result, State, filtered};
 }

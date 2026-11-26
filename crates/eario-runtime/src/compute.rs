@@ -73,6 +73,23 @@ impl DerivedSlot {
             .collect()
     }
 
+    /// The context of one evaluation: `inputs` and `params` (see
+    /// [`param_values`](Self::param_values)), and which parameter each state
+    /// entry is bound to, so the computation can read a parameter through a
+    /// state handle.
+    pub(crate) fn context(
+        &self,
+        inputs: BTreeMap<String, DataFrame>,
+        params: BTreeMap<String, Value>,
+    ) -> ComputeContext {
+        self.params.iter().fold(ComputeContext::new(inputs, params), |context, (name, binding)| {
+            match binding {
+                ParamBinding::State(key) => context.bind_state(key.clone(), name.clone()),
+                ParamBinding::Literal(_) => context,
+            }
+        })
+    }
+
     /// Describes the dataset; `table` is its table if it is computed for the
     /// current state.
     pub(crate) fn info(&self, table: Option<&DataFrame>) -> DatasetInfo {

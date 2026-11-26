@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
+use eario_core::StateKey;
 use polars::error::PolarsError;
 use polars::frame::DataFrame;
 use serde::de::DeserializeOwned;
@@ -127,21 +128,73 @@ impl fmt::Debug for Computation {
     }
 }
 
+/// Designates a parameter of a computation for [`ComputeContext::param`],
+/// which reads its value as a `T`.
+///
+/// A name (`&str`, `&String` or `String`) designates the parameter of that
+/// name, whatever its type. The `eario` facade implements it for its typed
+/// state handle, `&State<T>`, which designates the parameter bound to that
+/// state entry and fixes `T`.
+pub trait Param<T> {
+    /// How [`ComputeContext::param`] finds the parameter.
+    fn param_ref(&self) -> ParamRef<'_>;
+}
+
+/// How a [`Param`] designates a parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamRef<'a> {
+    /// The parameter of this name.
+    Name(&'a str),
+    /// The parameter bound to this state entry.
+    State(&'a StateKey),
+}
+
+impl<T> Param<T> for &str {
+    fn param_ref(&self) -> ParamRef<'_> {
+        ParamRef::Name(self)
+    }
+}
+
+impl<T> Param<T> for &String {
+    fn param_ref(&self) -> ParamRef<'_> {
+        ParamRef::Name(self)
+    }
+}
+
+impl<T> Param<T> for String {
+    fn param_ref(&self) -> ParamRef<'_> {
+        ParamRef::Name(self)
+    }
+}
+
 /// What a computation receives: its input tables and its parameter values,
 /// by the names it declares.
 #[derive(Debug, Clone, Default)]
 pub struct ComputeContext {
     inputs: BTreeMap<String, DataFrame>,
     params: BTreeMap<String, Value>,
+    /// The parameter bound to each state entry, for parameters read through
+    /// a state handle.
+    states: BTreeMap<StateKey, String>,
 }
 
 impl ComputeContext {
     /// A context holding the given input tables and parameter values.
     ///
     /// The runtime builds one for every evaluation. Build one yourself to
-    /// test a computation without running a dashboard.
+    /// test a computation without running a dashboard; call
+    /// [`bind_state`](Self::bind_state) if it reads parameters through state
+    /// handles.
     pub fn new(inputs: BTreeMap<String, DataFrame>, params: BTreeMap<String, Value>) -> Self {
-        Self { inputs, params }
+        Self { inputs, params, states: BTreeMap::new() }
+    }
+
+    /// Records that the parameter `param` is bound to the state entry
+    /// `state`, so that [`param`](Self::param) finds it from a handle of
+    /// that state.
+    pub fn bind_state(mut self, state: StateKey, param: impl Into<String>) -> Self {
+        self.states.insert(state, param.into());
+        self
     }
 
     /// The input table named `name`, with the filter of its binding, if
@@ -150,14 +203,32 @@ impl ComputeContext {
         self.inputs.get(name).ok_or_else(|| ComputeError::UnknownInput(name.to_owned()))
     }
 
-    /// The value of the parameter named `name`, read as a `T`.
+    /// The value of a parameter, read as a `T`.
+    ///
+    /// `param` is the name of the parameter, or, in the `eario` facade, the
+    /// typed handle of the state entry it is bound to (`&State<T>`), which
+    /// also fixes `T`.
+    ///
+    /// Reading through a handle works only where that very state entry is
+    /// bound to a parameter of this evaluation; otherwise it returns
+    /// [`ComputeError::UnboundState`]. A computation reused by several
+    /// derived datasets that bind its parameters to different state entries,
+    /// or to literals, must read them by parameter name.
     ///
     /// A parameter bound to a state entry the user has not set yet holds
     /// `null`. Unless `T` accepts `null`, as `Option` does, this returns
     /// [`ComputeError::UnsetParameter`]; returning that error from the
     /// computation makes the components reading the dataset ask for a value
     /// instead of reporting a failure.
-    pub fn param<T: DeserializeOwned>(&self, name: &str) -> Result<T, ComputeError> {
+    pub fn param<T: DeserializeOwned>(&self, param: impl Param<T>) -> Result<T, ComputeError> {
+        let name = match param.param_ref() {
+            ParamRef::Name(name) => name,
+            ParamRef::State(key) => self
+                .states
+                .get(key)
+                .map(String::as_str)
+                .ok_or_else(|| ComputeError::UnboundState(key.clone()))?,
+        };
         let value =
             self.params.get(name).ok_or_else(|| ComputeError::UnknownParameter(name.to_owned()))?;
         T::deserialize(value).map_err(|error| {
@@ -182,6 +253,10 @@ pub enum ComputeError {
     /// The computation read a parameter it does not declare.
     #[error("the computation has no parameter `{0}`")]
     UnknownParameter(String),
+    /// The computation read a parameter through the handle of a state entry
+    /// none of its parameters is bound to.
+    #[error("no parameter of the computation is bound to state `{0}`")]
+    UnboundState(StateKey),
     /// The parameter has no value yet: the state entry it is bound to is
     /// `null`.
     #[error("parameter `{0}` has no value yet")]
@@ -218,6 +293,7 @@ impl ComputeError {
         match self {
             Self::UnknownInput(_) => "unknown_input",
             Self::UnknownParameter(_) => "unknown_parameter",
+            Self::UnboundState(_) => "unbound_state",
             Self::UnsetParameter(_) => "unset_parameter",
             Self::InvalidParameter { .. } => "invalid_parameter",
             Self::Data(error) => error.code(),
@@ -296,6 +372,41 @@ mod tests {
         assert!(matches!(&unset, Err(ComputeError::UnsetParameter(name)) if name == "column"));
         assert_eq!(unset.err().map(|error| error.code()), Some("unset_parameter"));
         assert_eq!(context.param::<Option<String>>("column")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parameter_is_read_by_an_owned_or_borrowed_string_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = context()?;
+        let name = String::from("rows");
+        let borrowed: usize = context.param(&name)?;
+        let owned: usize = context.param(name)?;
+        assert_eq!((borrowed, owned), (2, 2));
+        Ok(())
+    }
+
+    /// A typed handle, as the `eario` facade defines one.
+    struct Handle<T>(StateKey, std::marker::PhantomData<T>);
+
+    impl<T> Param<T> for &Handle<T> {
+        fn param_ref(&self) -> ParamRef<'_> {
+            ParamRef::State(&self.0)
+        }
+    }
+
+    #[test]
+    fn parameter_is_found_through_the_state_it_is_bound_to()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = context()?.bind_state(StateKey::new("row_count"), "rows");
+        let row_count = Handle::<u32>(StateKey::new("row_count"), std::marker::PhantomData);
+        let rows = context.param(&row_count)?;
+        assert_eq!(rows, 2_u32);
+
+        let unbound = Handle::<u32>(StateKey::new("other"), std::marker::PhantomData);
+        let error = context.param(&unbound).err();
+        assert!(matches!(&error, Some(ComputeError::UnboundState(key)) if key.as_str() == "other"));
+        assert_eq!(error.map(|error| error.code()), Some("unbound_state"));
         Ok(())
     }
 

@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use eario::polars::prelude::{DataType, IntoLazy, col, lit};
 use eario::prelude::*;
 use eario::runtime::{RunningServer, start};
 use serde_json::Value;
@@ -16,8 +17,8 @@ fn fixture(relative: &str) -> PathBuf {
 
 fn explorer() -> Dashboard {
     let data = DatasetId::new("data");
-    let x = StateKey::new("x");
-    let y = StateKey::new("y");
+    let x = State::new("x");
+    let y = State::new("y");
     Dashboard::new("End to end")
         .open_browser(false)
         .remember_preferences(false)
@@ -28,6 +29,49 @@ fn explorer() -> Dashboard {
                     numeric_column_select("Y", &data, &y, 1),
                 ])
                 .row([scatter_chart(&data, &x, &y).id("chart")])
+        })
+        .load_file(&data, fixture("excel/samples.xlsx"))
+}
+
+/// A chart of the imported data beside a chart of a derived dataset: the
+/// filtered imported rows with the column on the vertical axis scaled by a
+/// constant.
+fn scaled_explorer() -> Dashboard {
+    let data = DatasetId::new("data");
+    let scaled = DatasetId::new("scaled");
+    let x = State::<String>::new("x");
+    let y = State::<String>::new("y");
+    let filter = State::<Filter>::new("filter");
+    let column = y.clone();
+    let scale = Computation::new("scale", move |ctx| {
+        // Read through the handle of the state the parameter is bound to.
+        let name: String = ctx.param(&column)?;
+        let factor: f64 = ctx.param("factor")?;
+        let rows = ctx.input("table")?.clone().lazy();
+        Ok(rows.with_column(col(name.as_str()).cast(DataType::Float64) * lit(factor)).collect()?)
+    })
+    .input("table")
+    .param("column")
+    .param("factor")
+    .describe("The table with one column multiplied by a factor.");
+
+    Dashboard::new("Derived end to end")
+        .open_browser(false)
+        .remember_preferences(false)
+        .computation(scale)
+        .derived(&scaled, "scale", |d| {
+            d.input("table", filtered(&data, &filter)).param("column", &y).literal("factor", 2.0)
+        })
+        .page("Compare", |page| {
+            page.row([
+                numeric_column_select("X", &data, &x, 0),
+                numeric_column_select("Y", &data, &y, 1),
+                filter_input(&data, &filter),
+            ])
+            .row([
+                scatter_chart(&data, &x, &y).id("raw"),
+                scatter_chart(&scaled, &x, &y).id("scaled"),
+            ])
         })
         .load_file(&data, fixture("excel/samples.xlsx"))
 }
@@ -99,6 +143,74 @@ async fn dashboard_is_served_with_its_startup_file_and_stops_on_request() -> Tes
 async fn server_stops_when_asked_from_rust() -> TestResult {
     let (app, config) = explorer().build()?;
     let server = start(app, config).await?;
+    server.shutdown();
+    server.wait().await?;
+    Ok(())
+}
+
+/// The `[x, y]` points of a chart component, as served.
+async fn chart_points(
+    server: &RunningServer,
+    id: &str,
+) -> Result<(Value, Vec<(f64, f64)>), Box<dyn std::error::Error>> {
+    let authorized = [("x-eario-token", server.token())];
+    let path = format!("/api/components/{id}/data");
+    let (status, body) = http(server, "GET", &path, &authorized, "").await?;
+    assert_eq!(status, 200, "{body}");
+    let data: Value = serde_json::from_str(&body)?;
+    assert_eq!(data["type"], "chart", "{body}");
+    let points = data["chart"]["points"]
+        .as_array()
+        .ok_or("chart without points")?
+        .iter()
+        .map(|point| Some((point[0].as_f64()?, point[1].as_f64()?)))
+        .collect::<Option<Vec<_>>>()
+        .ok_or("point that is not a pair of numbers")?;
+    Ok((data, points))
+}
+
+#[tokio::test]
+async fn chart_reads_a_derived_dataset_through_the_server() -> TestResult {
+    let (app, config) = scaled_explorer().build()?;
+    let server = start(app, config).await?;
+    let token = server.token().to_owned();
+
+    let (status, body) =
+        http(&server, "GET", "/api/app", &[("x-eario-token", token.as_str())], "").await?;
+    assert_eq!(status, 200, "{body}");
+    let info: Value = serde_json::from_str(&body)?;
+    assert_eq!(info["spec"]["datasets"][1]["id"], "scaled");
+    assert_eq!(info["spec"]["datasets"][1]["source"]["type"], "computed");
+
+    let (_, raw) = chart_points(&server, "raw").await?;
+    let (scaled_data, scaled) = chart_points(&server, "scaled").await?;
+    assert_eq!(scaled_data["chart"]["y_label"], "counts");
+    assert_eq!(scaled.len(), 38, "the rows without counts are skipped in both");
+    assert_eq!(scaled.len(), raw.len());
+    for ((raw_x, raw_y), (x, y)) in raw.iter().zip(&scaled) {
+        assert_eq!((*x, *y), (*raw_x, raw_y * 2.0));
+    }
+
+    // Choosing another column recomputes the derived dataset with it.
+    let headers = [("x-eario-token", token.as_str()), ("Content-Type", "application/json")];
+    let (status, body) = http(&server, "PUT", "/api/state/y", &headers, r#""dead_time""#).await?;
+    assert_eq!(status, 200, "{body}");
+    let (_, raw) = chart_points(&server, "raw").await?;
+    let (scaled_data, scaled) = chart_points(&server, "scaled").await?;
+    assert_eq!(scaled_data["chart"]["y_label"], "dead_time");
+    assert_eq!(scaled.len(), 40);
+    for ((raw_x, raw_y), (x, y)) in raw.iter().zip(&scaled) {
+        assert_eq!((*x, *y), (*raw_x, raw_y * 2.0));
+    }
+
+    // The filter of the input view applies before the computation.
+    let filter = r#"{"column":"detector","op":"eq","value":"A"}"#;
+    let (status, body) = http(&server, "PUT", "/api/state/filter", &headers, filter).await?;
+    assert_eq!(status, 200, "{body}");
+    let (_, raw) = chart_points(&server, "raw").await?;
+    let (_, scaled) = chart_points(&server, "scaled").await?;
+    assert_eq!((raw.len(), scaled.len()), (40, 20), "half the rows are from detector A");
+
     server.shutdown();
     server.wait().await?;
     Ok(())

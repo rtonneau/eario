@@ -12,10 +12,10 @@ use eario::prelude::*;
 /// Describes the dashboard. Everything specific to this application is here.
 fn dashboard() -> (Dashboard, DatasetId) {
     let data = DatasetId::new("data");
-    let x = StateKey::new("x");
-    let y = StateKey::new("y");
-    let filter = StateKey::new("filter");
-    let filtered = DataView::of(&data).filtered_by(&filter);
+    let x = State::new("x");
+    let y = State::new("y");
+    let filter = State::<Filter>::new("filter");
+    let rows = filtered(&data, &filter);
 
     let dashboard = Dashboard::new("Data Explorer")
         .page("Explore", |page| {
@@ -25,10 +25,10 @@ fn dashboard() -> (Dashboard, DatasetId) {
                     numeric_column_select("Y axis", &data, &y, 1),
                     filter_input(&data, &filter).span(6),
                 ])
-                .row([scatter_chart(filtered.clone(), &x, &y).title("Scatter plot")])
-                .row([statistics(filtered.clone())])
+                .row([scatter_chart(rows.clone(), &x, &y).title("Scatter plot")])
+                .row([statistics(rows.clone())])
         })
-        .page("Rows", |page| page.row([data_table(filtered)]));
+        .page("Rows", |page| page.row([data_table(rows)]));
     (dashboard, data)
 }
 

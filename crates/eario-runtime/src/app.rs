@@ -23,9 +23,7 @@ use eario_core::{
     DataView, DatasetId, DatasetInfo, Dependency, Filter, ParamBinding, Preferences, StateKey,
     StateMap, StateUpdate,
 };
-use eario_data::{
-    ComputationRegistry, ComputeContext, ComputeError, DataFrame, Dataset, ReaderRegistry, query,
-};
+use eario_data::{ComputationRegistry, ComputeError, DataFrame, Dataset, ReaderRegistry, query};
 use serde_json::Value;
 
 use crate::compute::{self, CacheEntry, DerivedSlot, Revisions};
@@ -674,7 +672,7 @@ impl App {
         }
 
         let name = slot.computation.name();
-        match compute::run(&slot.computation, &ComputeContext::new(inputs, params)) {
+        match compute::run(&slot.computation, &slot.context(inputs, params)) {
             Ok(frame) => {
                 let mut session = self.write();
                 if slot.key(&session.revisions) == key {
