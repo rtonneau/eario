@@ -3,9 +3,8 @@
   "project": "Eario",
   "updated": "2026-11-26",
   "leads": {
-    "now": "small design session: the only thing blocking M3",
-    "next": "M1 and M2 can run in parallel",
-    "later": "M3 waits on A; the rest follow the roadmap order"
+    "next": "M1, M2 and M3 are all unblocked; M3 first keeps new dashboards hub-ready",
+    "later": "the rest follow the roadmap order; M11 waits on M3"
   },
   "items": [
     {
@@ -66,22 +65,20 @@
     {
       "id": "A",
       "title": "Accept ADR 0011 (standalone + hub)",
-      "status": "now",
-      "state": "PROPOSED · NEEDS GRILL",
+      "status": "done",
+      "state": "ACCEPTED · COMMITTED c8ce388 · NOT PUSHED",
       "points": [
-        "Hub quits: stop children or leave them",
-        "Hub UI: Eario components or own page",
-        "Updates: in place or side by side",
-        "Windows console / tray for all dashboards"
+        "Hub quits: dashboards **keep running**, re-attach via run files",
+        "Updates: **in place**, one entry per slug",
+        "Windows: **tray icon**, no console for hub or children",
+        "Hub UI technology: still open, decided at M3 start"
       ],
       "needs": [
         "D"
       ],
       "details": {
-        "guide": [
-          "settle the open questions of ADR 0011",
-          "set its status to Accepted in the ADR and the index",
-          "commit"
+        "history": [
+          "commit `c8ce388` on `main`, not pushed"
         ],
         "links": [
           {
@@ -132,15 +129,15 @@
     {
       "id": "M3",
       "title": "Standalone and hub",
-      "status": "later",
-      "state": "PLANNED · BLOCKED ON A",
+      "status": "next",
+      "state": "PLANNED · UNBLOCKED · UI CHOICE FIRST",
       "points": [
-        "Launch contract: `--eario-manifest`, `--eario-child`",
-        "`--eario-install` / `--eario-uninstall`",
-        "`eario-hub`: registry with hash check",
-        "List, start, open, stop, uninstall",
-        "Start by registry id only; security docs updated",
-        "Both examples run from the hub"
+        "Decide hub UI: frontend view or `DashboardSpec`",
+        "Contract: `--eario-manifest`, `--eario-child <run-file>`",
+        "`--eario-install` / `--eario-uninstall`, in-place update",
+        "`eario-hub`: registry + hash check, re-attach at start",
+        "Tray on Windows, no console windows",
+        "Start by registry id only; security docs updated"
       ],
       "needs": [
         "M0",
