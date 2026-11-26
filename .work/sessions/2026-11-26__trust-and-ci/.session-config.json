@@ -143,6 +143,30 @@
         "ticket": "03-playwright-e2e",
         "commit": "ae1aaf8"
       }
+    },
+    {
+      "at": "2026-11-26T20:23:53.786Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-axe-accessibility.md",
+        "03-implement/04-axe-accessibility/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-axe-accessibility"
+      }
+    },
+    {
+      "at": "2026-11-26T20:27:10.408Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-axe-accessibility/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-axe-accessibility",
+        "commit": "6557279"
+      }
     }
   ],
   "current_phase": "ship",
