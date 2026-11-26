@@ -71,6 +71,30 @@
       "detail": {
         "tickets": 6
       }
+    },
+    {
+      "at": "2026-11-26T20:08:25.173Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/01-cargo-deny.md",
+        "03-implement/01-cargo-deny/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-cargo-deny"
+      }
+    },
+    {
+      "at": "2026-11-26T20:13:12.383Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/01-cargo-deny/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-cargo-deny",
+        "commit": "81a802a"
+      }
     }
   ],
   "current_phase": "ship",
@@ -79,5 +103,6 @@
     "base_branch": "main",
     "branch_created_at": "2026-11-26T20:08:12.039Z",
     "pr_url": null
-  }
+  },
+  "ship_mode": "inline"
 }
