@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+
+# Frontend dependencies and build output. The build output is embedded by
+# eario-runtime and shipped in the published crate; it is not tracked.
+node_modules/
+/crates/eario-runtime/frontend-dist/
+
+# Generated data that is too large to track (cargo xtask large-csv)
+/fixtures/generated/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local agent state
+.claude/

@@ -1,0 +1,8 @@
+[alias]
+xtask = "run --package xtask --"
+
+[env]
+# Where `cargo xtask gen-types` writes the TypeScript bindings of the
+# contract types of eario-core (see docs/development/contract.md).
+TS_RS_EXPORT_DIR = { value = "frontend/src/lib/generated", relative = true }
+TS_RS_LARGE_INT = "number"

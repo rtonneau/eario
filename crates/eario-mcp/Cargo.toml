@@ -1,0 +1,28 @@
+[package]
+name = "eario-mcp"
+description = "Model Context Protocol server exposing a running Eario application to AI agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+eario-core.workspace = true
+eario-data.workspace = true
+eario-runtime.workspace = true
+axum.workspace = true
+rmcp = { workspace = true, features = ["server", "macros", "transport-streamable-http-server"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

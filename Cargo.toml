@@ -1,0 +1,81 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/eario",
+    "crates/eario-core",
+    "crates/eario-data",
+    "crates/eario-mcp",
+    "crates/eario-runtime",
+    "examples/data-explorer",
+    "examples/hello-dashboard",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rtonneau/eario"
+homepage = "https://github.com/rtonneau/eario"
+authors = ["The Eario contributors"]
+keywords = ["dashboard", "data-visualization", "data-analysis", "local-first"]
+categories = ["visualization", "science", "web-programming"]
+
+[workspace.dependencies]
+# Internal crates
+eario = { path = "crates/eario", version = "0.1.0" }
+eario-core = { path = "crates/eario-core", version = "0.1.0" }
+eario-data = { path = "crates/eario-data", version = "0.1.0" }
+eario-runtime = { path = "crates/eario-runtime", version = "0.1.0" }
+eario-mcp = { path = "crates/eario-mcp", version = "0.1.0" }
+
+# Serialization and errors
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
+
+# Data
+# Eager API only: the lazy engine roughly doubles the build and nothing uses it yet.
+polars = { version = "0.55", default-features = false, features = ["csv", "fmt"] }
+calamine = "0.38"
+
+# Runtime
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust-embed = "8"
+mime_guess = "2"
+webbrowser = "1"
+directories = "6"
+getrandom = "0.4"
+
+# MCP
+rmcp = { version = "3", default-features = false }
+
+# Development
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"
+criterion = { version = "0.8", default-features = false }
+rust_xlsxwriter = "0.104"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.release]
+lto = "thin"
+strip = true

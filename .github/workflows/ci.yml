@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npm run check
+      - name: Tests
+        run: npm run test
+      - name: Build
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/eario-runtime/frontend-dist
+          if-no-files-found: error
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      # The built frontend is embedded by eario-runtime.
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/eario-runtime/frontend-dist
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lints
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --all-features
+      - name: Documentation
+        run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Build without optional features
+        run: cargo build --workspace
+
+  contract:
+    name: Contract bindings are up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate TypeScript bindings
+        run: cargo xtask gen-types
+      - name: Fail if the committed bindings differ
+        run: git diff --exit-code -- frontend/src/lib/generated

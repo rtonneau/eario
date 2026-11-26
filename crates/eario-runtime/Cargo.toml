@@ -1,0 +1,40 @@
+[package]
+name = "eario-runtime"
+description = "Application services, local HTTP server and embedded frontend of the Eario framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+build = "build.rs"
+# `frontend-dist` is build output and is not tracked by git. Listing it here
+# ships the prebuilt frontend in the published crate, so applications depending
+# on Eario never need Node.js.
+include = ["src/**", "build.rs", "frontend-dist/**", "Cargo.toml"]
+
+[dependencies]
+eario-core.workspace = true
+eario-data.workspace = true
+axum.workspace = true
+directories.workspace = true
+getrandom.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+webbrowser.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

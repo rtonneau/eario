@@ -1,0 +1,25 @@
+[package]
+name = "eario-core"
+description = "Dashboard specification, identifiers and frontend/backend contract types of the Eario framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+# Derives TypeScript bindings for the contract types. Only used by
+# `cargo xtask gen-types`; applications never need it.
+ts = ["dep:ts-rs"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs = { workspace = true, optional = true }
+
+[lints]
+workspace = true
