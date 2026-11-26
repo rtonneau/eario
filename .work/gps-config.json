@@ -8,5 +8,11 @@
     "enabled": false,
     "consent": false,
     "detected_at": "2026-11-26T10:28:36.276Z"
+  },
+  "release": {
+    "versionFiles": [
+      "Cargo.toml"
+    ],
+    "versionFilesSource": "detected"
   }
 }

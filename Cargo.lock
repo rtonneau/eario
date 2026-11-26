@@ -807,7 +807,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "eario"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "eario-core",
  "eario-data",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "eario-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "eario-data"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "calamine",
  "criterion",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "eario-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "eario-core",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "eario-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "directories",
