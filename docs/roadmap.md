@@ -24,21 +24,27 @@ Workspace, dashboard specification, data import, application services, local
 server with its security layer, generic frontend, data-explorer example,
 read-only MCP endpoint, tests, documentation.
 
-## M1. Make it a framework: custom Rust logic
+## M1. Make it a framework: custom Rust logic (done)
 
-The bootstrap can only combine built-in components. This milestone removes
-that limit, which is the largest one.
+The bootstrap could only combine built-in components. This milestone removed
+that limit (ADR 0012). What landed:
 
-- A registry of named Rust functions in `App`: computed datasets
-  (`tables + parameters → table`) and custom statistics. The specification
-  refers to them by name (ADR 0001).
-- Derived datasets as first-class slots, so a view can read the output of a
-  computation.
-- More input components: number, text, slider, select, checkbox.
-- A cache of derived tables keyed by the revision of their dependencies
-  (ADR 0002).
-- Typed state handles in the Rust API.
-- A second example that uses a custom computation.
+- A registry of named Rust computations (`Computation`, `Dashboard::computation`):
+  `tables + parameters → table`. A custom statistic is a computation that
+  returns a small table. The specification refers to them by name.
+- Derived datasets as first-class slots (`Dashboard::derived`), including a
+  derived dataset computed from another, read by every component.
+- Number, slider, text, select (static or from a column) and checkbox inputs.
+- A cache of derived tables, one per slot, keyed by the revision of their
+  dependencies (ADR 0002).
+- Typed state handles, `State<T>`, in the Rust API.
+- Polars re-exported as `eario::polars`.
+- A second example, `signal-lab`, that uses custom computations.
+- MCP reads derived datasets from the cache only (ADR 0009).
+
+Left out on purpose: progress and cancellation (M7), custom component kinds,
+Python computations (M10), persistence of derived results. Remaining limits
+are listed in [project-status.md](project-status.md).
 
 ## M2. Trust and continuous verification
 

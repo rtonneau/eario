@@ -2,6 +2,7 @@
 import type { ChartMark } from "./ChartMark";
 import type { DataView } from "./DataView";
 import type { DatasetId } from "./DatasetId";
+import type { SelectOptions } from "./SelectOptions";
 import type { StateKey } from "./StateKey";
 
 /**
@@ -80,4 +81,107 @@ max_points: number, } | { "type": "statistics",
 /**
  * Rows to summarize.
  */
-view: DataView, };
+view: DataView, } | { "type": "number_input", 
+/**
+ * Label of the input.
+ */
+label: string, 
+/**
+ * State entry receiving the number.
+ */
+state: StateKey, 
+/**
+ * Smallest accepted value; any when absent.
+ */
+min: number | null, 
+/**
+ * Largest accepted value; any when absent.
+ */
+max: number | null, 
+/**
+ * Accepted values are `min` (0 when absent) plus a whole number of
+ * steps; any value when absent.
+ */
+step: number | null, 
+/**
+ * Accept whole numbers only.
+ */
+integer: boolean, 
+/**
+ * Value the state entry starts with.
+ */
+default: number, } | { "type": "slider", 
+/**
+ * Label of the input.
+ */
+label: string, 
+/**
+ * State entry receiving the number.
+ */
+state: StateKey, 
+/**
+ * Smallest value.
+ */
+min: number, 
+/**
+ * Largest value.
+ */
+max: number, 
+/**
+ * Distance between two neighbouring values, counted from `min`.
+ */
+step: number, 
+/**
+ * Accept whole numbers only.
+ */
+integer: boolean, 
+/**
+ * Value the state entry starts with.
+ */
+default: number, } | { "type": "text_input", 
+/**
+ * Label of the input.
+ */
+label: string, 
+/**
+ * State entry receiving the text.
+ */
+state: StateKey, 
+/**
+ * Text the state entry starts with.
+ */
+default: string, 
+/**
+ * Largest number of characters accepted.
+ */
+max_length: number, } | { "type": "select", 
+/**
+ * Label of the input.
+ */
+label: string, 
+/**
+ * State entry receiving the chosen value.
+ */
+state: StateKey, 
+/**
+ * Where the values on offer come from.
+ */
+options: SelectOptions, 
+/**
+ * Value chosen at start-up, or when the values on offer change and
+ * no longer include the current one. When absent, or not on offer,
+ * the first value is chosen.
+ */
+default: string | null, } | { "type": "checkbox", 
+/**
+ * Label of the input.
+ */
+label: string, 
+/**
+ * State entry receiving `true` or `false`.
+ */
+state: StateKey, 
+/**
+ * Value the state entry starts with.
+ */
+default: boolean, };

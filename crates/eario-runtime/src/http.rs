@@ -118,11 +118,21 @@ impl From<AppError> for Failure {
             AppError::UnknownComponent(_)
             | AppError::UnknownDataset(_)
             | AppError::UnknownState(_) => StatusCode::NOT_FOUND,
-            AppError::DatasetNotLoaded(_) => StatusCode::CONFLICT,
-            AppError::InvalidStateValue { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            AppError::DatasetNotLoaded(_)
+            | AppError::DerivedDataset(_)
+            | AppError::NotComputed(_) => StatusCode::CONFLICT,
+            AppError::InvalidStateValue { .. } | AppError::Computation { .. } => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             AppError::Data(DataError::Engine(_))
             | AppError::Spec(_)
-            | AppError::Preferences { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            | AppError::Preferences { .. }
+            | AppError::UnknownComputation { .. }
+            | AppError::UndeclaredComputationInput { .. }
+            | AppError::MissingComputationInput { .. }
+            | AppError::UndeclaredComputationParameter { .. }
+            | AppError::MissingComputationParameter { .. }
+            | AppError::SelectDependsOnItsState { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::Data(_) => StatusCode::UNPROCESSABLE_ENTITY,
         };
         if status.is_server_error() {

@@ -80,7 +80,14 @@ Implemented and tested:
 - Import of CSV, TSV and XLSX files from the browser or at start-up, with
   worksheet selection, type inference and missing values.
 - Components: file import, dataset metadata, column selection, row filter,
-  paged table, scatter and line charts, descriptive statistics, text.
+  paged table, scatter and line charts, descriptive statistics, text, and
+  number, slider, text, select and checkbox inputs with server-side
+  validation.
+- Custom Rust computations: register a named function that turns tables and
+  parameters into a table, declare a derived dataset from it, and every
+  component reads it like an imported one. Results are cached until an input
+  changes; Polars is available as `eario::polars`. State handles are typed
+  (`State<T>`). There is no progress reporting or cancellation yet.
 - Dependency tracking: a change invalidates only the components reading it.
 - Charts by Apache ECharts with zoom, pan and image export; large series are
   downsampled on the backend.
@@ -95,10 +102,11 @@ Experimental:
   agent inspect the dashboard and its datasets. It is off unless the
   application enables it (Cargo feature `mcp` and `Dashboard::mcp(true)`).
   What an agent reads may leave your machine, depending on the agent you
-  connect. See [ADR 0009](docs/adr/0009-mcp-integration.md).
+  connect. It never runs a computation: a derived dataset is readable once the
+  dashboard has displayed it. See [ADR 0009](docs/adr/0009-mcp-integration.md).
 
 Planned, not implemented: more chart types, grouping and joins, saved
-sessions, custom Rust computations, data mining, Python scripts, an AI
+sessions, data mining, Python scripts, an AI
 assistant, a visual dashboard editor, a desktop shell. See the
 [roadmap](docs/roadmap.md).
 
@@ -118,6 +126,16 @@ cargo run -p data-explorer -- fixtures/excel/samples.xlsx
 
 The browser opens on the dashboard. Choose **Quit** in the header, or press
 Ctrl+C in the terminal, to stop.
+
+To try custom computations, run the `signal-lab` example, which has a
+smoothed signal with a histogram and a per-group summary:
+
+```text
+cargo run -p signal-lab -- fixtures/csv/time-series.csv fixtures/csv/groups.csv
+```
+
+Its source is [`examples/signal-lab`](examples/signal-lab/src/main.rs). The
+sample files are written by `cargo xtask fixtures`.
 
 To build a standalone executable:
 
@@ -160,7 +178,7 @@ the [decision records](docs/adr/README.md).
 | `crates/eario-runtime` | Application services, local server, embedded frontend |
 | `crates/eario-mcp` | MCP server (optional) |
 | `frontend/` | Generic Svelte and TypeScript frontend |
-| `examples/` | `hello-dashboard`, `data-explorer` |
+| `examples/` | `hello-dashboard`, `data-explorer`, `signal-lab` |
 | `fixtures/` | Synthetic test data |
 | `docs/` | Architecture, decisions, roadmap, status, development guide |
 | `xtask/` | Development commands |
@@ -177,8 +195,9 @@ See the [development guide](docs/development/guide.md).
 
 ## Roadmap
 
-The next milestones are custom Rust computations, saved sessions, and more
-chart and transformation types. The full list is in the
+Custom Rust computations are done. The next milestones are continuous
+verification, standalone and hub operation, and import, chart and
+transformation types. The full list is in the
 [roadmap](docs/roadmap.md).
 
 ## Contributing

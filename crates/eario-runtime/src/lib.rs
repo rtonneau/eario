@@ -2,7 +2,9 @@
 //!
 //! - [`app`]: the application services. An [`App`] owns a dashboard, its
 //!   datasets and its state, and answers every question a client can ask.
-//!   The HTTP API and the MCP server are both thin adapters over it.
+//!   The HTTP API and the MCP server are both thin adapters over it. It
+//!   evaluates the derived datasets with the computations registered in
+//!   [`AppOptions::computations`], and caches their tables.
 //! - [`server`]: the local HTTP server, bound to the loopback interface,
 //!   that serves the API and the embedded frontend.
 //! - [`preferences`]: user preferences stored on the local machine.
@@ -12,6 +14,7 @@
 
 pub mod app;
 mod assets;
+mod compute;
 pub mod error;
 mod http;
 #[cfg(test)]

@@ -15,7 +15,10 @@ use crate::spec::{ChartMark, DashboardSpec};
 /// The application state: one JSON value per state entry.
 ///
 /// A column selection holds a column name or `null`; a filter input holds a
-/// [`Filter`](crate::Filter) or `null`.
+/// [`Filter`](crate::Filter) or `null`; a number input or a slider holds a
+/// number, a text input a string, a checkbox a boolean, and a select one of
+/// its options (or `null` while a select offering the values of a column has
+/// no dataset).
 pub type StateMap = BTreeMap<StateKey, Value>;
 
 /// Everything the frontend needs to render a dashboard on start-up.
@@ -121,9 +124,23 @@ pub enum ComponentData {
         /// One row of statistics per numeric column.
         stats: StatsTable,
     },
+    /// Data of a number input, a slider, a text input or a checkbox: none.
+    /// What they accept is in the specification.
+    Input,
+    /// Data of a select: the values on offer.
+    Select {
+        /// Values the user can choose from, in order.
+        options: Vec<String>,
+        /// Whether the column holds more distinct values than are offered;
+        /// only the first ones, in sorted order, are.
+        truncated: bool,
+    },
 }
 
 /// Metadata of a loaded dataset.
+///
+/// For a derived dataset, `source_name` is the name of its computation and
+/// `format` is `computed`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DatasetInfo {
@@ -143,6 +160,22 @@ pub struct DatasetInfo {
     pub sheets: Vec<String>,
     /// Worksheet currently loaded, for formats with worksheets.
     pub selected_sheet: Option<String>,
+    /// For a derived dataset, whether its table is computed for the current
+    /// state. Not set for an imported dataset.
+    pub derived: Option<DerivedStatus>,
+}
+
+/// Whether the table of a derived dataset reflects the current state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedStatus {
+    /// The table was computed from the current inputs and parameters.
+    Computed,
+    /// The table has not been computed from the current inputs and
+    /// parameters yet; it is when a component reads it. The description
+    /// then has no rows and no columns.
+    NotComputed,
 }
 
 /// Metadata of one column.
@@ -257,6 +290,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ComponentData::Text)?,
             serde_json::json!({ "type": "text" })
+        );
+        let select = ComponentData::Select { options: vec!["Si".to_owned()], truncated: true };
+        assert_eq!(
+            serde_json::to_value(&select)?,
+            serde_json::json!({ "type": "select", "options": ["Si"], "truncated": true })
         );
         Ok(())
     }

@@ -5,13 +5,18 @@
 import type { Component } from 'svelte';
 
 import Chart from './components/Chart.svelte';
+import Checkbox from './components/Checkbox.svelte';
 import ColumnSelect from './components/ColumnSelect.svelte';
 import DataTable from './components/DataTable.svelte';
 import DatasetInfo from './components/DatasetInfo.svelte';
 import FileImport from './components/FileImport.svelte';
 import FilterInput from './components/FilterInput.svelte';
+import NumberInput from './components/NumberInput.svelte';
+import Select from './components/Select.svelte';
+import Slider from './components/Slider.svelte';
 import Statistics from './components/Statistics.svelte';
 import TextBlock from './components/TextBlock.svelte';
+import TextInput from './components/TextInput.svelte';
 import type { ComponentKind } from './generated/ComponentKind';
 import type { ComponentSpec } from './generated/ComponentSpec';
 
@@ -26,4 +31,9 @@ export const registry: Record<ComponentKind['type'], ComponentRenderer> = {
   data_table: DataTable,
   chart: Chart,
   statistics: Statistics,
+  number_input: NumberInput,
+  slider: Slider,
+  text_input: TextInput,
+  select: Select,
+  checkbox: Checkbox,
 };

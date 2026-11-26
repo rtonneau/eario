@@ -22,9 +22,10 @@ pub use filter::{Filter, FilterOp, FilterValue};
 pub use id::{ComponentId, DatasetId, StateKey};
 pub use payload::{
     ApiError, AppInfo, ChartData, ColumnInfo, ColumnKind, ColumnStats, ComponentData, DatasetInfo,
-    Preferences, StateMap, StateUpdate, StatsTable, TablePage, Theme,
+    DerivedStatus, Preferences, StateMap, StateUpdate, StatsTable, TablePage, Theme,
 };
 pub use spec::{
-    ChartMark, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, Dependency,
-    PageSpec, RowSpec, SPEC_VERSION, SpecError,
+    ChartMark, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, DatasetSource,
+    Dependency, NumberConstraints, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, SelectOptions,
+    SpecError,
 };

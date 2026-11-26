@@ -36,4 +36,13 @@ chart: ChartData, } | { "type": "statistics",
 /**
  * One row of statistics per numeric column.
  */
-stats: StatsTable, };
+stats: StatsTable, } | { "type": "input" } | { "type": "select", 
+/**
+ * Values the user can choose from, in order.
+ */
+options: Array<string>, 
+/**
+ * Whether the column holds more distinct values than are offered;
+ * only the first ones, in sorted order, are.
+ */
+truncated: boolean, };

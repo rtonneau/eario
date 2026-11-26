@@ -8,6 +8,7 @@ members = [
     "crates/eario-runtime",
     "examples/data-explorer",
     "examples/hello-dashboard",
+    "examples/signal-lab",
     "xtask",
 ]
 
@@ -37,7 +38,7 @@ ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }
 
 # Data
 # Eager API only: the lazy engine roughly doubles the build and nothing uses it yet.
-polars = { version = "0.55", default-features = false, features = ["csv", "fmt"] }
+polars = { version = "0.55", default-features = false, features = ["csv", "fmt", "lazy"] }
 calamine = "0.38"
 
 # Runtime
@@ -75,6 +76,11 @@ unwrap_used = "warn"
 expect_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
+
+# Full debug symbols for every dependency cost about 1 GB per test binary
+# once Polars `lazy` is enabled. Line tables keep backtraces readable.
+[profile.dev.package."*"]
+debug = "line-tables-only"
 
 [profile.release]
 lto = "thin"

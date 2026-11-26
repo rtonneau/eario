@@ -26,8 +26,10 @@ every reference resolves and every state entry has exactly one writer.
 The specification carries `spec_version`. A specification from a newer
 version is rejected.
 
-Executable code is kept out of the specification. Today all behaviour is
-built in: a component kind selects a function of the runtime.
+Executable code is kept out of the specification. A component kind selects a
+function of the runtime, and a derived dataset names a computation that the
+developer registered in Rust (ADR 0012): the specification stores the name and
+serializable bindings, never the function.
 
 ## Alternatives
 
@@ -45,8 +47,10 @@ built in: a component kind selects a function of the runtime.
 
 ## Consequences
 
-- The set of component kinds is closed. A dashboard can only combine what the
-  framework provides. This is the main limitation of the bootstrap.
+- The set of component kinds is closed. A dashboard combines the components
+  the framework provides, and custom logic goes through registered
+  computations that produce derived datasets (ADR 0012), not through new
+  component kinds.
 - A configuration-defined dashboard needs only a loader:
   `serde_json::from_str::<DashboardSpec>` then `App::new`. Not exposed yet
   because nothing uses it.
@@ -56,11 +60,11 @@ built in: a component kind selects a function of the runtime.
 
 ## Open questions
 
-- **Custom computations.** How a developer registers a Rust function (a
-  computed dataset, a custom statistic) and refers to it from the
-  specification. Intended direction: a registry of named functions held by
-  `App`; the specification stores the name and serializable parameters, never
-  the function. This is the next milestone.
+- ~~**Custom computations.**~~ Closed by [ADR 0012](0012-computations-and-derived-datasets.md).
+  A registry of named functions is held by `App`; a `DatasetSlot` with
+  `source = Computed { function, inputs, params }` stores the name and
+  serializable bindings, never the function. A custom statistic is a
+  computation returning a small table.
 - **Custom components.** Whether third parties can add component kinds, and
   how the frontend learns to render them without being rebuilt.
 - **Layout.** Rows on a 12-column grid are enough for predefined dashboards.

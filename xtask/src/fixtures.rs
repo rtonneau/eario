@@ -58,6 +58,53 @@ fn delimited(separator: char) -> String {
     text
 }
 
+/// A pseudo-random number in `[-1, 1)` computed from `index` alone.
+fn noise(index: u32) -> f64 {
+    let hashed = index.wrapping_mul(2_654_435_761) ^ (index >> 7).wrapping_mul(40_503);
+    f64::from(hashed % 10_000) / 5_000.0 - 1.0
+}
+
+/// A noisy oscillation sampled every 0.1 s, for the signal-lab example.
+fn time_series() -> String {
+    let mut text = String::from(
+        "time,signal
+",
+    );
+    for row in 0..300_u32 {
+        let time = 0.1 * f64::from(row);
+        let signal = 2.0 * (time * 0.8).sin()
+            + 0.5 * (time * 0.1).cos()
+            + 0.8 * (noise(row) + noise(row + 1_000) + noise(row + 2_000));
+        // Writing to a String cannot fail.
+        let _ = writeln!(text, "{time:.1},{signal:.4}");
+    }
+    text
+}
+
+/// Three categories measured at four doses, with a few outliers, for the
+/// signal-lab example.
+fn groups() -> String {
+    const OUTLIERS: [u32; 4] = [5, 31, 70, 113];
+    let mut text = String::from(
+        "category,dose,value
+",
+    );
+    let mut row = 0_u32;
+    for (index, category) in ["alpha", "beta", "gamma"].into_iter().enumerate() {
+        for dose in 1..=4_u32 {
+            for _replicate in 0..12_u32 {
+                let base = 10.0 + 4.0 * f64::from(dose) + 3.0 * index as f64;
+                let value = base + 0.8 * (noise(row) + noise(row + 500));
+                let value = if OUTLIERS.contains(&row) { value + 25.0 } else { value };
+                // Writing to a String cannot fail.
+                let _ = writeln!(text, "{category},{dose},{value:.3}");
+                row += 1;
+            }
+        }
+    }
+    text
+}
+
 fn workbook() -> Result<Workbook, rust_xlsxwriter::XlsxError> {
     let mut workbook = Workbook::new();
     // A fixed creation date keeps the file identical from one run to the next.
@@ -114,6 +161,8 @@ pub(crate) fn write_all(directory: &Path) -> TaskResult {
 
     fs::write(csv.join("measurements.csv"), delimited(','))?;
     fs::write(csv.join("measurements.tsv"), delimited('\t'))?;
+    fs::write(csv.join("time-series.csv"), time_series())?;
+    fs::write(csv.join("groups.csv"), groups())?;
     fs::write(csv.join("empty.csv"), "")?;
     // The third line has more fields than the header.
     fs::write(

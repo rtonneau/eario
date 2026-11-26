@@ -104,6 +104,7 @@ impl Dataset {
             columns: query::column_infos(&self.frame),
             sheets: self.sheets.clone(),
             selected_sheet: self.selected_sheet.clone(),
+            derived: None,
         }
     }
 }

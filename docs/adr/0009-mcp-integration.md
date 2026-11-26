@@ -36,6 +36,14 @@ the frontend.
 All are annotated read-only. Results are bounded: tables by page, charts by
 their point limit.
 
+Derived datasets (ADR 0012) are read from the cache only. The tools never run
+a computation, because that would let an agent start arbitrary CPU work. A
+derived dataset whose table is not cached, or whose cache is stale, is
+reported as not computed (error `dataset_not_computed`, or an empty component
+saying so) until the dashboard has displayed it. `describe_dashboard` lists
+the derived datasets with their status, and `list_datasets` shows the
+computation and whether each is `computed` or `not_computed`.
+
 ### Separation of concerns
 
 | Concern | Where |
