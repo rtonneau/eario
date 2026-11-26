@@ -8,6 +8,7 @@ members = [
     "crates/eario-runtime",
     "examples/data-explorer",
     "examples/hello-dashboard",
+    "examples/signal-lab",
     "xtask",
 ]
 
