@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use eario_core::{
     ChartMark, ComponentId, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetId,
-    DatasetSlot, PageSpec, RowSpec, SPEC_VERSION, StateKey, Theme,
+    DatasetSlot, DatasetSource, PageSpec, RowSpec, SPEC_VERSION, StateKey, Theme,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -68,7 +68,11 @@ fn spec() -> DashboardSpec {
     DashboardSpec {
         spec_version: SPEC_VERSION,
         title: "Test".to_owned(),
-        datasets: vec![DatasetSlot { id: data, label: "Data".to_owned() }],
+        datasets: vec![DatasetSlot {
+            id: data,
+            label: "Data".to_owned(),
+            source: DatasetSource::Imported,
+        }],
         pages: vec![PageSpec {
             id: "main".to_owned(),
             title: "Main".to_owned(),

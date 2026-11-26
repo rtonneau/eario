@@ -25,6 +25,6 @@ pub use payload::{
     Preferences, StateMap, StateUpdate, StatsTable, TablePage, Theme,
 };
 pub use spec::{
-    ChartMark, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, Dependency,
-    PageSpec, RowSpec, SPEC_VERSION, SpecError,
+    ChartMark, ComponentKind, ComponentSpec, DashboardSpec, DataView, DatasetSlot, DatasetSource,
+    Dependency, PageSpec, ParamBinding, RowSpec, SPEC_VERSION, SpecError,
 };

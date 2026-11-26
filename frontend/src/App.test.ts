@@ -15,9 +15,9 @@ const info: AppInfo = {
   preferences: { theme: 'system' },
   state: { x: 'energy_keV' },
   spec: {
-    spec_version: 1,
+    spec_version: 2,
     title: 'Test dashboard',
-    datasets: [{ id: 'data', label: 'data' }],
+    datasets: [{ id: 'data', label: 'data', source: { type: 'imported' } }],
     pages: [
       {
         id: 'page-1',

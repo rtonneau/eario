@@ -5,14 +5,19 @@
 //! frontend technology: the Rust builder API produces one, the generic
 //! frontend renders one, and it round-trips through JSON.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::id::{ComponentId, DatasetId, StateKey};
 
 /// Version of the specification format written by this crate.
-pub const SPEC_VERSION: u32 = 1;
+///
+/// Version 2 added [`DatasetSlot::source`]. A version-1 specification, which
+/// has no `source`, still deserializes: every slot is then
+/// [`DatasetSource::Imported`].
+pub const SPEC_VERSION: u32 = 2;
 
 /// Number of columns of the layout grid a row is divided into.
 pub const GRID_COLUMNS: u8 = 12;
@@ -39,6 +44,65 @@ pub struct DatasetSlot {
     pub id: DatasetId,
     /// Human-readable name of the slot.
     pub label: String,
+    /// Where the table comes from. Absent in a version-1 specification,
+    /// which means [`DatasetSource::Imported`].
+    #[serde(default)]
+    pub source: DatasetSource,
+}
+
+impl DatasetSlot {
+    /// Lists what the slot reads directly: for a derived dataset, its input
+    /// datasets, their filters and its state-bound parameters; nothing for
+    /// an imported one.
+    ///
+    /// See [`DashboardSpec::dataset_dependencies`] for the transitive closure.
+    pub fn dependencies(&self) -> Vec<Dependency> {
+        let DatasetSource::Computed { inputs, params, .. } = &self.source else {
+            return Vec::new();
+        };
+        let mut dependencies = Vec::new();
+        for view in inputs.values() {
+            dependencies.extend(view_dependencies(view));
+        }
+        for binding in params.values() {
+            if let ParamBinding::State(state) = binding {
+                dependencies.push(Dependency::State(state.clone()));
+            }
+        }
+        dependencies
+    }
+}
+
+/// Where the table of a dataset slot comes from.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DatasetSource {
+    /// Loaded from a file by the user, or passed in by the developer.
+    #[default]
+    Imported,
+    /// Produced by a named computation registered by the developer.
+    Computed {
+        /// Name of the registered computation.
+        function: String,
+        /// Datasets the computation reads, by the name it knows them under.
+        /// Each input is a [`DataView`], so it may carry a filter.
+        inputs: BTreeMap<String, DataView>,
+        /// Parameters of the computation, by the name it knows them under.
+        params: BTreeMap<String, ParamBinding>,
+    },
+}
+
+/// The value a computation parameter takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ParamBinding {
+    /// The current value of an application state entry, so the dataset is
+    /// recomputed when an input component changes it.
+    State(StateKey),
+    /// A constant fixed by the developer.
+    Literal(Value),
 }
 
 /// One page of a dashboard: a vertical stack of rows.
@@ -284,6 +348,49 @@ pub enum SpecError {
     /// A table shows zero rows per page.
     #[error("component `{0}` has a page size of zero")]
     ZeroPageSize(ComponentId),
+    /// An input of a derived dataset refers to a dataset slot that is not
+    /// declared.
+    #[error(
+        "derived dataset `{dataset}` reads input `{input}` from undeclared dataset `{source_dataset}`"
+    )]
+    UnknownComputedInput {
+        /// The derived dataset holding the reference.
+        dataset: DatasetId,
+        /// Name the computation knows the input under.
+        input: String,
+        /// The undeclared dataset the input points at.
+        source_dataset: DatasetId,
+    },
+    /// A derived dataset reads a state entry that no input component writes,
+    /// as a parameter or as the filter of an input.
+    #[error(
+        "derived dataset `{dataset}` reads state `{state}` for `{name}`, which no input writes"
+    )]
+    UnknownComputedState {
+        /// The derived dataset holding the reference.
+        dataset: DatasetId,
+        /// Name of the parameter, or of the input whose filter reads the state.
+        name: String,
+        /// The state entry nobody writes.
+        state: StateKey,
+    },
+    /// Derived datasets read each other in a loop, so none could be computed
+    /// first.
+    #[error("derived datasets depend on each other in a cycle: {path}")]
+    DerivedDatasetCycle {
+        /// The datasets of the cycle, for example `a -> b -> a`.
+        path: String,
+    },
+    /// A file import targets a derived dataset, which a computation fills.
+    #[error(
+        "component `{component}` imports a file into dataset `{dataset}`, which is derived by a computation"
+    )]
+    ImportIntoDerivedDataset {
+        /// The file-import component.
+        component: ComponentId,
+        /// The derived dataset it targets.
+        dataset: DatasetId,
+    },
 }
 
 impl DashboardSpec {
@@ -295,6 +402,35 @@ impl DashboardSpec {
     /// Finds a component by identifier.
     pub fn component(&self, id: &ComponentId) -> Option<&ComponentSpec> {
         self.components().find(|component| &component.id == id)
+    }
+
+    /// Finds a dataset slot by identifier.
+    pub fn dataset(&self, id: &DatasetId) -> Option<&DatasetSlot> {
+        self.datasets.iter().find(|slot| &slot.id == id)
+    }
+
+    /// Lists everything a dataset depends on, following derived datasets.
+    ///
+    /// For a derived dataset this is its input datasets, the filters of those
+    /// inputs and its state-bound parameters, then the same for every input
+    /// that is itself derived. The result holds the input datasets
+    /// themselves, not `id`. It is empty for an imported or an undeclared
+    /// dataset, and terminates even on a specification with a cycle.
+    pub fn dataset_dependencies(&self, id: &DatasetId) -> BTreeSet<Dependency> {
+        let mut dependencies = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut pending = vec![id];
+        while let Some(current) = pending.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(slot) = self.dataset(current) else { continue };
+            dependencies.extend(slot.dependencies());
+            if let DatasetSource::Computed { inputs, .. } = &slot.source {
+                pending.extend(inputs.values().map(|view| &view.dataset));
+            }
+        }
+        dependencies
     }
 
     /// Checks that the specification is internally consistent.
@@ -348,7 +484,19 @@ impl DashboardSpec {
             }
         }
 
+        self.validate_derived_datasets(&datasets, &written_states)?;
+
         for component in self.components() {
+            if let ComponentKind::FileImport { dataset } = &component.kind
+                && self
+                    .dataset(dataset)
+                    .is_some_and(|slot| matches!(slot.source, DatasetSource::Computed { .. }))
+            {
+                return Err(SpecError::ImportIntoDerivedDataset {
+                    component: component.id.clone(),
+                    dataset: dataset.clone(),
+                });
+            }
             for dependency in component.kind.dependencies() {
                 match dependency {
                     Dependency::Dataset(dataset) if !datasets.contains(&dataset) => {
@@ -367,6 +515,85 @@ impl DashboardSpec {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Checks the references of derived datasets and that they form no cycle.
+    ///
+    /// Whether the computation exists and whether its input and parameter
+    /// names are the ones it declares is known only to the runtime.
+    fn validate_derived_datasets(
+        &self,
+        datasets: &BTreeSet<&DatasetId>,
+        written_states: &BTreeSet<&StateKey>,
+    ) -> Result<(), SpecError> {
+        for slot in &self.datasets {
+            let DatasetSource::Computed { inputs, params, .. } = &slot.source else { continue };
+            for (name, view) in inputs {
+                if !datasets.contains(&view.dataset) {
+                    return Err(SpecError::UnknownComputedInput {
+                        dataset: slot.id.clone(),
+                        input: name.clone(),
+                        source_dataset: view.dataset.clone(),
+                    });
+                }
+                if let Some(filter) = &view.filter
+                    && !written_states.contains(filter)
+                {
+                    return Err(SpecError::UnknownComputedState {
+                        dataset: slot.id.clone(),
+                        name: name.clone(),
+                        state: filter.clone(),
+                    });
+                }
+            }
+            for (name, binding) in params {
+                if let ParamBinding::State(state) = binding
+                    && !written_states.contains(state)
+                {
+                    return Err(SpecError::UnknownComputedState {
+                        dataset: slot.id.clone(),
+                        name: name.clone(),
+                        state: state.clone(),
+                    });
+                }
+            }
+        }
+
+        let mut finished = BTreeSet::new();
+        for slot in &self.datasets {
+            self.visit_derived(&slot.id, &mut Vec::new(), &mut finished)?;
+        }
+        Ok(())
+    }
+
+    /// Depth-first search along the "reads" edges between derived datasets.
+    /// `path` holds the datasets being visited, `finished` those proven
+    /// free of cycles.
+    fn visit_derived<'a>(
+        &'a self,
+        id: &'a DatasetId,
+        path: &mut Vec<&'a DatasetId>,
+        finished: &mut BTreeSet<&'a DatasetId>,
+    ) -> Result<(), SpecError> {
+        if finished.contains(id) {
+            return Ok(());
+        }
+        if let Some(start) = path.iter().position(|visited| *visited == id) {
+            let mut cycle: Vec<String> = path[start..].iter().map(ToString::to_string).collect();
+            cycle.push(id.to_string());
+            return Err(SpecError::DerivedDatasetCycle { path: cycle.join(" -> ") });
+        }
+        if let Some(DatasetSlot { source: DatasetSource::Computed { inputs, .. }, .. }) =
+            self.dataset(id)
+        {
+            path.push(id);
+            for view in inputs.values() {
+                self.visit_derived(&view.dataset, path, finished)?;
+            }
+            path.pop();
+        }
+        finished.insert(id);
         Ok(())
     }
 }
@@ -388,7 +615,11 @@ mod tests {
         DashboardSpec {
             spec_version: SPEC_VERSION,
             title: "Sample".to_owned(),
-            datasets: vec![DatasetSlot { id: data.clone(), label: "Data".to_owned() }],
+            datasets: vec![DatasetSlot {
+                id: data.clone(),
+                label: "Data".to_owned(),
+                source: DatasetSource::Imported,
+            }],
             pages: vec![PageSpec {
                 id: "main".to_owned(),
                 title: "Main".to_owned(),
@@ -501,6 +732,263 @@ mod tests {
         let mut spec = sample_spec();
         spec.spec_version = SPEC_VERSION + 1;
         assert!(matches!(spec.validate(), Err(SpecError::UnsupportedVersion { .. })));
+    }
+
+    fn derived(
+        function: &str,
+        inputs: &[(&str, DataView)],
+        params: &[(&str, ParamBinding)],
+    ) -> DatasetSource {
+        DatasetSource::Computed {
+            function: function.to_owned(),
+            inputs: inputs.iter().map(|(name, view)| ((*name).to_owned(), view.clone())).collect(),
+            params: params
+                .iter()
+                .map(|(name, binding)| ((*name).to_owned(), binding.clone()))
+                .collect(),
+        }
+    }
+
+    fn slot(id: &str, source: DatasetSource) -> DatasetSlot {
+        DatasetSlot { id: DatasetId::new(id), label: id.to_owned(), source }
+    }
+
+    /// `sample_spec` plus a derived dataset `summary` computed from `data`,
+    /// filtered by the `filter` state and parameterized by the `x` state.
+    fn derived_spec() -> DashboardSpec {
+        let mut spec = sample_spec();
+        let data = DatasetId::new("data");
+        spec.datasets.push(slot(
+            "summary",
+            derived(
+                "summarize",
+                &[("table", DataView::of(&data).filtered_by(&StateKey::new("filter")))],
+                &[
+                    ("column", ParamBinding::State(StateKey::new("x"))),
+                    ("bins", ParamBinding::Literal(serde_json::json!(10))),
+                ],
+            ),
+        ));
+        spec
+    }
+
+    #[test]
+    fn spec_version_is_two() {
+        assert_eq!(SPEC_VERSION, 2);
+    }
+
+    #[test]
+    fn version_one_spec_without_source_reads_as_imported() -> Result<(), serde_json::Error> {
+        let json = r#"{
+            "spec_version": 1,
+            "title": "Old",
+            "datasets": [{ "id": "data", "label": "Data" }],
+            "pages": [{
+                "id": "main",
+                "title": "Main",
+                "rows": [{ "items": [{
+                    "id": "table",
+                    "title": null,
+                    "span": 12,
+                    "kind": {
+                        "type": "data_table",
+                        "view": { "dataset": "data", "filter": null },
+                        "page_size": 10
+                    }
+                }] }]
+            }]
+        }"#;
+        let spec: DashboardSpec = serde_json::from_str(json)?;
+        assert_eq!(spec.datasets[0].source, DatasetSource::Imported);
+        assert_eq!(spec.validate(), Ok(()));
+        Ok(())
+    }
+
+    #[test]
+    fn dataset_source_is_tagged_and_round_trips() -> Result<(), serde_json::Error> {
+        let spec = derived_spec();
+        let json = serde_json::to_value(&spec.datasets[1].source)?;
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "computed",
+                "function": "summarize",
+                "inputs": { "table": { "dataset": "data", "filter": "filter" } },
+                "params": {
+                    "bins": { "type": "literal", "value": 10 },
+                    "column": { "type": "state", "value": "x" }
+                }
+            })
+        );
+        let restored: DashboardSpec = serde_json::from_str(&serde_json::to_string(&spec)?)?;
+        assert_eq!(restored, spec);
+        Ok(())
+    }
+
+    #[test]
+    fn derived_spec_passes_validation() {
+        assert_eq!(derived_spec().validate(), Ok(()));
+    }
+
+    #[test]
+    fn computed_input_naming_an_undeclared_dataset_is_rejected() {
+        let mut spec = derived_spec();
+        spec.datasets[1].source =
+            derived("summarize", &[("table", DataView::of(&DatasetId::new("missing")))], &[]);
+        assert_eq!(
+            spec.validate(),
+            Err(SpecError::UnknownComputedInput {
+                dataset: DatasetId::new("summary"),
+                input: "table".to_owned(),
+                source_dataset: DatasetId::new("missing"),
+            })
+        );
+    }
+
+    #[test]
+    fn param_bound_to_an_unwritten_state_is_rejected() {
+        let mut spec = derived_spec();
+        spec.datasets[1].source = derived(
+            "summarize",
+            &[("table", DataView::of(&DatasetId::new("data")))],
+            &[("column", ParamBinding::State(StateKey::new("nobody")))],
+        );
+        let error = spec.validate();
+        assert_eq!(
+            error,
+            Err(SpecError::UnknownComputedState {
+                dataset: DatasetId::new("summary"),
+                name: "column".to_owned(),
+                state: StateKey::new("nobody"),
+            })
+        );
+    }
+
+    #[test]
+    fn input_filter_on_an_unwritten_state_is_rejected() {
+        let mut spec = derived_spec();
+        spec.datasets[1].source = derived(
+            "summarize",
+            &[(
+                "table",
+                DataView::of(&DatasetId::new("data")).filtered_by(&StateKey::new("nobody")),
+            )],
+            &[],
+        );
+        assert!(matches!(spec.validate(), Err(SpecError::UnknownComputedState { .. })));
+    }
+
+    #[test]
+    fn cycle_between_derived_datasets_is_rejected() {
+        let mut spec = derived_spec();
+        let summary = DatasetId::new("summary");
+        let other = DatasetId::new("other");
+        spec.datasets[1].source = derived("f", &[("in", DataView::of(&other))], &[]);
+        spec.datasets.push(slot("other", derived("g", &[("in", DataView::of(&summary))], &[])));
+        let error = spec.validate();
+        assert_eq!(
+            error,
+            Err(SpecError::DerivedDatasetCycle { path: "summary -> other -> summary".to_owned() })
+        );
+        let message = error.map_err(|error| error.to_string()).err().unwrap_or_default();
+        assert!(message.contains("summary -> other -> summary"));
+    }
+
+    #[test]
+    fn derived_dataset_reading_itself_is_a_cycle() {
+        let mut spec = derived_spec();
+        let summary = DatasetId::new("summary");
+        spec.datasets[1].source = derived("f", &[("in", DataView::of(&summary))], &[]);
+        assert_eq!(
+            spec.validate(),
+            Err(SpecError::DerivedDatasetCycle { path: "summary -> summary".to_owned() })
+        );
+    }
+
+    #[test]
+    fn diamond_of_derived_datasets_is_not_a_cycle() {
+        let mut spec = derived_spec();
+        let data = DatasetId::new("data");
+        let left = DatasetId::new("left");
+        let right = DatasetId::new("right");
+        spec.datasets.push(slot("left", derived("f", &[("in", DataView::of(&data))], &[])));
+        spec.datasets.push(slot("right", derived("f", &[("in", DataView::of(&data))], &[])));
+        spec.datasets.push(slot(
+            "joined",
+            derived("join", &[("a", DataView::of(&left)), ("b", DataView::of(&right))], &[]),
+        ));
+        assert_eq!(spec.validate(), Ok(()));
+    }
+
+    #[test]
+    fn file_import_into_a_derived_dataset_is_rejected() {
+        let mut spec = derived_spec();
+        spec.pages[0].rows[0].items.push(component(
+            "import-summary",
+            ComponentKind::FileImport { dataset: DatasetId::new("summary") },
+        ));
+        assert_eq!(
+            spec.validate(),
+            Err(SpecError::ImportIntoDerivedDataset {
+                component: ComponentId::new("import-summary"),
+                dataset: DatasetId::new("summary"),
+            })
+        );
+    }
+
+    #[test]
+    fn imported_dataset_has_no_dependencies() {
+        let spec = derived_spec();
+        assert!(spec.dataset_dependencies(&DatasetId::new("data")).is_empty());
+        assert!(spec.dataset_dependencies(&DatasetId::new("undeclared")).is_empty());
+    }
+
+    #[test]
+    fn derived_dataset_depends_on_inputs_filters_and_state_params() {
+        let spec = derived_spec();
+        let dependencies = spec.dataset_dependencies(&DatasetId::new("summary"));
+        let expected: BTreeSet<Dependency> = [
+            Dependency::Dataset(DatasetId::new("data")),
+            Dependency::State(StateKey::new("filter")),
+            Dependency::State(StateKey::new("x")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(dependencies, expected);
+    }
+
+    #[test]
+    fn dependencies_follow_chains_of_derived_datasets() {
+        let mut spec = derived_spec();
+        let summary = DatasetId::new("summary");
+        spec.datasets.push(slot(
+            "report",
+            derived(
+                "report",
+                &[("summary", DataView::of(&summary))],
+                &[("title", ParamBinding::State(StateKey::new("y")))],
+            ),
+        ));
+        let dependencies = spec.dataset_dependencies(&DatasetId::new("report"));
+        let expected: BTreeSet<Dependency> = [
+            Dependency::Dataset(summary),
+            Dependency::Dataset(DatasetId::new("data")),
+            Dependency::State(StateKey::new("filter")),
+            Dependency::State(StateKey::new("x")),
+            Dependency::State(StateKey::new("y")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(dependencies, expected);
+    }
+
+    #[test]
+    fn dependency_resolution_terminates_on_a_cycle() {
+        let mut spec = derived_spec();
+        let summary = DatasetId::new("summary");
+        spec.datasets[1].source = derived("f", &[("in", DataView::of(&summary))], &[]);
+        let dependencies = spec.dataset_dependencies(&summary);
+        assert_eq!(dependencies, BTreeSet::from([Dependency::Dataset(summary)]));
     }
 
     #[test]

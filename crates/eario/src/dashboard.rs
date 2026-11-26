@@ -5,8 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use eario_core::{
-    ComponentId, ComponentKind, ComponentSpec, DashboardSpec, DatasetId, DatasetSlot, Dependency,
-    PageSpec, RowSpec, SPEC_VERSION,
+    ComponentId, ComponentKind, ComponentSpec, DashboardSpec, DatasetId, DatasetSlot,
+    DatasetSource, Dependency, PageSpec, RowSpec, SPEC_VERSION,
 };
 use eario_runtime::{App, AppOptions, ServerConfig, preferences};
 
@@ -130,7 +130,11 @@ impl Dashboard {
                         if let Dependency::Dataset(id) = dependency
                             && !datasets.iter().any(|slot| slot.id == id)
                         {
-                            datasets.push(DatasetSlot { label: id.to_string(), id });
+                            datasets.push(DatasetSlot {
+                                label: id.to_string(),
+                                id,
+                                source: DatasetSource::Imported,
+                            });
                         }
                     }
                     let id = widget.id.clone().unwrap_or_else(|| {
