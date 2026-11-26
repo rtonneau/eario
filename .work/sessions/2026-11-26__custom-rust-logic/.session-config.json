@@ -230,6 +230,30 @@
         "ticket": "06-new-input-kinds",
         "commit": "07d3bab"
       }
+    },
+    {
+      "at": "2026-11-26T16:30:41.559Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/07-signal-lab-example.md",
+        "03-implement/07-signal-lab-example/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-signal-lab-example"
+      }
+    },
+    {
+      "at": "2026-11-26T16:44:19.059Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/07-signal-lab-example/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-signal-lab-example",
+        "commit": "4f3de70"
+      }
     }
   ],
   "current_phase": "ship",
