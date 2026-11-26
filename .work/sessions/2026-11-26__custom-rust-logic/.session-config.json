@@ -206,6 +206,30 @@
         "ticket": "05-typed-state-and-builder",
         "commit": "b855fa8"
       }
+    },
+    {
+      "at": "2026-11-26T14:54:03.802Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-new-input-kinds.md",
+        "03-implement/06-new-input-kinds/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-new-input-kinds"
+      }
+    },
+    {
+      "at": "2026-11-26T16:30:40.772Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/06-new-input-kinds/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-new-input-kinds",
+        "commit": "07d3bab"
+      }
     }
   ],
   "current_phase": "ship",
