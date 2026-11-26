@@ -113,6 +113,51 @@
         "ticket": "02-derived-dataset-contract",
         "commit": "e14310a"
       }
+    },
+    {
+      "at": "2026-11-26T11:01:18.230Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/03-computation-registry-and-evaluation.md",
+        "03-implement/03-computation-registry-and-evaluation/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-computation-registry-and-evaluation"
+      }
+    },
+    {
+      "at": "2026-11-26T12:54:39.654Z",
+      "event": "auto_started",
+      "phase": "ship",
+      "detail": {
+        "target": "finish",
+        "steps": "ship → finish"
+      }
+    },
+    {
+      "at": "2026-11-26T13:18:15.639Z",
+      "event": "ticket_blocked",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-computation-registry-and-evaluation/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-computation-registry-and-evaluation",
+        "reason": "Review F1 (P2): eager reconciliation misses derived-to-derived state edges; F2 (P3): reconciled state not under a new revision. Recovery allowance used by the post-crash pass."
+      }
+    },
+    {
+      "at": "2026-11-26T13:53:58.326Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-computation-registry-and-evaluation/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-computation-registry-and-evaluation",
+        "commit": "830850f"
+      }
     }
   ],
   "current_phase": "ship",
