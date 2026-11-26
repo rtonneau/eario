@@ -119,6 +119,30 @@
         "ticket": "02-msrv",
         "commit": "e5cb117"
       }
+    },
+    {
+      "at": "2026-11-26T20:17:53.106Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/03-playwright-e2e.md",
+        "03-implement/03-playwright-e2e/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-playwright-e2e"
+      }
+    },
+    {
+      "at": "2026-11-26T20:23:47.351Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-playwright-e2e/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-playwright-e2e",
+        "commit": "ae1aaf8"
+      }
     }
   ],
   "current_phase": "ship",
