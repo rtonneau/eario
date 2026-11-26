@@ -837,6 +837,7 @@ dependencies = [
  "eario-core",
  "polars",
  "rust_xlsxwriter",
+ "serde",
  "serde_json",
  "thiserror",
 ]

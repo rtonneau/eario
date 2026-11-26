@@ -76,6 +76,11 @@ expect_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 
+# Full debug symbols for every dependency cost about 1 GB per test binary
+# once Polars `lazy` is enabled. Line tables keep backtraces readable.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 strip = true

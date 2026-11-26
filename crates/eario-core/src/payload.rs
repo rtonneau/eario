@@ -124,6 +124,9 @@ pub enum ComponentData {
 }
 
 /// Metadata of a loaded dataset.
+///
+/// For a derived dataset, `source_name` is the name of its computation and
+/// `format` is `computed`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct DatasetInfo {
@@ -143,6 +146,22 @@ pub struct DatasetInfo {
     pub sheets: Vec<String>,
     /// Worksheet currently loaded, for formats with worksheets.
     pub selected_sheet: Option<String>,
+    /// For a derived dataset, whether its table is computed for the current
+    /// state. Not set for an imported dataset.
+    pub derived: Option<DerivedStatus>,
+}
+
+/// Whether the table of a derived dataset reflects the current state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedStatus {
+    /// The table was computed from the current inputs and parameters.
+    Computed,
+    /// The table has not been computed from the current inputs and
+    /// parameters yet; it is when a component reads it. The description
+    /// then has no rows and no columns.
+    NotComputed,
 }
 
 /// Metadata of one column.

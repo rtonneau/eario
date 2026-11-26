@@ -43,6 +43,74 @@ pub enum AppError {
         /// The underlying failure.
         source: io::Error,
     },
+    /// A file or a table was sent to a dataset slot that a computation fills.
+    #[error("dataset `{0}` is derived by a computation; nothing can be imported or loaded into it")]
+    DerivedDataset(DatasetId),
+    /// A derived dataset names a computation the application did not register.
+    #[error(
+        "dataset `{dataset}` is derived by computation `{computation}`, which is not registered"
+    )]
+    UnknownComputation {
+        /// The derived dataset.
+        dataset: DatasetId,
+        /// Name of the missing computation.
+        computation: String,
+    },
+    /// A derived dataset binds an input its computation does not declare.
+    #[error(
+        "dataset `{dataset}` binds input `{input}`, which computation `{computation}` does not declare"
+    )]
+    UndeclaredComputationInput {
+        /// The derived dataset.
+        dataset: DatasetId,
+        /// Its computation.
+        computation: String,
+        /// The input bound without being declared.
+        input: String,
+    },
+    /// A derived dataset leaves an input of its computation unbound.
+    #[error("dataset `{dataset}` does not bind input `{input}` of computation `{computation}`")]
+    MissingComputationInput {
+        /// The derived dataset.
+        dataset: DatasetId,
+        /// Its computation.
+        computation: String,
+        /// The declared input nothing is bound to.
+        input: String,
+    },
+    /// A derived dataset binds a parameter its computation does not declare.
+    #[error(
+        "dataset `{dataset}` binds parameter `{parameter}`, which computation `{computation}` does not declare"
+    )]
+    UndeclaredComputationParameter {
+        /// The derived dataset.
+        dataset: DatasetId,
+        /// Its computation.
+        computation: String,
+        /// The parameter bound without being declared.
+        parameter: String,
+    },
+    /// A derived dataset leaves a parameter of its computation unbound.
+    #[error(
+        "dataset `{dataset}` does not bind parameter `{parameter}` of computation `{computation}`"
+    )]
+    MissingComputationParameter {
+        /// The derived dataset.
+        dataset: DatasetId,
+        /// Its computation.
+        computation: String,
+        /// The declared parameter nothing is bound to.
+        parameter: String,
+    },
+    /// A computation returned an error or panicked. Nothing was cached, and
+    /// the application keeps running.
+    #[error("computation `{name}` failed: {message}")]
+    Computation {
+        /// Name of the computation.
+        name: String,
+        /// What went wrong.
+        message: String,
+    },
 }
 
 impl AppError {
@@ -57,6 +125,13 @@ impl AppError {
             Self::UnknownState(_) => "unknown_state",
             Self::InvalidStateValue { .. } => "invalid_state_value",
             Self::Preferences { .. } => "preferences_not_stored",
+            Self::DerivedDataset(_) => "derived_dataset",
+            Self::UnknownComputation { .. } => "unknown_computation",
+            Self::UndeclaredComputationInput { .. } => "undeclared_computation_input",
+            Self::MissingComputationInput { .. } => "missing_computation_input",
+            Self::UndeclaredComputationParameter { .. } => "undeclared_computation_parameter",
+            Self::MissingComputationParameter { .. } => "missing_computation_parameter",
+            Self::Computation { .. } => "computation_failed",
         }
     }
 }
