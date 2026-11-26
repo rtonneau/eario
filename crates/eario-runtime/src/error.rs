@@ -179,3 +179,58 @@ pub enum ServeError {
     #[error("the server task ended abnormally: {0}")]
     Task(String),
 }
+
+/// Reason a file of the hub directory could not be read, written or checked.
+///
+/// Every variant names the file or directory concerned.
+#[derive(Debug, thiserror::Error)]
+pub enum HubDirError {
+    /// The platform reports no per-user configuration directory and
+    /// `EARIO_HUB_DIR` is not set.
+    #[error("no configuration directory is available; set EARIO_HUB_DIR to the hub directory")]
+    NoConfigDir,
+    /// A file or directory could not be read, written, renamed or removed.
+    #[error("could not access {path}: {source}")]
+    Io {
+        /// The file or directory.
+        path: PathBuf,
+        /// The underlying failure.
+        source: io::Error,
+    },
+    /// A file does not hold what it should.
+    #[error("{path} is not valid: {message}")]
+    Invalid {
+        /// The file.
+        path: PathBuf,
+        /// What is wrong with it.
+        message: String,
+    },
+    /// The registry was written in a format this version cannot read.
+    #[error(
+        "{path} has format version {found}, but this version of Eario reads up to {supported}; update Eario or restore the file"
+    )]
+    UnknownRegistryVersion {
+        /// The registry file.
+        path: PathBuf,
+        /// Version found in the file.
+        found: u32,
+        /// Newest version this build reads.
+        supported: u32,
+    },
+    /// A name that is not a slug was used where a file name is derived.
+    #[error("`{0}` is not a valid dashboard slug")]
+    InvalidSlug(String),
+}
+
+impl HubDirError {
+    /// Stable, machine-readable code of the error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NoConfigDir => "hub_dir_unavailable",
+            Self::Io { .. } => "hub_file_io",
+            Self::Invalid { .. } => "hub_file_invalid",
+            Self::UnknownRegistryVersion { .. } => "hub_registry_unknown_version",
+            Self::InvalidSlug(_) => "hub_invalid_slug",
+        }
+    }
+}

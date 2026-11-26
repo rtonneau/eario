@@ -1,7 +1,8 @@
 # 0011. Each dashboard runs standalone or from a hub
 
-Status: Accepted (26 November 2026). The hub's interface technology is still
-open; see the last section.
+Status: Accepted (26 November 2026). Amended the same day at the start of
+M3: the interface technology is decided, and three points below changed (see
+"Amendments").
 
 ## Context
 
@@ -150,10 +151,24 @@ implemented, in the same change.
   not.
 - The hub is the natural window for the desktop shell of ADR 0010.
 
-## Open question
+## Amendments (start of M3, 26 November 2026)
 
-- **The hub's interface technology:** a dedicated hub view in the generic
-  Svelte frontend, or a `DashboardSpec` built from Eario components with new
-  component kinds for the list and its actions. To be decided at the start of
-  M3, before the interface is built. It does not change the launch contract,
-  the registry, the run files or the tray.
+- **Interface technology:** a dedicated hub view in the generic Svelte
+  frontend, chosen by what `/api/app` reports, with the hub routes as
+  `eario-core` contract types. A `DashboardSpec` would have needed hub-only
+  component kinds and the first action buttons in the generic
+  `ComponentKind`.
+- **Install copies the executable** into `hub/bin/<slug>/` instead of
+  registering it where it lies (point 4). The download can then be moved or
+  deleted; size and hash are those of the copy, so a mismatch means the copy
+  was changed after install. Reinstalling replaces the copy, refused while
+  that dashboard runs. Costs one copy (about 30 MB) per dashboard.
+- **Liveness is checked by HTTP and token only** (point 3): a run file is
+  live when `GET /api/app` at its address answers with its token. Only the
+  real child holds that token; the process id stays in the file for display.
+- **One hub per user:** the hub writes `hub/hub.json` (its address and
+  token). A second start that finds a hub answering there opens the browser
+  on it and exits.
+- `--eario-child <run-file>` stays a flag. Because an executable may turn its
+  own arguments into files to load, `Dashboard::run()` in child mode ignores
+  the `load_file` entries whose path is exactly one of those two arguments.
