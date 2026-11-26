@@ -222,6 +222,28 @@ example. Regenerating produces identical files.
 
 Never add real data.
 
+## Dependency checks
+
+```text
+cargo install --locked cargo-deny   # once
+cargo deny check
+```
+
+checks every dependency against `deny.toml`. CI runs it in the
+"Dependencies" job.
+
+- **Licences:** an explicit allow-list. It holds the permissive licences in the
+  tree, plus MPL-2.0 (file-level copyleft, compatible with distributing an
+  executable). A dependency under any other licence fails the check. Add a
+  licence only in a pull request that names the crate and says why it is
+  acceptable.
+- **Advisories:** a RustSec vulnerability fails the check. An unmaintained
+  crate fails only when a workspace crate depends on it directly. A yanked
+  version is a warning. An `ignore` entry needs a reason that explains why the
+  vulnerable code is never reached, and a condition for removing it.
+- **Sources:** crates.io only; no git dependency or other registry.
+- **Bans:** duplicate versions of a crate are warnings, not errors.
+
 ## Benchmarks
 
 ```text

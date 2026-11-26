@@ -73,6 +73,17 @@ jobs:
       - name: Build without optional features
         run: cargo build --workspace
 
+  deny:
+    name: Dependencies (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Licences, RustSec advisories, sources and bans; policy in deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
   contract:
     name: Contract bindings are up to date
     runs-on: ubuntu-latest
