@@ -73,6 +73,41 @@ jobs:
       - name: Build without optional features
         run: cargo build --workspace
 
+  e2e:
+    name: End-to-end (Chromium)
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install the Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/eario-runtime/frontend-dist
+      - run: npm ci
+        working-directory: frontend
+      # The system libraries Chromium needs on Linux; xtask installs the browser only.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Browser tests
+        run: cargo xtask e2e --prebuilt-frontend
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          if-no-files-found: ignore
+
   msrv:
     name: Rust (minimum version)
     needs: frontend

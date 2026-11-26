@@ -58,8 +58,9 @@ backtraces, and your own crates keep full debug information.
 | `cargo xtask fixtures` | Regenerates the files in `fixtures/`. |
 | `cargo xtask large-csv` | Writes `fixtures/generated/large.csv`, one million rows, not tracked by git. |
 | `cargo xtask test` | Runs Rust and frontend tests. |
-| `cargo xtask check` | Runs everything CI runs. |
+| `cargo xtask check` | Runs every CI check except the browser tests, `cargo deny` and the minimum-version build. |
 | `cargo xtask dist` | Builds the frontend, then `data-explorer` in release mode. |
+| `cargo xtask e2e` | Builds the frontend and the examples, then runs the browser tests in Chromium. |
 
 Environment variables read by an Eario application:
 
@@ -206,10 +207,28 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
 | Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
+| Browser tests | `frontend/e2e/*.spec.ts` | The real examples in Chromium: import through the file picker, chart drawn in its canvas, filter, table pagination, and inputs that recompute a derived dataset in Rust. |
 
-There is no automated test in a real browser yet. During the bootstrap the
-dashboard was checked by hand with headless Chrome screenshots. Adding
-Playwright is a roadmap item.
+### Browser tests
+
+```text
+cargo xtask e2e
+```
+
+builds the frontend, then `data-explorer` and `signal-lab` in debug mode,
+installs Playwright's Chromium if it is missing, and runs the tests in
+`frontend/e2e` (`npm run e2e`). Each test starts its own example process with
+`EARIO_NO_BROWSER=1` on a port chosen by the system. It reads the address
+(with the session token) that the process prints, so the tests go through the
+same host, origin and token checks as a user. `--prebuilt-frontend` keeps the
+frontend already in `crates/eario-runtime/frontend-dist`; CI uses it.
+`EARIO_E2E_BIN_DIR` points the tests at other executables.
+
+Wait on what the user sees (roles, labels, `role="status"` text), never on
+a fixed delay. `cargo xtask check` does not run these tests, because they
+need a browser; CI runs them in the "End-to-end (Chromium)" job, on ubuntu.
+On Linux, Chromium's system libraries come from
+`npx playwright install --with-deps chromium`.
 
 ### Fixtures
 
