@@ -46,15 +46,20 @@ Left out on purpose: progress and cancellation (M7), custom component kinds,
 Python computations (M10), persistence of derived results. Remaining limits
 are listed in [project-status.md](project-status.md).
 
-## M2. Trust and continuous verification
+## M2. Trust and continuous verification (done)
 
 - First CI run on Linux; fix what it finds.
-- Browser end-to-end tests (Playwright) covering import, selection, filter
-  and chart rendering.
-- `cargo deny` for licences and advisories.
-- A minimum supported Rust version, tested in CI.
-- Frontend accessibility review with an automated checker.
-- Benchmarks run on a reference machine, with results recorded and dated.
+- Browser end-to-end tests (Playwright, Chromium) covering import,
+  selection, filter and chart rendering: `cargo xtask e2e`, CI job.
+- `cargo deny` for licences and advisories: `deny.toml`, CI job.
+- A minimum supported Rust version (1.95), tested in CI.
+- Frontend accessibility check with axe-core in every browser test state,
+  both themes, failing on any WCAG 2.1 A/AA violation.
+- Benchmarks run on the development machine, with results recorded and dated
+  (`cargo xtask bench`, `docs/benchmarks/`).
+
+Left for later: browser tests in Firefox and WebKit, and a benchmark
+regression gate.
 
 ## M3. Standalone and hub
 

@@ -67,9 +67,17 @@ cargo xtask frontend    Build the frontend into crates/eario-runtime/frontend-di
 cargo xtask gen-types   Regenerate frontend/src/lib/generated from the Rust contract types
 cargo xtask fixtures    Regenerate fixtures/
 cargo xtask test        Rust tests and frontend tests
-cargo xtask check       Everything CI runs: fmt, clippy, tests, docs, svelte-check, vitest
+cargo xtask check       CI checks: fmt, clippy, tests, docs, svelte-check, vitest
+cargo xtask e2e         Browser tests (Playwright, Chromium) with axe accessibility checks
+cargo xtask bench       Benchmarks; writes docs/benchmarks/<date>.md
 cargo xtask dist        Frontend build, then release build of data-explorer
+cargo deny check        Dependency licences and advisories (needs cargo-deny installed)
 ```
+
+CI also runs `cargo xtask e2e`, `cargo deny check`, and the tests with the
+minimum supported Rust version (`rust-version` in `Cargo.toml`, 1.95). Do not
+use a language feature or dependency that needs a newer compiler without
+raising it on purpose.
 
 Run one example: `cargo run -p data-explorer -- fixtures/csv/measurements.csv`.
 
@@ -139,6 +147,8 @@ CI regenerates the bindings and fails if they differ from what is committed.
   fixtures; `crates/eario-runtime/src/http_tests.rs` for the HTTP API and its
   security; `crates/eario/tests/end_to_end.rs` for a real server.
 - Frontend: Vitest files beside the code (`*.test.ts`).
+- Browser: Playwright specs in `frontend/e2e/`, driving the real examples.
+  Call `expectAccessible` after each new state; never disable an axe rule.
 - Fixtures are synthetic. Never commit real laboratory, personal or
   confidential data.
 - Never state that a test or check passed unless you ran it and saw it pass.
@@ -168,7 +178,8 @@ CI regenerates the bindings and fails if they differ from what is committed.
 
 A change is done when:
 
-1. `cargo xtask check` passes locally.
+1. `cargo xtask check` passes locally, and `cargo xtask e2e` when the
+   frontend or an example changed.
 2. New behaviour has tests; changed contract types have regenerated bindings.
 3. Public items are documented; affected documents in `docs/` are updated.
 4. No new dependency is unexplained, no secret or private data is added.

@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 26 November 2026, at the end of milestone M1 (custom Rust computations).
+Last updated: 26 November 2026, at the end of milestone M2 (trust and continuous verification).
 Version: 0.1.0, unreleased. Not published on crates.io. The source is public
 at https://github.com/rtonneau/eario.
 
@@ -21,24 +21,29 @@ Verified by automated tests unless noted.
 | Clear errors for empty, malformed, unsupported files and unknown worksheets | Works |
 | Dataset metadata, paged table, column selection | Works |
 | Row filter on one numeric or text column | Works |
-| Scatter and line charts with backend downsampling | Works; rendering checked by hand in headless Chrome |
+| Scatter and line charts with backend downsampling | Works; drawn in Chromium by the browser tests |
 | Descriptive statistics (count, missing, mean, std, min, median, max) | Works |
 | Invalidation of only the components depending on a change | Works |
 | Local server: loopback only, Host and Origin checks, session token, upload limit | Works |
 | Frontend embedded in the executable | Works; release executable checked by hand outside the repository |
-| Light and dark themes, system default, stored between runs | Works; checked by hand in both themes |
+| Light and dark themes, system default, stored between runs | Works; both themes checked with axe-core in the browser tests; storing checked by hand |
 | Clean shutdown from the interface and from Rust | Works |
 | Named Rust computations (`Computation`) registered with `Dashboard::computation` | Works |
 | Derived datasets (`Dashboard::derived`): a dataset slot filled by a computation from other datasets and state entries, read by every component like an imported one | Works; derived-of-derived works |
 | Cache of derived tables, one per slot, keyed by the revisions of its dependencies | Works; verified by counting computation runs |
 | Eager recomputation of a derived dataset that has inputs bound to it, so their state is reconciled | Works |
 | Computation errors and panics shown as an alert naming the computation, application kept running | Works |
-| Number, slider, text, select (static or from a column's distinct values, at most 1,000) and checkbox inputs, with defaults and server-side validation | Works; checked in jsdom and through the HTTP API, not in a real browser |
+| Number, slider, text, select (static or from a column's distinct values, at most 1,000) and checkbox inputs, with defaults and server-side validation | Works; number input and select also driven in Chromium; slider, text and checkbox in jsdom and through the HTTP API only |
 | Typed state handles `State<T>`, read in computations with `ctx.param(&state)` | Works |
 | Polars re-exported as `eario::polars` (with the `lazy` feature) for computations | Works |
-| `signal-lab` example: two pages, custom computations, synthetic fixtures | Works; tests pass, not run in a browser |
+| `signal-lab` example: two pages, custom computations, synthetic fixtures | Works; driven in Chromium by the browser tests |
 | Read-only MCP endpoint (five tools); derived datasets read from the cache only | Works; experimental |
 | TypeScript bindings generated from Rust contract types | Works |
+| Browser end-to-end tests (Playwright, Chromium) on the real `data-explorer` and `signal-lab` executables: file picker import, chart canvas, filter, table pagination, inputs recomputing derived datasets | Works; `cargo xtask e2e`, CI job on ubuntu |
+| Accessibility check (axe-core, WCAG 2.1 A and AA) of every state the browser tests visit, in both themes; zero violations | Works |
+| Dependency policy with `cargo deny`: licence allow-list, RustSec advisories, crates.io only | Works; CI job |
+| Minimum supported Rust version 1.95, built and tested in CI | Works; tested locally with 1.95 |
+| Dated benchmark results (`cargo xtask bench`, `docs/benchmarks/`) | Works; first result 2026-11-26 on the development machine |
 
 ## Verification performed
 
@@ -67,6 +72,16 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
   `CARGO_BUILD_JOBS=4`, see the development guide). The M1 figures above were
   taken at the end of M1; the manual checks and measurements below date from
   the bootstrap and were not repeated.
+- M2, on the same machine: `cargo xtask e2e`, 6 browser tests pass in
+  Chromium with no accessibility violation in either theme; `cargo deny check`
+  passes (two quick-xml advisories ignored with a documented reason in
+  `deny.toml`: the affected copy is only reached through Polars' cloud
+  storage code, which Eario never runs); `cargo +1.95 test --workspace
+  --all-features` passes; `cargo xtask bench` wrote
+  [benchmarks/2026-11-26.md](benchmarks/2026-11-26.md).
+- CI (`.github/workflows/ci.yml`) has run green on ubuntu and windows
+  (run 45779398561, before M2). The M2 jobs (End-to-end, Rust minimum
+  version, Dependencies) first run on the M2 pull request.
 - `cargo package -p eario-runtime --list` includes the built frontend.
 - One informal measurement with the release executable and the generated
   one-million-row CSV (34 MB, five columns), through the HTTP API on the
@@ -76,24 +91,24 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
 ## Not verified
 
-- **Linux and macOS.** Everything above ran on Windows only. CI is configured
-  for Windows and Linux but has never run.
-- **The CI and release workflows themselves.** They were written, not run.
+- **macOS.** Never built or run. Linux is covered by CI only (build, tests,
+  browser tests), not by manual use.
+- **The release workflow.** It was written, not run.
 - **Opening the default browser** (`webbrowser::open`). The code path exists;
   all runs used `EARIO_NO_BROWSER`.
 - **Ctrl+C handling.** Implemented; only shutdown through the API and from
   Rust was exercised.
-- **Interactive use in a real browser**: clicking, drag and drop, the file
-  picker, pagination, chart zoom. The frontend tests run in jsdom, where
-  charts are not rendered. No real-browser automated test exists.
+- **Some interactions in a real browser**: drag and drop of a file, chart
+  zoom and pan, the slider, text and checkbox inputs, and worksheet selection
+  are not driven by the browser tests. Firefox and Safari are never tested.
 - **The Vite development server workflow** described in the development
   guide. The backend side (`EARIO_DEV_ORIGIN`) is implemented but the
   combination was not run.
 - **Offline operation** was checked by inspection, not by disconnecting: the
   page references only its own origin and the Content Security Policy forbids
   anything else.
-- **Benchmarks.** They compile under clippy; they were not run and no result
-  exists.
+- **Benchmarks on any machine but the development one.** One dated result
+  exists; there is no comparison between runs yet and no regression gate.
 - **Datasets above one million rows**, wide tables, and large XLSX files.
 - **Publishing to crates.io.** The file list of the package was checked; a
   full `cargo package` verification build and a publish dry run were not.
@@ -146,7 +161,6 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
   dashboards and start them from one place, and executables have no launch
   contract for one yet. The design is accepted (ADR 0011); the work is
   roadmap M3.
-- No minimum supported Rust version is defined; development uses stable 1.99.
 
 ## Naming
 
@@ -164,7 +178,8 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
 ## Where to start next
 
-Milestone M1 is done (custom Rust computations); the next ones are in the
+Milestones M1 (custom Rust computations) and M2 (trust and continuous
+verification) are done; the next ones are in the
 [roadmap](roadmap.md). Entry points for what exists:
 
 - `eario_data::compute` (`Computation`, `ComputeContext`, `ComputeError`) and
