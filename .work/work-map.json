@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "project": "Eario",
+  "updated": "2026-11-26",
+  "leads": {
+    "now": "small design session: the only thing blocking M3",
+    "next": "M1 and M2 can run in parallel",
+    "later": "M3 waits on A; the rest follow the roadmap order"
+  },
+  "items": [
+    {
+      "id": "M0",
+      "title": "Foundation",
+      "status": "done",
+      "state": "IN MAIN 920fe94 · CI GREEN",
+      "points": [
+        "Workspace, `DashboardSpec`, CSV/TSV/XLSX import",
+        "`App` services, loopback server + security",
+        "Generic Svelte frontend, data-explorer example",
+        "Read-only MCP endpoint"
+      ],
+      "details": {
+        "history": [
+          "commit `920fe94` Bootstrap Eario on `main`",
+          "CI run 45779398561 · success (Frontend, bindings, Rust windows + ubuntu)"
+        ],
+        "links": [
+          {
+            "label": "Repository",
+            "url": "https://github.com/rtonneau/eario"
+          }
+        ]
+      },
+      "source": "git log; gh run list; docs/roadmap.md"
+    },
+    {
+      "id": "D",
+      "title": "Commit hub direction docs",
+      "status": "done",
+      "state": "COMMITTED a82c789 · NOT PUSHED",
+      "points": [
+        "`docs/roadmap.md`: two ways to run, new M3",
+        "`docs/adr/0011-standalone-and-hub.md` (Proposed)",
+        "`docs/project-status.md`, ADR index"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "details": {
+        "history": [
+          "commit `a82c789` on `main`, not pushed"
+        ],
+        "links": [
+          {
+            "label": "ADR 0011",
+            "url": "../docs/adr/0011-standalone-and-hub.md"
+          },
+          {
+            "label": "Roadmap",
+            "url": "../docs/roadmap.md"
+          }
+        ]
+      },
+      "source": "git status"
+    },
+    {
+      "id": "A",
+      "title": "Accept ADR 0011 (standalone + hub)",
+      "status": "now",
+      "state": "PROPOSED · NEEDS GRILL",
+      "points": [
+        "Hub quits: stop children or leave them",
+        "Hub UI: Eario components or own page",
+        "Updates: in place or side by side",
+        "Windows console / tray for all dashboards"
+      ],
+      "needs": [
+        "D"
+      ],
+      "details": {
+        "guide": [
+          "settle the open questions of ADR 0011",
+          "set its status to Accepted in the ADR and the index",
+          "commit"
+        ],
+        "links": [
+          {
+            "label": "ADR 0011",
+            "url": "../docs/adr/0011-standalone-and-hub.md"
+          }
+        ]
+      },
+      "source": "docs/adr/0011-standalone-and-hub.md"
+    },
+    {
+      "id": "M1",
+      "title": "Custom Rust logic",
+      "status": "next",
+      "state": "PLANNED · UNBLOCKED",
+      "points": [
+        "Named Rust functions in `App` (ADR 0001)",
+        "Derived datasets as slots",
+        "Number, text, slider, select, checkbox inputs",
+        "Cache keyed by dependency revision",
+        "Typed state handles",
+        "Second example with a custom computation"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "command": "/gps start custom-rust-logic",
+      "source": "docs/roadmap.md M1"
+    },
+    {
+      "id": "M2",
+      "title": "Trust and continuous verification",
+      "status": "next",
+      "state": "PLANNED · FIRST BULLET DONE",
+      "points": [
+        "~~First CI run on Linux~~ (green on ubuntu + windows)",
+        "Playwright end-to-end tests",
+        "`cargo deny`, MSRV in CI",
+        "Automated accessibility check",
+        "Dated benchmarks on a reference machine"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "command": "/gps start trust-and-ci",
+      "source": "docs/roadmap.md M2; gh run 45779398561"
+    },
+    {
+      "id": "M3",
+      "title": "Standalone and hub",
+      "status": "later",
+      "state": "PLANNED · BLOCKED ON A",
+      "points": [
+        "Launch contract: `--eario-manifest`, `--eario-child`",
+        "`--eario-install` / `--eario-uninstall`",
+        "`eario-hub`: registry with hash check",
+        "List, start, open, stop, uninstall",
+        "Start by registry id only; security docs updated",
+        "Both examples run from the hub"
+      ],
+      "needs": [
+        "M0",
+        "A"
+      ],
+      "command": "/gps start standalone-and-hub",
+      "source": "docs/roadmap.md M3"
+    },
+    {
+      "id": "M4",
+      "title": "Data: import settings and transformations",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "Header row, separator, decimal comma, encoding, types",
+        "Dates and times",
+        "Sorting, column selection, combined filters",
+        "Grouping, calculated columns, joins",
+        "Data quality view",
+        "Parquet and JSON readers"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M4"
+    },
+    {
+      "id": "M5",
+      "title": "Charts",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "Histogram, bar, box plot, heatmap",
+        "Log axes, units, titles",
+        "LTTB / min-max downsampling (ADR 0004)",
+        "Chart selection filters other components"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M5"
+    },
+    {
+      "id": "M6",
+      "title": "Sessions",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "Save and reopen a session (ADR 0006)",
+        "Missing or changed source files",
+        "Recent files and sessions",
+        "Spec loaded from a file"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M6"
+    },
+    {
+      "id": "M7",
+      "title": "Long-running work",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "Background tasks, progress, cancellation (ADR 0002)",
+        "Large imports off the request path",
+        "Updates pushed to every tab"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M7"
+    },
+    {
+      "id": "M8",
+      "title": "Analysis",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "`eario-analysis`: correlation, regression, fitting",
+        "Checked against reference results",
+        "Non-tabular data when needed"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M8"
+    },
+    {
+      "id": "M9",
+      "title": "Agents",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "Mutating MCP tools with consent + audit (ADR 0009)",
+        "MCP resources",
+        "Assistant panel, `eario-agent` (ADR 0008)"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M9"
+    },
+    {
+      "id": "M10",
+      "title": "Python",
+      "status": "later",
+      "state": "PLANNED · NOT NEXT",
+      "points": [
+        "Managed subprocess, Arrow IPC (ADR 0007)"
+      ],
+      "needs": [
+        "M0"
+      ],
+      "source": "docs/roadmap.md M10"
+    },
+    {
+      "id": "M11",
+      "title": "Distribution",
+      "status": "later",
+      "state": "PLANNED · BLOCKED ON M3",
+      "points": [
+        "crates.io release (ADR 0005)",
+        "`eario-cli` scaffolding, hub-ready",
+        "Desktop shell hosting the hub (ADR 0010)",
+        "Signing and installers",
+        "Update a dashboard from the hub"
+      ],
+      "needs": [
+        "M3"
+      ],
+      "source": "docs/roadmap.md M11"
+    },
+    {
+      "id": "F",
+      "title": "Further out",
+      "status": "open",
+      "state": "UNDECIDED",
+      "points": [
+        "Visual dashboard editing, user layouts",
+        "Scientific extensions",
+        "Larger-than-memory datasets",
+        "Compile-time hub of a fixed set (ADR 0011)"
+      ],
+      "command": "/idea capture further-out",
+      "source": "docs/roadmap.md Further out"
+    }
+  ]
+}
