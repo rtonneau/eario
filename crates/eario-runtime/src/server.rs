@@ -290,7 +290,9 @@ pub fn run_child(app: App, config: ServerConfig, run_file: &Path) -> Result<(), 
         tracing::info!(run_file = %run_file.display(), address = %record.address, "run file written");
 
         let served = server.wait().await;
-        let removed = hub_dir::remove_run_file_at(run_file);
+        // Kept if this dashboard was started again meanwhile and the new
+        // process wrote its own.
+        let removed = hub_dir::remove_own_run_file_at(run_file, &record.token);
         tracing::info!(run_file = %run_file.display(), "stopped");
         served?;
         Ok(removed?)

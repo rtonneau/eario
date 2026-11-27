@@ -14,6 +14,10 @@ pub const LAUNCH_PROTOCOL_VERSION: u32 = 1;
 /// Number of log lines the hub reports for a dashboard that failed to start.
 pub const HUB_LOG_LINES: usize = 20;
 
+/// Argument that starts a dashboard executable for a hub; the path of the run
+/// file follows it.
+pub const CHILD_ARGUMENT: &str = "--eario-child";
+
 /// What a dashboard executable prints for `--eario-manifest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -95,6 +99,15 @@ pub struct HubInfo {
     pub eario_version: String,
     /// Installed dashboards, in registry order.
     pub dashboards: Vec<HubDashboard>,
+}
+
+/// The hub's answer to an open request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HubOpen {
+    /// Address to open in a new tab: the dashboard's own address, with its
+    /// session token in the fragment.
+    pub url: String,
 }
 
 /// Reduces a name to lower-case ASCII letters, digits and dashes.

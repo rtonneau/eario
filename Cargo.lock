@@ -846,6 +846,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "eario-hub"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "eario-core",
+ "eario-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "webbrowser",
+]
+
+[[package]]
 name = "eario-mcp"
 version = "0.2.0"
 dependencies = [

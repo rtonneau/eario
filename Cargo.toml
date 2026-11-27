@@ -4,6 +4,7 @@ members = [
     "crates/eario",
     "crates/eario-core",
     "crates/eario-data",
+    "crates/eario-hub",
     "crates/eario-mcp",
     "crates/eario-runtime",
     "examples/data-explorer",

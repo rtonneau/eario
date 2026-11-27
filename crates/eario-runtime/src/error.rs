@@ -232,6 +232,16 @@ pub enum HubDirError {
         /// What is wrong with it.
         message: String,
     },
+    /// The registry does not parse.
+    #[error(
+        "{path} is not a valid registry ({message}); restore it from a backup, or delete it and install the dashboards again with --eario-install"
+    )]
+    InvalidRegistry {
+        /// The registry file.
+        path: PathBuf,
+        /// What is wrong with it.
+        message: String,
+    },
     /// The registry was written in a format this version cannot read.
     #[error(
         "{path} has format version {found}, but this version of Eario reads up to {supported}; update Eario or restore the file"
@@ -256,6 +266,7 @@ impl HubDirError {
             Self::NoConfigDir => "hub_dir_unavailable",
             Self::Io { .. } => "hub_file_io",
             Self::Invalid { .. } => "hub_file_invalid",
+            Self::InvalidRegistry { .. } => "hub_registry_invalid",
             Self::UnknownRegistryVersion { .. } => "hub_registry_unknown_version",
             Self::InvalidSlug(_) => "hub_invalid_slug",
         }

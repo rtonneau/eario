@@ -24,8 +24,7 @@ use eario_runtime::hub_dir::{self, HubDir, RegistryEntry};
 
 use crate::error::LaunchError;
 
-/// Argument starting a dashboard for a hub; the path of the run file follows.
-pub(crate) const CHILD_ARGUMENT: &str = "--eario-child";
+pub(crate) use eario_core::CHILD_ARGUMENT;
 
 /// What the command line asks the executable to do.
 #[derive(Debug, Clone, PartialEq, Eq)]

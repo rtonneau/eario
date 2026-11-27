@@ -4,9 +4,11 @@
 //! `.1` appended, replacing the previous one, and a new file is started. One
 //! old file is kept.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+
+use crate::hub_dir;
 
 /// Size past which a child's log file is rotated: 1 MiB.
 pub(crate) const LOG_FILE_LIMIT: u64 = 1024 * 1024;
@@ -25,7 +27,7 @@ impl RotatingFile {
     /// missing. Output of earlier runs is kept and counts towards `limit`.
     pub(crate) fn open(path: &Path, limit: u64) -> io::Result<Self> {
         if let Some(directory) = path.parent() {
-            fs::create_dir_all(directory)?;
+            hub_dir::create_private_dir_all(directory)?;
         }
         let file = append(path)?;
         let size = file.metadata()?.len();
@@ -45,8 +47,10 @@ impl RotatingFile {
     }
 }
 
+/// Opens `path` for appending; a new file is readable by the user only on
+/// Unix, like the rest of the hub directory.
 fn append(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).open(path)
+    hub_dir::private_file_options().create(true).append(true).open(path)
 }
 
 impl Write for RotatingFile {

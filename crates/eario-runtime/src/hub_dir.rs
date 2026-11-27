@@ -3,6 +3,7 @@
 //! ```text
 //! <hub dir>/
 //! ├── registry.json     installed dashboards
+//! ├── hub.json          address and token of the running hub
 //! ├── bin/<slug>/       the hub's copy of each installed executable
 //! ├── run/<slug>.json   one per running dashboard, written by the dashboard
 //! └── logs/<slug>.log   output of each dashboard
@@ -11,14 +12,17 @@
 //! The directory is `<config dir>/eario/hub/`, or the one named by the
 //! `EARIO_HUB_DIR` environment variable. Every file is written atomically: a
 //! temporary file in the same directory is renamed over the destination, so a
-//! reader sees the old or the new content, never a mixture.
+//! reader sees the old or the new content, never a mixture. On Unix the
+//! directories this module creates are readable by the user only (`0700`),
+//! and so are the files it writes (`0600`): run files and `hub.json` hold
+//! session tokens.
 //!
 //! Liveness of a dashboard is decided by [`probe`]: the server answers
 //! `GET /api/app` with the token recorded in its run file. The process id is
-//! not consulted.
+//! not consulted. [`request_shutdown`] asks such a server to stop.
 
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,6 +137,12 @@ impl HubDir {
         self.root.join("registry.json")
     }
 
+    /// Path of `hub.json`, where the running hub records its address and
+    /// token in the [`RunFile`] format, so a second start finds it.
+    pub fn hub_file_path(&self) -> PathBuf {
+        self.root.join("hub.json")
+    }
+
     /// Directory of the run files.
     pub fn run_dir(&self) -> PathBuf {
         self.root.join("run")
@@ -175,7 +185,7 @@ impl HubDir {
         struct Header {
             format_version: u32,
         }
-        let header: Header = parse(&path, &text)?;
+        let header: Header = parse(&path, &text).map_err(invalid_registry)?;
         if header.format_version > REGISTRY_FORMAT_VERSION {
             return Err(HubDirError::UnknownRegistryVersion {
                 path,
@@ -183,7 +193,7 @@ impl HubDir {
                 supported: REGISTRY_FORMAT_VERSION,
             });
         }
-        parse(&path, &text)
+        parse(&path, &text).map_err(invalid_registry)
     }
 
     /// Writes the registry atomically.
@@ -193,8 +203,7 @@ impl HubDir {
 
     /// Reads the run file of a dashboard; `None` when there is none.
     pub fn read_run_file(&self, slug: &str) -> Result<Option<RunFile>, HubDirError> {
-        let path = self.run_file_path(slug)?;
-        read_optional(&path)?.map(|text| parse(&path, &text)).transpose()
+        read_run_file_at(&self.run_file_path(slug)?)
     }
 
     /// Writes the run file of a dashboard atomically.
@@ -231,6 +240,11 @@ impl HubDir {
     }
 }
 
+/// Reads the run file at `path`; `None` when there is none.
+pub fn read_run_file_at(path: &Path) -> Result<Option<RunFile>, HubDirError> {
+    read_optional(path)?.map(|text| parse(path, &text)).transpose()
+}
+
 /// Writes a run file atomically at `path`, creating its directory when
 /// missing.
 ///
@@ -249,12 +263,24 @@ pub fn remove_run_file_at(path: &Path) -> Result<(), HubDirError> {
     }
 }
 
+/// Removes the run file at `path` if it still records `token`: when the
+/// dashboard was started again meanwhile, the file is the new process's and
+/// is kept. A file that cannot be parsed is removed too; a missing file is
+/// not an error.
+pub fn remove_own_run_file_at(path: &Path, token: &str) -> Result<(), HubDirError> {
+    match read_run_file_at(path) {
+        Ok(Some(run)) if run.token != token => Ok(()),
+        Ok(_) | Err(HubDirError::Invalid { .. }) => remove_run_file_at(path),
+        Err(error) => Err(error),
+    }
+}
+
 /// Copies the file `from` to `to` through a temporary file beside `to`, then
 /// a rename, so `to` is never left half-written. Creates the directory of
 /// `to` when missing. An error names `to`, or `from` when it cannot be read.
 pub fn copy_atomic(from: &Path, to: &Path) -> Result<(), HubDirError> {
     if let Some(directory) = to.parent() {
-        fs::create_dir_all(directory)
+        create_private_dir_all(directory)
             .map_err(|source| HubDirError::Io { path: directory.to_owned(), source })?;
     }
     // Checked first, so an unreadable source is named as such.
@@ -287,6 +313,49 @@ fn parse<T: for<'de> Deserialize<'de>>(path: &Path, text: &str) -> Result<T, Hub
         .map_err(|error| HubDirError::Invalid { path: path.to_owned(), message: error.to_string() })
 }
 
+/// The registry's own error for a file that does not parse, which says how
+/// to recover.
+fn invalid_registry(error: HubDirError) -> HubDirError {
+    match error {
+        HubDirError::Invalid { path, message } => HubDirError::InvalidRegistry { path, message },
+        other => other,
+    }
+}
+
+/// Creates `path` and its missing parents; on Unix, readable by the user
+/// only. Directories that exist already are left as they are.
+pub(crate) fn create_private_dir_all(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Options that create a file readable and writable by the user only on
+/// Unix. The caller chooses how to open it.
+pub(crate) fn private_file_options() -> fs::OpenOptions {
+    let options = fs::OpenOptions::new();
+    #[cfg(unix)]
+    let options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = options;
+        options.mode(0o600);
+        options
+    };
+    options
+}
+
+/// Writes `bytes` to a new or truncated file at `path`, readable by the user
+/// only on Unix.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = private_file_options().write(true).create(true).truncate(true).open(path)?;
+    file.write_all(bytes)
+}
+
 /// Serializes `value` and writes it to `path` through a temporary file in the
 /// same directory, then a rename. Creates the directory when missing.
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), HubDirError> {
@@ -296,11 +365,11 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), HubDirE
         message: error.to_string(),
     })?;
     if let Some(directory) = path.parent() {
-        fs::create_dir_all(directory).map_err(io_error)?;
+        create_private_dir_all(directory).map_err(io_error)?;
     }
     let temporary = temporary_path(path);
     if let Err(source) =
-        fs::write(&temporary, text).and_then(|()| rename_retrying(&temporary, path))
+        write_private(&temporary, text.as_bytes()).and_then(|()| rename_retrying(&temporary, path))
     {
         // Best effort: the failure to report is the first one.
         let _ = fs::remove_file(&temporary);
@@ -373,13 +442,15 @@ pub fn file_digest(path: &Path) -> Result<(u64, String), HubDirError> {
 /// request is written by hand over a TCP stream: it is one fixed request to
 /// the loopback interface, which does not justify an HTTP client dependency.
 pub async fn probe(address: &str, token: &str) -> bool {
-    let Ok(address) = address.parse::<SocketAddr>() else {
-        return false;
-    };
-    if !address.ip().is_loopback() || token.contains(['\r', '\n']) {
-        return false;
-    }
-    tokio::time::timeout(PROBE_TIMEOUT, probe_request(address, token)).await.unwrap_or(false)
+    request_status(address, "GET", "/api/app", token).await == Some(200)
+}
+
+/// Asks the server at `address` to stop, with `POST /api/shutdown` and
+/// `token`. True when it accepted (`204`); the server then stops on its own
+/// within a few seconds. Same rules as [`probe`]: loopback addresses only,
+/// [`PROBE_TIMEOUT`] for the whole exchange.
+pub async fn request_shutdown(address: &str, token: &str) -> bool {
+    request_status(address, "POST", "/api/shutdown", token).await == Some(204)
 }
 
 /// [`probe`] for a caller outside an asynchronous runtime, such as the
@@ -391,19 +462,32 @@ pub fn probe_blocking(address: &str, token: &str) -> io::Result<bool> {
     Ok(runtime.block_on(probe(address, token)))
 }
 
-async fn probe_request(address: SocketAddr, token: &str) -> bool {
-    let request = format!(
-        "GET /api/app HTTP/1.1\r\nHost: {address}\r\nx-eario-token: {token}\r\nConnection: close\r\n\r\n"
-    );
-    let Ok(mut stream) = TcpStream::connect(address).await else {
-        return false;
-    };
-    if stream.write_all(request.as_bytes()).await.is_err() {
-        return false;
+/// Status code of one request without a body, carrying `token`, to the
+/// server at `address`; what [`probe`] and [`request_shutdown`] send. `None`
+/// when the address is not a loopback socket address, the method, path or
+/// token could split the request, or no answer came within
+/// [`PROBE_TIMEOUT`].
+pub async fn request_status(address: &str, method: &str, path: &str, token: &str) -> Option<u16> {
+    let address = address.parse::<SocketAddr>().ok()?;
+    let splits = |text: &str| text.contains(['\r', '\n', ' ']);
+    if !address.ip().is_loopback() || splits(method) || splits(path) || token.contains(['\r', '\n'])
+    {
+        return None;
     }
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nx-eario-token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    tokio::time::timeout(PROBE_TIMEOUT, exchange(address, request)).await.ok().flatten()
+}
+
+async fn exchange(address: SocketAddr, request: String) -> Option<u16> {
+    let mut stream = TcpStream::connect(address).await.ok()?;
+    stream.write_all(request.as_bytes()).await.ok()?;
     // The status line is all that is read: `HTTP/1.1 200 OK`.
     let mut status = [0_u8; 12];
-    stream.read_exact(&mut status).await.is_ok() && status.ends_with(b" 200")
+    stream.read_exact(&mut status).await.ok()?;
+    let code = status.strip_prefix(b"HTTP/1.1 ")?;
+    std::str::from_utf8(code).ok()?.parse().ok()
 }
 
 #[cfg(test)]
@@ -479,14 +563,45 @@ mod tests {
     }
 
     #[test]
-    fn invalid_registry_names_the_file() -> TestResult {
+    fn invalid_registry_names_the_file_and_how_to_recover() -> TestResult {
         let directory = tempfile::tempdir()?;
         let hub = HubDir::at(directory.path());
-        fs::write(hub.registry_path(), "not json")?;
+        for garbage in ["not json", r#"{"format_version": 1, "dashboards": "none"}"#] {
+            fs::write(hub.registry_path(), garbage)?;
+            let error = hub.read_registry().err().ok_or("garbage must be refused")?;
+            assert_eq!(error.code(), "hub_registry_invalid");
+            let message = error.to_string();
+            assert!(message.contains("registry.json"), "{message}");
+            assert!(message.contains("restore") && message.contains("delete"), "{message}");
+        }
+        Ok(())
+    }
 
-        let error = hub.read_registry().err().ok_or("garbage must be refused")?;
-        assert_eq!(error.code(), "hub_file_invalid");
-        assert!(error.to_string().contains("registry.json"), "{error}");
+    #[cfg(unix)]
+    #[test]
+    fn hub_files_are_readable_by_the_user_only() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path().join("hub"));
+        hub.write_registry(&Registry::default())?;
+        hub.write_run_file("alpha", &run_file())?;
+        write_run_file_at(&hub.hub_file_path(), &run_file())?;
+        let source = directory.path().join("source.bin");
+        fs::write(&source, b"x")?;
+        copy_atomic(&source, &hub.bin_dir("alpha")?.join("alpha"))?;
+        crate::log_file::RotatingFile::open(&hub.log_path("alpha")?, 1024)?;
+
+        let mode = |path: &Path| fs::metadata(path).map(|metadata| metadata.permissions().mode());
+        let directories =
+            [hub.root().to_owned(), hub.run_dir(), hub.logs_dir(), hub.bin_dir("alpha")?];
+        for path in directories {
+            assert_eq!(mode(&path)? & 0o777, 0o700, "{}", path.display());
+        }
+        let files = [hub.registry_path(), hub.run_file_path("alpha")?, hub.hub_file_path()];
+        for path in files.iter().chain([&hub.log_path("alpha")?]) {
+            assert_eq!(mode(path)? & 0o777, 0o600, "{}", path.display());
+        }
         Ok(())
     }
 
@@ -565,7 +680,16 @@ mod tests {
         let path = directory.path().join("run").join("alpha.json");
         write_run_file_at(&path, &run_file())?;
         assert_eq!(HubDir::at(directory.path()).read_run_file("alpha")?, Some(run_file()));
+        assert_eq!(read_run_file_at(&path)?, Some(run_file()));
         remove_run_file_at(&path)?;
+        assert_eq!(read_run_file_at(&path)?, None);
+
+        write_run_file_at(&path, &run_file())?;
+        remove_own_run_file_at(&path, "another-token")?;
+        assert_eq!(read_run_file_at(&path)?, Some(run_file()), "another server's file is kept");
+        remove_own_run_file_at(&path, &run_file().token)?;
+        assert_eq!(read_run_file_at(&path)?, None);
+        remove_own_run_file_at(&path, &run_file().token)?;
         remove_run_file_at(&path)?;
         assert!(!path.exists());
         Ok(())
@@ -599,6 +723,7 @@ mod tests {
         let hub = HubDir::resolve_from(Some("somewhere".into()))?;
         assert_eq!(hub.root(), Path::new("somewhere"));
         assert_eq!(hub.registry_path(), Path::new("somewhere").join("registry.json"));
+        assert_eq!(hub.hub_file_path(), Path::new("somewhere").join("hub.json"));
 
         let default = HubDir::resolve_from(None)?;
         assert!(default.root().ends_with("hub"));
@@ -653,9 +778,12 @@ mod tests {
         assert!(!probe("example.com:80", server.token()).await, "not a loopback address");
         assert!(!probe("not an address", server.token()).await, "not an address");
 
-        server.shutdown();
+        assert!(!request_shutdown(&address, "wrong-token").await, "a wrong token cannot stop it");
+        assert!(probe(&address, server.token()).await, "still running");
+        assert!(request_shutdown(&address, server.token()).await, "the right token stops it");
         server.wait().await?;
         assert!(!probe(&address, "anything").await, "closed port");
+        assert!(!request_shutdown(&address, "anything").await, "nothing to stop");
         Ok(())
     }
 
