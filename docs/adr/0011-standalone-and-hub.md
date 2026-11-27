@@ -172,3 +172,27 @@ implemented, in the same change.
 - `--eario-child <run-file>` stays a flag. Because an executable may turn its
   own arguments into files to load, `Dashboard::run()` in child mode ignores
   the `load_file` entries whose path is exactly one of those two arguments.
+
+## Amendment: the tray is deferred (during M3, 27 November 2026)
+
+Point 5 is not implemented in M3. On every platform the hub is, for now, a
+terminal process that prints its address and opens the browser, like a
+dashboard; on Windows its console window stays open. Children still have no
+console window (point 1).
+
+The tray needs a Win32 message loop on the main thread, and the workspace
+forbids `unsafe` in Eario's code. Candidates compared during M3:
+
+| Crate | Message loop without `unsafe` in Eario | Notes |
+| --- | --- | --- |
+| `tray-icon` (Tauri) | Only with winit or tao | Maintained, MIT OR Apache-2.0 |
+| `trayicon` | Only with winit | MIT |
+| `tray-item` | Yes (own thread) | Append-only menu, cannot list running dashboards; icon needs an exe resource |
+| `winsafe` | No (`DispatchMessage` is `unsafe`) | 0.0.x API |
+| `native-windows-gui` | Yes | MIT, light (winapi), but no release since September 2022; needs a comctl32 v6 manifest embedded by a build script |
+
+A working tray with `native-windows-gui` was built and set aside: the
+choice is between a frozen dependency and a heavy event-loop dependency
+(winit or tao), and neither was accepted for M3. Revisit when the desktop
+shell of ADR 0010 is designed (M11), which brings its own event loop, or
+when a maintained tray crate offers a safe loop.
