@@ -183,7 +183,10 @@ CI regenerates the bindings and fails if they differ from what is committed.
   runs a downloaded file, for `--eario-manifest` only, once its signature,
   hash and key are verified, and installs it once the user confirmed the
   preview by its SHA-256 (or, for the one-step update, when the key is pinned or
-  already accepted and the version strictly newer). Do not widen the exception (a path, a URL,
+  already accepted and the version strictly newer). It replaces its own
+  executable only with a release signed by the Eario key compiled into it
+  (`crates/eario-hub/eario-release.pub`), after running it with `--version`,
+  then restarts. Do not widen the exception (a path, a URL,
   arguments, another host, another executable) without an ADR; see
   `docs/architecture/security.md`.
 - MCP tools are read-only and return bounded results. A mutating or expensive

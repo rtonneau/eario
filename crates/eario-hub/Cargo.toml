@@ -16,9 +16,11 @@ name = "eario-hub"
 path = "src/main.rs"
 
 [features]
-# `fake_github`: a fake GitHub on the loopback interface, and a key to sign
-# its releases, for the tests of this crate and of others. Never enabled in a
-# release of the hub. This crate's own tests turn it on (dev-dependencies).
+# `fake_github`: a fake GitHub on the loopback interface, a key to sign its
+# releases, and a self-update with a test key and executable in place of the
+# compiled Eario release key, for the tests of this crate and of others.
+# Never enabled in a release of the hub. This crate's own tests turn it on
+# (dev-dependencies).
 fake-github = ["dep:ring"]
 
 [dependencies]

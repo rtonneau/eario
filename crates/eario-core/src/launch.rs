@@ -130,6 +130,10 @@ pub struct HubInfo {
     /// The last update check, `None` until one has run in this hub
     /// directory.
     pub last_check: Option<UpdateCheck>,
+    /// A newer version of the hub itself that the last check found, while
+    /// it is still newer than this hub: what a self-update would install, or
+    /// a newer one. `None` otherwise.
+    pub available_version: Option<String>,
 }
 
 /// The hub's answer to an open request.
@@ -251,6 +255,42 @@ pub struct UpdateCheck {
     pub checked_at: u64,
     /// One per dashboard installed from GitHub, in registry order.
     pub dashboards: Vec<DashboardUpdate>,
+    /// The hub itself. `None` in a check stored by a hub that did not check
+    /// itself.
+    #[serde(default)]
+    pub hub: Option<HubUpdate>,
+}
+
+/// What the last update check found for the hub itself, whose releases are
+/// verified with the Eario release key compiled into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HubUpdate {
+    /// The repository the hub's releases come from, as `owner/repo`.
+    pub repo: String,
+    /// Version of the latest release: its tag without a leading `v`. `None`
+    /// when the release was not read.
+    pub latest_version: Option<String>,
+    /// `latest_version` when it is newer than the hub that checked: a
+    /// self-update to offer. `None` otherwise.
+    pub available_version: Option<String>,
+    /// Why the release was not read: `self_update_not_configured` when this
+    /// build of the hub holds no Eario release key, so it does not update
+    /// itself (no request is made); otherwise why the release could not be
+    /// read. `None` when it was read.
+    pub error: Option<ApiError>,
+}
+
+/// The hub's answer to a self-update: it replaced its executable with a
+/// verified, newer release. Once it has answered, it stops and starts the new
+/// executable, at a new address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HubSelfUpdate {
+    /// Version of the hub that answered, now replaced.
+    pub previous_version: String,
+    /// Version installed, which the restarted hub runs.
+    pub version: String,
 }
 
 /// What the last update check found for one dashboard installed from
@@ -541,9 +581,24 @@ mod tests {
                     }),
                 },
             ],
+            hub: Some(HubUpdate {
+                repo: "rtonneau/eario".to_owned(),
+                latest_version: Some("0.3.0".to_owned()),
+                available_version: Some("0.3.0".to_owned()),
+                error: None,
+            }),
         };
         let text = serde_json::to_string(&check)?;
         assert_eq!(serde_json::from_str::<UpdateCheck>(&text)?, check);
+
+        // A check stored before the hub checked itself.
+        let older: UpdateCheck = serde_json::from_str(r#"{"checked_at":5,"dashboards":[]}"#)?;
+        assert_eq!(older.hub, None);
+
+        let updated =
+            HubSelfUpdate { previous_version: "0.2.0".to_owned(), version: "0.3.0".to_owned() };
+        let text = serde_json::to_string(&updated)?;
+        assert_eq!(serde_json::from_str::<HubSelfUpdate>(&text)?, updated);
         Ok(())
     }
 

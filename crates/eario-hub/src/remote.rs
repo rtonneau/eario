@@ -96,14 +96,15 @@ use crate::verify::{
 pub const DEFAULT_CATALOG: &str = "rtonneau/eario-catalog";
 
 /// Default longest time a downloaded executable has to print its manifest
-/// and exit. The first run of a new executable can be slow while an
-/// antivirus scans it.
+/// (or, for the hub's own update, its version) and exit. The first run of a
+/// new executable can be slow while an antivirus scans it.
 pub const MANIFEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Format version of `catalogs.json`.
 const CATALOGS_FORMAT_VERSION: u32 = 1;
 
-/// Most of a manifest read, in bytes; a manifest takes a few hundred.
+/// Most of the output of a downloaded executable read, in bytes; a manifest
+/// takes a few hundred.
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
 /// Most previews kept at once. A new one drops the oldest, file included.
@@ -396,7 +397,7 @@ impl Drop for StagingArea {
 /// The directory of one preview in a staging area, removed with what it
 /// holds when dropped.
 #[derive(Debug)]
-struct StagingDir {
+pub(crate) struct StagingDir {
     path: PathBuf,
     /// Its area, kept while the directory exists.
     _area: Arc<StagingArea>,
@@ -409,6 +410,11 @@ impl StagingDir {
         let path = area.path.join(sequence.to_string());
         hub_dir::create_private_dir(&path)?;
         Ok(Self { path, _area: Arc::clone(area) })
+    }
+
+    /// Where the directory is.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 }
 
@@ -613,14 +619,7 @@ pub(crate) fn stage(
         }
     };
 
-    let files = github.checksum_files(repo, &release)?;
-    // Without a signature nothing in the release can be trusted.
-    let signature =
-        files.signature.ok_or_else(|| VerifyError::MissingSignature { repo: repo.to_owned() })?;
-    let sums = files.sums.ok_or_else(|| GitHubError::NotFound {
-        repo: repo.to_owned(),
-        file: SUMS_FILE.to_owned(),
-    })?;
+    let sums = signed_sums(github, repo, &release)?;
     let key_file = github.release_file(repo, &release, KEY_FILE, MAX_KEY_FILE_BYTES as u64)?;
     let key = match key_file {
         Some(bytes) => PublicKey::from_pub_file(repo, &bytes)?,
@@ -630,17 +629,7 @@ pub(crate) fn stage(
             .ok_or_else(|| VerifyError::MissingKey { repo: repo.to_owned() })?,
     };
     let key_status = trust.status(&key);
-    let checksums = verify_sums(repo, &key, &sums, Some(&signature))?;
-    let sha256 = checksums.sha256(&asset.name)?.to_owned();
-
-    let directory = StagingDir::create(area)?;
-    let file = directory.path.join(&asset.name);
-    let download = download_to(github, repo, asset, &file)?;
-    if download.sha256 != sha256 {
-        return Err(
-            VerifyError::HashMismatch { repo: repo.to_owned(), asset: asset.name.clone() }.into()
-        );
-    }
+    let verified = download_verified(area, github, repo, asset, &key, &sums)?;
     let replaces = match purpose {
         Purpose::Update { entry } => Some(*entry),
         Purpose::Install { .. } => None,
@@ -652,16 +641,16 @@ pub(crate) fn stage(
             manifest: None,
             tag: release.tag.clone(),
             asset: asset.name.clone(),
-            size: download.size,
-            sha256,
+            size: verified.size,
+            sha256: verified.sha256,
             public_key: key.as_base64().to_owned(),
             key_sha256: key.sha256(),
             key_status,
         },
         key,
         replaces,
-        file,
-        directory,
+        file: verified.file,
+        directory: verified.directory,
     };
     let preview = &staged.preview;
     if !is_trusted(key_status) {
@@ -686,6 +675,73 @@ pub(crate) fn stage(
         "release verified and staged"
     );
     Ok(staged)
+}
+
+/// The checksum list of a release and its minisign signature, as downloaded:
+/// not verified yet.
+#[derive(Debug)]
+pub(crate) struct SignedSums {
+    sums: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+/// Downloads the `SHA256SUMS.txt` of `release` and its signature. Refused
+/// when the release has no signature (`release_missing_signature`), before
+/// any asset is downloaded: without one nothing in the release can be
+/// trusted.
+pub(crate) fn signed_sums(
+    github: &dyn GitHub,
+    repo: &str,
+    release: &Release,
+) -> Result<SignedSums, HubError> {
+    let files = github.checksum_files(repo, release)?;
+    let signature =
+        files.signature.ok_or_else(|| VerifyError::MissingSignature { repo: repo.to_owned() })?;
+    let sums = files.sums.ok_or_else(|| GitHubError::NotFound {
+        repo: repo.to_owned(),
+        file: SUMS_FILE.to_owned(),
+    })?;
+    Ok(SignedSums { sums, signature })
+}
+
+/// A release asset downloaded into a staging directory, whose SHA-256 is the
+/// one its signed checksum list gives.
+#[derive(Debug)]
+pub(crate) struct Verified {
+    /// The downloaded file.
+    pub(crate) file: PathBuf,
+    /// Its size in bytes.
+    pub(crate) size: u64,
+    /// Its SHA-256, in lower-case hexadecimal.
+    pub(crate) sha256: String,
+    /// Its directory, removed with the file when dropped.
+    pub(crate) directory: StagingDir,
+}
+
+/// What every release goes through, a dashboard's or the hub's own: checks
+/// the signature of `sums` with `key`, then downloads `asset` into a new
+/// directory of `area`, bounded by the size the release lists, and compares
+/// its SHA-256 with the one the signed list gives. Nothing is downloaded
+/// unless the signature verifies and lists the asset.
+pub(crate) fn download_verified(
+    area: &Arc<StagingArea>,
+    github: &dyn GitHub,
+    repo: &str,
+    asset: &ReleaseAsset,
+    key: &PublicKey,
+    sums: &SignedSums,
+) -> Result<Verified, HubError> {
+    let checksums = verify_sums(repo, key, &sums.sums, Some(&sums.signature))?;
+    let sha256 = checksums.sha256(&asset.name)?.to_owned();
+    let directory = StagingDir::create(area)?;
+    let file = directory.path.join(&asset.name);
+    let download = download_to(github, repo, asset, &file)?;
+    if download.sha256 != sha256 {
+        return Err(
+            VerifyError::HashMismatch { repo: repo.to_owned(), asset: asset.name.clone() }.into()
+        );
+    }
+    Ok(Verified { file, size: download.size, sha256, directory })
 }
 
 /// Completes the preview of a staged release whose key the user has just
@@ -842,7 +898,7 @@ fn download_to(
 
 /// Options that create a file the user alone can read, write and run on
 /// Unix. The caller chooses how to open it.
-fn executable_file_options() -> fs::OpenOptions {
+pub(crate) fn executable_file_options() -> fs::OpenOptions {
     let options = fs::OpenOptions::new();
     #[cfg(unix)]
     let options = {
@@ -855,10 +911,7 @@ fn executable_file_options() -> fs::OpenOptions {
 }
 
 /// Runs the verified executable at `file` with `--eario-manifest` and reads
-/// the manifest it prints: no standard input, standard error discarded, at
-/// most [`MAX_MANIFEST_BYTES`] read, no console window (Windows) and a
-/// process group of its own, `directory` as working directory, killed after
-/// `timeout`.
+/// the manifest it prints, as [`probe`] runs it.
 fn read_manifest(
     repo: &str,
     asset: &str,
@@ -871,20 +924,37 @@ fn read_manifest(
         asset: asset.to_owned(),
         detail,
     };
+    let text = probe(file, MANIFEST_ARGUMENT, directory, timeout).map_err(failed)?;
+    serde_json::from_str(text.trim())
+        .map_err(|error| failed(format!("it printed no manifest ({error})")))
+}
+
+/// Runs the verified executable at `file` with `argument` alone and returns
+/// what it printed, once it exited with success: no standard input, standard
+/// error discarded, at most [`MAX_MANIFEST_BYTES`] read, no console window
+/// (Windows) and a process group of its own, `directory` as working
+/// directory, killed after `timeout`. On failure, says what happened, for a
+/// message.
+pub(crate) fn probe(
+    file: &Path,
+    argument: &str,
+    directory: &Path,
+    timeout: Duration,
+) -> Result<String, String> {
     let mut command = Command::new(file);
     command
-        .arg(MANIFEST_ARGUMENT)
+        .arg(argument)
         .current_dir(directory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     detach(&mut command);
     let started = Instant::now();
-    let mut child = spawn_retrying(&mut command)
-        .map_err(|error| failed(format!("it could not be started: {error}")))?;
+    let mut child = spawn_retrying(&mut command, SPAWN_ATTEMPTS)
+        .map_err(|error| format!("it could not be started: {error}"))?;
     let Some(stdout) = child.stdout.take() else {
         stop(child);
-        return Err(failed("its output could not be read".to_owned()));
+        return Err("its output could not be read".to_owned());
     };
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -898,19 +968,19 @@ fn read_manifest(
         Ok(Ok(bytes)) if bytes.len() as u64 <= MAX_MANIFEST_BYTES => bytes,
         Ok(Ok(_)) => {
             stop(child);
-            return Err(failed(format!("it printed more than {MAX_MANIFEST_BYTES} bytes")));
+            return Err(format!("it printed more than {MAX_MANIFEST_BYTES} bytes"));
         }
         Ok(Err(error)) => {
             stop(child);
-            return Err(failed(format!("its output could not be read: {error}")));
+            return Err(format!("its output could not be read: {error}"));
         }
         Err(RecvTimeoutError::Timeout) => {
             stop(child);
-            return Err(failed(format!("it did not print its manifest within {seconds} s")));
+            return Err(format!("it did not print its answer within {seconds} s"));
         }
         Err(RecvTimeoutError::Disconnected) => {
             stop(child);
-            return Err(failed("its output could not be read".to_owned()));
+            return Err("its output could not be read".to_owned());
         }
     };
     let status = loop {
@@ -918,32 +988,31 @@ fn read_manifest(
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 stop(child);
-                return Err(failed(format!("it did not exit within {seconds} s")));
+                return Err(format!("it did not exit within {seconds} s"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => {
                 stop(child);
-                return Err(failed(format!("its exit could not be awaited: {error}")));
+                return Err(format!("its exit could not be awaited: {error}"));
             }
         }
     };
     if !status.success() {
-        return Err(failed(format!("it exited with {status}")));
+        return Err(format!("it exited with {status}"));
     }
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| failed("its output is not UTF-8".to_owned()))?;
-    serde_json::from_str(text.trim())
-        .map_err(|error| failed(format!("it printed no manifest ({error})")))
+    String::from_utf8(bytes).map_err(|_| "its output is not UTF-8".to_owned())
 }
 
-/// Starts `command`, retrying briefly while the system reports its
-/// executable busy: on Unix a process forked by another thread while the
-/// file was still open for writing holds it until that process executes.
-fn spawn_retrying(command: &mut Command) -> io::Result<Child> {
+/// Starts `command`, trying again 50 ms later, up to `attempts` times in
+/// all, while the system reports its executable busy ([`is_busy`]): on Unix
+/// a process forked by another thread while the file was still open for
+/// writing holds it until that process executes; on Windows an antivirus may
+/// hold a file just written. Blocking.
+pub(crate) fn spawn_retrying(command: &mut Command, attempts: u32) -> io::Result<Child> {
     let mut attempt = 1;
     loop {
         match command.spawn() {
-            Err(error) if is_busy(&error) && attempt < SPAWN_ATTEMPTS => {
+            Err(error) if is_busy(&error) && attempt < attempts => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -954,19 +1023,19 @@ fn spawn_retrying(command: &mut Command) -> io::Result<Child> {
 
 /// `ETXTBSY`, "text file busy".
 #[cfg(unix)]
-fn is_busy(error: &io::Error) -> bool {
+pub(crate) fn is_busy(error: &io::Error) -> bool {
     error.raw_os_error() == Some(26)
 }
 
 /// `ERROR_SHARING_VIOLATION`: another program, such as an antivirus, holds
 /// the file.
 #[cfg(windows)]
-fn is_busy(error: &io::Error) -> bool {
+pub(crate) fn is_busy(error: &io::Error) -> bool {
     error.raw_os_error() == Some(32)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn is_busy(_error: &io::Error) -> bool {
+pub(crate) fn is_busy(_error: &io::Error) -> bool {
     false
 }
 
@@ -1593,7 +1662,7 @@ mod tests {
         assert!(!read_settings(&hub)?.check_updates_at_start);
 
         assert_eq!(read_last_check(&hub)?, None);
-        let check = UpdateCheck { checked_at: 5, dashboards: Vec::new() };
+        let check = UpdateCheck { checked_at: 5, dashboards: Vec::new(), hub: None };
         write_last_check(&hub, &check)?;
         assert_eq!(read_last_check(&hub)?, Some(check));
         Ok(())

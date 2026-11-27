@@ -20,11 +20,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eario_core::{
-    ApiError, AppResponse, DashboardState, HubCatalog, HubDashboard, HubInfo, HubOpen, HubSettings,
-    InstallPreview, KeyStatus, LAUNCH_PROTOCOL_VERSION, RunFile, Source,
+    ApiError, AppResponse, DashboardState, HubCatalog, HubDashboard, HubInfo, HubOpen,
+    HubSelfUpdate, HubSettings, HubUpdate, InstallPreview, KeyStatus, LAUNCH_PROTOCOL_VERSION,
+    RunFile, Source,
 };
-use eario_hub::fake_github::{FakeAsset, FakeGitHub, TestKey};
+use eario_hub::fake_github::{self, FakeAsset, FakeGitHub, TestKey};
 use eario_hub::github::{ClientOptions, Endpoint, GitHub, GitHubClient};
+use eario_hub::self_update::{HUB_REPO, HUB_SLUG, SelfUpdateConfig};
 use eario_hub::verify::{self, Target};
 use eario_hub::{RunningHub, Supervisor, SupervisorOptions};
 use eario_runtime::ServerConfig;
@@ -790,6 +792,10 @@ impl RemoteHub {
             SupervisorOptions::default(),
             fake_client(fake)?,
         )?;
+        Self::with_supervisor(supervisor)
+    }
+
+    fn with_supervisor(supervisor: Supervisor) -> Result<Self, Failure> {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
         Ok(Self { supervisor, runtime })
@@ -2010,6 +2016,7 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
         ("POST", "/api/dashboards/data-explorer/rollback".to_owned()),
         ("GET", "/api/settings".to_owned()),
         ("POST", "/api/settings/check-at-start/off".to_owned()),
+        ("POST", "/api/self-update".to_owned()),
     ];
     for (method, path) in &routes {
         let answer = request(&hub.address, method, path, None)?;
@@ -2269,11 +2276,16 @@ fn catalogs_and_the_check_at_start_setting_change_over_http() -> TestResult {
     let settings: HubSettings = ok(&hub.post("/api/settings/check-at-start/on")?)?;
     assert!(settings.check_updates_at_start);
 
-    // A check with nothing installed from GitHub reads nothing.
-    let before = fake.requests().len();
+    // A check with nothing installed from GitHub reads no dashboard's
+    // repository; it checks the hub itself, or says why it does not.
+    let dashboard_requests =
+        |fake: &FakeGitHub| fake.requests().iter().filter(|path| !path.contains(HUB_REPO)).count();
+    let before = dashboard_requests(&fake);
     let info = TestHub::info(&hub.post("/api/check")?)?;
-    assert_eq!(info.last_check.map(|check| check.dashboards.len()), Some(0));
-    assert_eq!(fake.requests().len(), before);
+    let check = info.last_check.ok_or("checked")?;
+    assert_eq!(check.dashboards.len(), 0);
+    assert_eq!(check.hub.map(|hub| hub.repo).as_deref(), Some(HUB_REPO));
+    assert_eq!(dashboard_requests(&fake), before);
     Ok(())
 }
 
@@ -2437,5 +2449,515 @@ fn the_command_line_trusts_a_new_key_only_when_told_its_sha256() -> TestResult {
     let entry =
         HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     assert_eq!(entry.pinned_key, Some(key.public_key()));
+    Ok(())
+}
+
+// The hub's own update (ADR 0013). A fake GitHub serves releases of
+// `rtonneau/eario` signed with a test key, which stands in for the Eario
+// release key compiled into the hub. The new hub is this build of
+// `eario-hub` with a few bytes appended (it still runs), so its `--version`
+// prints this build's version, and the hub under test pretends to run an
+// older one. The executable replaced is a copy in a temporary directory,
+// never this test's own.
+
+/// The version of this build of the hub, which its `--version` prints.
+const THIS_HUB: &str = env!("CARGO_PKG_VERSION");
+/// The version the hub under test pretends to run, older than [`THIS_HUB`].
+const OLDER_HUB: &str = "0.0.1";
+
+/// A copy of this build of the hub, at `<directory>/eario-hub[.exe]`.
+fn hub_copy(directory: &Path) -> Result<PathBuf, Failure> {
+    let path = directory.join(format!("{HUB_SLUG}{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(HUB_EXECUTABLE, &path)?;
+    Ok(path)
+}
+
+/// This build of the hub with `marker` appended: a new version that runs.
+fn hub_build(marker: &str) -> Result<Vec<u8>, Failure> {
+    let mut bytes = fs::read(HUB_EXECUTABLE)?;
+    bytes.extend_from_slice(marker.as_bytes());
+    Ok(bytes)
+}
+
+/// `path` with `suffix` added to its file name.
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// The name of the file at `path`.
+fn file_name(path: &Path) -> String {
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// The names of the files in `directory`, sorted.
+fn file_names(directory: &Path) -> Result<Vec<String>, Failure> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        names.push(entry?.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// A supervisor of `root` whose self-update trusts `key` (`None`: the hub
+/// holds no release key), replaces `executable` and runs `version`.
+fn self_updating(
+    root: &Path,
+    fake: &FakeGitHub,
+    key: Option<&TestKey>,
+    executable: &Path,
+    version: &str,
+) -> Result<Supervisor, Failure> {
+    let key = match key {
+        Some(key) => Some(verify::PublicKey::from_base64(HUB_REPO, &key.public_key())?),
+        None => None,
+    };
+    let config = SelfUpdateConfig::for_tests(key, executable.to_owned(), version);
+    let options = SupervisorOptions::default();
+    Ok(Supervisor::with_self_update(HubDir::at(root), options, fake_client(fake)?, config)?)
+}
+
+/// Serves `content` as the hub's asset for `target` in the latest release
+/// `tag` of the hub, its checksum list signed by `key`, without
+/// `minisign.pub`.
+fn publish_hub(
+    fake: &FakeGitHub,
+    target: Target,
+    tag: &str,
+    key: &TestKey,
+    content: Vec<u8>,
+) -> TestResult {
+    let asset = FakeAsset::new(&asset_of(HUB_SLUG, target)?, content);
+    publish(fake, HUB_REPO, tag, key, vec![asset], false);
+    Ok(())
+}
+
+/// Starts `executable`, a hub, on `root`, against the fake GitHub at `api`,
+/// and waits until it answers at the address it records in `hub.json`.
+fn hub_process(
+    executable: &Path,
+    root: &Path,
+    api: &str,
+) -> Result<(HubProcess, RunFile), Failure> {
+    let mut command = Command::new(executable);
+    command
+        .env("EARIO_HUB_DIR", root)
+        .env("EARIO_NO_BROWSER", "1")
+        .env("EARIO_HUB_GITHUB_API", api)
+        .env_remove("EARIO_PORT")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut process = HubProcess(command.spawn()?);
+    let hub_file = HubDir::at(root).hub_file_path();
+    let started = Instant::now();
+    loop {
+        if let Some(recorded) = hub_dir::read_run_file_at(&hub_file)?
+            && hub_dir::probe_blocking(&recorded.address, &recorded.token)?
+        {
+            return Ok((process, recorded));
+        }
+        if let Some(status) = process.0.try_wait()? {
+            return Err(format!("the hub exited with {status}").into());
+        }
+        if started.elapsed() > TIMEOUT {
+            return Err("the hub never recorded itself in hub.json".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn self_update_replaces_the_running_hub_and_restarts_it() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let installed = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(30)?;
+    let executable = hub_copy(installed.path())?;
+    let before = fs::read(&executable)?;
+    let old = with_suffix(&executable, ".old");
+    let name = file_name(&executable);
+
+    // The executable to replace is running, as the hub of another directory:
+    // Windows renames a running executable, but never deletes it.
+    let elsewhere = tempfile::tempdir()?;
+    let (mut old_hub, recorded) = hub_process(&executable, elsewhere.path(), &fake.base_url())?;
+
+    // A dashboard runs too, which the self-update leaves alone.
+    install(root.path(), DATA_EXPLORER)?;
+    let new_build = hub_build("new hub")?;
+    publish_hub(&fake, target, &format!("v{THIS_HUB}"), &key, new_build.clone())?;
+    let supervisor = self_updating(root.path(), &fake, Some(&key), &executable, OLDER_HUB)?;
+    let mut hub = TestHub::with_supervisor(supervisor)?;
+    assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    let dashboard = run_file(root.path(), DATA_EXPLORER)?;
+
+    // The check finds the newer hub by its tag, and downloads nothing.
+    let info = TestHub::info(&hub.post("/api/check")?)?;
+    assert_eq!(info.eario_version, OLDER_HUB);
+    assert_eq!(info.available_version.as_deref(), Some(THIS_HUB));
+    let found = info.last_check.and_then(|check| check.hub).ok_or("the hub checked itself")?;
+    let expected = HubUpdate {
+        repo: HUB_REPO.to_owned(),
+        latest_version: Some(THIS_HUB.to_owned()),
+        available_version: Some(THIS_HUB.to_owned()),
+        error: None,
+    };
+    assert_eq!(found, expected);
+    let asset = asset_of(HUB_SLUG, target)?;
+    assert_eq!(asset_downloads(&fake, &asset), 0);
+
+    let updated: HubSelfUpdate = ok(&hub.post("/api/self-update")?)?;
+    let expected =
+        HubSelfUpdate { previous_version: OLDER_HUB.to_owned(), version: THIS_HUB.to_owned() };
+    assert_eq!(updated, expected);
+    assert_eq!(asset_downloads(&fake, &asset), 1);
+
+    // Having answered, the server stops by itself, and names the executable
+    // to start.
+    let server = hub.running.take().ok_or("the hub served")?;
+    hub.runtime.block_on(async { tokio::time::timeout(TIMEOUT, server.wait()).await })??;
+    assert_eq!(hub.supervisor.restart_executable(), Some(executable.clone()));
+    assert_eq!(fs::read(&executable)?, new_build, "the new version is in place");
+    assert_eq!(fs::read(&old)?, before, "the replaced executable is kept beside it");
+    assert_eq!(file_names(installed.path())?, [name.clone(), format!("{name}.old")]);
+    assert_eq!(staged_files(root.path())?, 0, "the download is gone from staging");
+    let again = hub.runtime.block_on(hub.supervisor.self_update());
+    assert_eq!(refusal(again), Some("self_update_pending"));
+
+    // The dashboard runs on, and so does the hub running from the replaced
+    // executable.
+    assert!(hub_dir::probe_blocking(&dashboard.address, &dashboard.token)?);
+    assert!(hub_dir::probe_blocking(&recorded.address, &recorded.token)?);
+
+    // Once that hub has quit, the next start removes the replaced
+    // executable, and re-attaches to the dashboard.
+    let quit = request(&recorded.address, "POST", "/api/shutdown", Some(&recorded.token))?;
+    assert_eq!(quit.status, 204);
+    exit_status(&mut old_hub.0)?;
+    let supervisor = self_updating(root.path(), &fake, Some(&key), &executable, THIS_HUB)?;
+    let next = TestHub::with_supervisor(supervisor)?;
+    let started = Instant::now();
+    while old.exists() {
+        if started.elapsed() > TIMEOUT {
+            return Err("the replaced executable was not removed at the next start".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(file_names(installed.path())?, [name]);
+    assert_eq!(fs::read(&executable)?, new_build);
+    assert_eq!(next.dashboard(DATA_EXPLORER)?.state, DashboardState::Running);
+    Ok(())
+}
+
+#[test]
+fn self_update_refuses_what_it_cannot_verify_and_changes_nothing() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let installed = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(31)?;
+    let other = test_key(32)?;
+    let executable = hub_copy(installed.path())?;
+    let before = fs::read(&executable)?;
+    let name = file_name(&executable);
+    let asset = asset_of(HUB_SLUG, target)?;
+    let new_build = hub_build("new hub")?;
+    let tag = format!("v{THIS_HUB}");
+    let unchanged = |case: &str| -> TestResult {
+        assert_eq!(fs::read(&executable)?, before, "{case}: the hub was not replaced");
+        assert_eq!(file_names(installed.path())?, [name.as_str()], "{case}: nothing beside it");
+        assert_eq!(staged_files(root.path())?, 0, "{case}: nothing left in staging");
+        Ok(())
+    };
+
+    // A hub without a release key: refused before any request, and its
+    // check says why.
+    publish_hub(&fake, target, &tag, &key, new_build.clone())?;
+    let keyless = RemoteHub::with_supervisor(self_updating(
+        root.path(),
+        &fake,
+        None,
+        &executable,
+        OLDER_HUB,
+    )?)?;
+    let not_configured = Some("self_update_not_configured");
+    assert_eq!(refusal(keyless.run(keyless.supervisor.self_update())), not_configured);
+    assert_eq!(refusal(keyless.run(keyless.supervisor.check_hub())), not_configured);
+    let check = keyless.run(keyless.supervisor.check())?;
+    let found = check.hub.ok_or("the hub is in the check")?;
+    assert_eq!(found.error.map(|error| error.code).as_deref(), not_configured);
+    assert_eq!(found.available_version, None);
+    assert_eq!(keyless.run(keyless.supervisor.list())?.available_version, None);
+    assert!(fake.requests().is_empty(), "requests to GitHub: {:?}", fake.requests());
+    unchanged("no key")?;
+
+    let hub = RemoteHub::with_supervisor(self_updating(
+        root.path(),
+        &fake,
+        Some(&key),
+        &executable,
+        OLDER_HUB,
+    )?)?;
+    let self_update = || refusal(hub.run(hub.supervisor.self_update()));
+
+    // A tag that is not newer: refused before the download.
+    publish_hub(&fake, target, &format!("v{OLDER_HUB}"), &key, new_build.clone())?;
+    assert_eq!(self_update(), Some("self_update_not_newer"));
+    unchanged("an older tag")?;
+
+    // No signature: refused before the download.
+    let signed = [FakeAsset::new(&asset, new_build.clone())];
+    let sums = FakeAsset::new(verify::SUMS_FILE, fake_github::sums_file(&signed));
+    fake.release(HUB_REPO, &tag, &[signed[0].clone(), sums]);
+    assert_eq!(self_update(), Some("release_missing_signature"));
+    unchanged("no signature")?;
+
+    // Signed with another key, which the release carries as its
+    // `minisign.pub`: the hub trusts only the key compiled into it.
+    publish(&fake, HUB_REPO, &tag, &other, signed.to_vec(), true);
+    assert_eq!(self_update(), Some("release_wrong_key"));
+    unchanged("another key")?;
+
+    // A checksum list changed after it was signed.
+    let mut files = key.release_files(&signed).to_vec();
+    let changed = [FakeAsset::new(&asset, b"another build".to_vec())];
+    files[1] = FakeAsset::new(verify::SUMS_FILE, fake_github::sums_file(&changed));
+    files.push(signed[0].clone());
+    fake.release(HUB_REPO, &tag, &files);
+    assert_eq!(self_update(), Some("release_bad_signature"));
+    unchanged("a changed checksum list")?;
+    assert_eq!(asset_downloads(&fake, &asset), 0, "nothing downloaded so far");
+
+    // An asset that is not the one signed.
+    let mut files = key.release_files(&signed).to_vec();
+    let mut tampered = new_build.clone();
+    if let Some(last) = tampered.last_mut() {
+        *last ^= 0xff;
+    }
+    files.push(FakeAsset::new(&asset, tampered));
+    fake.release(HUB_REPO, &tag, &files);
+    assert_eq!(self_update(), Some("release_hash_mismatch"));
+    unchanged("a tampered asset")?;
+
+    // A signed file that does not run.
+    publish_hub(&fake, target, &tag, &key, b"not an executable".to_vec())?;
+    assert_eq!(self_update(), Some("self_update_probe_failed"));
+    unchanged("not an executable")?;
+
+    // No asset for this machine.
+    let elsewhere = FakeAsset::new("eario-hub-riscv64gc-unknown-linux-gnu", new_build.clone());
+    publish(&fake, HUB_REPO, &tag, &key, vec![elsewhere], false);
+    assert_eq!(self_update(), Some("hub_no_asset"));
+    unchanged("no asset")?;
+
+    // A newer tag on an executable that is not newer (an older signed
+    // release served again): the version the executable prints decides.
+    let current = self_updating(root.path(), &fake, Some(&key), &executable, THIS_HUB)?;
+    let current = RemoteHub::with_supervisor(current)?;
+    publish_hub(&fake, target, "v99.0.0", &key, new_build.clone())?;
+    let replayed = current.run(current.supervisor.self_update());
+    assert_eq!(refusal(replayed), Some("self_update_not_newer"));
+    unchanged("an executable that is not newer")?;
+    assert_eq!(current.supervisor.restart_executable(), None);
+
+    // Over HTTP a refusal answers 409, and the hub serves on.
+    let http =
+        TestHub::with_supervisor(self_updating(root.path(), &fake, None, &executable, OLDER_HUB)?)?;
+    let refused = http.post("/api/self-update")?.refusal(409)?;
+    assert_eq!(refused.code, "self_update_not_configured");
+    assert!(refused.message.contains("eario-release.pub"), "{}", refused.message);
+    assert!(http.list()?.dashboards.is_empty(), "the hub still answers");
+    assert_eq!(http.supervisor.restart_executable(), None);
+    unchanged("over HTTP")?;
+    Ok(())
+}
+
+#[test]
+fn a_dropped_self_update_still_restarts_the_hub_and_runs_alone() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let installed = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(33)?;
+    let executable = hub_copy(installed.path())?;
+    let before = fs::read(&executable)?;
+    let new_build = hub_build("new hub")?;
+    publish_hub(&fake, target, &format!("v{THIS_HUB}"), &key, new_build.clone())?;
+    let hub = RemoteHub::with_supervisor(self_updating(
+        root.path(),
+        &fake,
+        Some(&key),
+        &executable,
+        OLDER_HUB,
+    )?)?;
+
+    // The request is dropped once the update has started, as when its
+    // client goes away or Quit cuts it short: its first poll starts the
+    // work, then the future is gone.
+    let pending = hub.run(async {
+        let mut update = std::pin::pin!(hub.supervisor.self_update());
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(update.as_mut().poll(context).is_pending())
+        })
+        .await
+    });
+    assert!(pending, "the update takes longer than one poll");
+
+    // Meanwhile, a stopping hub waits for that update to end and finds the
+    // restart it asked for by itself; a second update waits too, then finds
+    // the hub restarting.
+    let (restart, again) = hub.run(async {
+        tokio::join!(hub.supervisor.restart_after_self_update(), hub.supervisor.self_update())
+    });
+    assert_eq!(restart, Some(executable.clone()));
+    assert_eq!(refusal(again), Some("self_update_pending"));
+    assert_eq!(hub.supervisor.restart_executable(), Some(executable.clone()));
+    let asset = asset_of(HUB_SLUG, target)?;
+    assert_eq!(asset_downloads(&fake, &asset), 1, "one update ran");
+    assert_eq!(fs::read(&executable)?, new_build, "the new version is in place");
+    assert_eq!(fs::read(with_suffix(&executable, ".old"))?, before);
+    assert_eq!(staged_files(root.path())?, 0, "the download is gone from staging");
+    Ok(())
+}
+
+#[test]
+fn a_self_update_that_cannot_place_the_new_hub_leaves_it_as_it_was() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let installed = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(34)?;
+    let executable = hub_copy(installed.path())?;
+    let before = fs::read(&executable)?;
+    let old = with_suffix(&executable, ".old");
+    let name = file_name(&executable);
+    let asset = asset_of(HUB_SLUG, target)?;
+    let new_build = hub_build("new hub")?;
+    publish_hub(&fake, target, &format!("v{THIS_HUB}"), &key, new_build.clone())?;
+    let hub = RemoteHub::with_supervisor(self_updating(
+        root.path(),
+        &fake,
+        Some(&key),
+        &executable,
+        OLDER_HUB,
+    )?)?;
+    // Verified, run, copied beside the hub, then refused by the swap.
+    let unchanged = |case: &str, result: Result<HubSelfUpdate, eario_hub::HubError>| {
+        let error = result.err().ok_or_else(|| format!("{case}: not refused"))?;
+        assert_eq!(error.code(), "self_update_failed", "{case}: {error}");
+        assert!(error.to_string().contains("left as it was"), "{case}: {error}");
+        assert_eq!(fs::read(&executable)?, before, "{case}: the hub was not replaced");
+        assert_eq!(staged_files(root.path())?, 0, "{case}: nothing left in staging");
+        assert_eq!(hub.supervisor.restart_executable(), None, "{case}: no restart");
+        TestResult::Ok(())
+    };
+
+    // `<name>.old` is a folder with a file in it, which the swap cannot
+    // remove to keep the running executable there.
+    fs::create_dir(&old)?;
+    fs::write(old.join("kept"), b"")?;
+    unchanged("an .old that cannot be removed", hub.run(hub.supervisor.self_update()))?;
+    assert_eq!(asset_downloads(&fake, &asset), 1, "downloaded and run before the swap");
+    assert_eq!(file_names(installed.path())?, [name.clone(), format!("{name}.old")]);
+    assert_eq!(file_names(&old)?, ["kept"], "the folder is left alone");
+    fs::remove_dir_all(&old)?;
+
+    // Windows: the executable is held without sharing its deletion, so it
+    // cannot be renamed aside.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = fs::OpenOptions::new().read(true).share_mode(0).open(&executable)?;
+        let result = hub.run(hub.supervisor.self_update());
+        drop(held);
+        unchanged("a held executable", result)?;
+        assert_eq!(asset_downloads(&fake, &asset), 2);
+        assert_eq!(file_names(installed.path())?, [name.as_str()], "nothing beside it");
+    }
+
+    // A failed swap holds nothing back: once the obstacle is gone, the
+    // update succeeds and asks for the restart.
+    let updated = hub.run(hub.supervisor.self_update())?;
+    assert_eq!(updated.version, THIS_HUB);
+    assert_eq!(fs::read(&executable)?, new_build);
+    assert_eq!(hub.supervisor.restart_executable(), Some(executable.clone()));
+    Ok(())
+}
+
+#[test]
+fn a_hub_without_the_release_key_offers_no_update_of_itself() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let installed = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(35)?;
+    let executable = hub_copy(installed.path())?;
+    publish_hub(&fake, target, &format!("v{THIS_HUB}"), &key, hub_build("new hub")?)?;
+
+    // A build with the key checks, and stores what it found in the hub
+    // directory.
+    let configured = RemoteHub::with_supervisor(self_updating(
+        root.path(),
+        &fake,
+        Some(&key),
+        &executable,
+        OLDER_HUB,
+    )?)?;
+    configured.run(configured.supervisor.check())?;
+    let info = configured.run(configured.supervisor.list())?;
+    assert_eq!(info.available_version.as_deref(), Some(THIS_HUB));
+
+    // A build without it, on the same directory, cannot verify that
+    // release, so it offers none.
+    let keyless = self_updating(root.path(), &fake, None, &executable, OLDER_HUB)?;
+    let keyless = RemoteHub::with_supervisor(keyless)?;
+    let info = keyless.run(keyless.supervisor.list())?;
+    assert_eq!(info.available_version, None);
+    let stored = info.last_check.and_then(|check| check.hub).and_then(|hub| hub.available_version);
+    assert_eq!(stored.as_deref(), Some(THIS_HUB), "the other build's check is still stored");
+    Ok(())
+}
+
+#[test]
+fn self_update_from_the_command_line_waits_for_the_hub_to_quit() -> TestResult {
+    // Release builds ignore the fake GitHub's address and would reach GitHub.
+    if !cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let api = fake.base_url();
+
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["--version"])?;
+    assert!(status.success(), "{errors}");
+    assert_eq!(printed.trim(), format!("{HUB_SLUG} {THIS_HUB}"));
+
+    // While a hub runs, its executable is the one to replace: refused.
+    let (mut running, recorded) = hub_process(Path::new(HUB_EXECUTABLE), root.path(), &api)?;
+    let (status, _, errors) = hub_cli(root.path(), &api, &["self-update", "--yes"])?;
+    assert_eq!(status.code(), Some(1), "{errors}");
+    assert!(errors.contains("self_update_hub_running"), "{errors}");
+    assert!(errors.contains(&recorded.address), "{errors}");
+    let quit = request(&recorded.address, "POST", "/api/shutdown", Some(&recorded.token))?;
+    assert_eq!(quit.status, 204);
+    exit_status(&mut running.0)?;
+
+    // Once it has quit: this build holds no release key, so the command
+    // says so without a request (with a key, it reads the fake GitHub,
+    // which has no release of the hub).
+    let configured = SelfUpdateConfig::compiled().is_configured();
+    let (status, _, errors) = hub_cli(root.path(), &api, &["self-update", "--yes"])?;
+    assert_eq!(status.code(), Some(1), "{errors}");
+    let expected = if configured { "github_no_release" } else { "self_update_not_configured" };
+    assert!(errors.contains(expected), "{errors}");
+    if !configured {
+        let hub_requests = fake.requests().iter().filter(|path| path.contains(HUB_REPO)).count();
+        assert_eq!(hub_requests, 0, "{:?}", fake.requests());
+    }
     Ok(())
 }

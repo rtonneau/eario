@@ -7,6 +7,7 @@
 //! ├── catalogs.json     catalogs the hub reads (written once the user changes them)
 //! ├── settings.json     the hub's settings (written once the user changes them)
 //! ├── updates.json      result of the last update check
+//! ├── self-update.log   a line per self-update after which the new hub could not start
 //! ├── hub.lock          locked while a process changes the files above
 //! ├── bin/<slug>/       the hub's copy of each installed executable
 //! ├── staging/          release assets being verified, one directory per process
@@ -196,6 +197,13 @@ impl HubDir {
     /// Path of `updates.json`: what the last update check found.
     pub fn updates_path(&self) -> PathBuf {
         self.root.join("updates.json")
+    }
+
+    /// Path of `self-update.log`, where a hub that replaced its own
+    /// executable but could not start the new one says so, since it may have
+    /// no terminal. Never a dashboard's log: those are in `logs/`.
+    pub fn self_update_log_path(&self) -> PathBuf {
+        self.root.join("self-update.log")
     }
 
     /// Directory where release assets are downloaded and verified before
@@ -427,6 +435,20 @@ pub fn copy_atomic(from: &Path, to: &Path) -> Result<(), HubDirError> {
         return Err(HubDirError::Io { path: to.to_owned(), source });
     }
     Ok(())
+}
+
+/// Appends `line` and a line break to the file at `path`, created when
+/// missing with its directory, readable by the user only on Unix. For a log
+/// that must outlive the process writing it; not atomic.
+pub fn append_line_at(path: &Path, line: &str) -> Result<(), HubDirError> {
+    let io_error = |source| HubDirError::Io { path: path.to_owned(), source };
+    if let Some(directory) = path.parent() {
+        create_private_dir_all(directory)
+            .map_err(|source| HubDirError::Io { path: directory.to_owned(), source })?;
+    }
+    let mut file = private_file_options().append(true).create(true).open(path).map_err(io_error)?;
+    writeln!(file, "{line}").map_err(io_error)?;
+    file.sync_all().map_err(io_error)
 }
 
 /// Moves the file `from` to `to`, which must be on the same volume, with one
@@ -789,6 +811,7 @@ mod tests {
         fs::write(&source, b"x")?;
         copy_atomic(&source, &hub.bin_dir("alpha")?.join("alpha"))?;
         crate::log_file::RotatingFile::open(&hub.log_path("alpha")?, 1024)?;
+        append_line_at(&hub.self_update_log_path(), "a line")?;
 
         let mode = |path: &Path| fs::metadata(path).map(|metadata| metadata.permissions().mode());
         let directories =
@@ -796,10 +819,27 @@ mod tests {
         for path in directories {
             assert_eq!(mode(&path)? & 0o777, 0o700, "{}", path.display());
         }
-        let files = [hub.registry_path(), hub.run_file_path("alpha")?, hub.hub_file_path()];
+        let files = [
+            hub.registry_path(),
+            hub.run_file_path("alpha")?,
+            hub.hub_file_path(),
+            hub.self_update_log_path(),
+        ];
         for path in files.iter().chain([&hub.log_path("alpha")?]) {
             assert_eq!(mode(path)? & 0o777, 0o600, "{}", path.display());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn appended_lines_are_kept_in_order() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path().join("not created yet"));
+        let log = hub.self_update_log_path();
+        assert_eq!(log.parent(), Some(hub.root()), "beside registry.json, not in logs/");
+        append_line_at(&log, "first")?;
+        append_line_at(&log, "second")?;
+        assert_eq!(fs::read_to_string(&log)?, "first\nsecond\n");
         Ok(())
     }
 

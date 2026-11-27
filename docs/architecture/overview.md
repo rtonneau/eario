@@ -43,7 +43,7 @@ flowchart TD
 | `eario-data` | `TableReader` interface and its CSV, TSV, XLSX implementations; `Dataset`; filtering, paging, chart preparation, statistics; `Computation`, `ComputeContext` and the registry; the `polars` re-export. | polars, calamine |
 | `eario-runtime` | `App` (the application services, evaluation and cache of derived datasets), the Axum server and its security layer, user preferences, the embedded frontend. | axum, tokio, rust-embed |
 | `eario-mcp` | MCP tools over `App`, served on `/mcp`. | rmcp |
-| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards; install, update and roll back from GitHub releases), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
+| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards; install, update and roll back from GitHub releases; update the hub itself), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
 | `eario` | What a dashboard author imports: `Dashboard`, `Page`, `State<T>`, widget constructors, `run()`, and `eario::polars`. | the crates above |
 
 Crates named in the initial plan but not created, because nothing needs them
@@ -359,6 +359,7 @@ a command or arguments.
 | `POST /api/dashboards/{slug}/rollback` | `HubInfo`; restores the previous version |
 | `GET /api/settings` | `HubSettings` |
 | `POST /api/settings/check-at-start/{on\|off}` | `HubSettings` |
+| `POST /api/self-update` | `HubSelfUpdate`; the hub replaced its executable with a newer release verified with the Eario key compiled into it, and restarts at a new address |
 | `GET /api/alive` | 204; lets a second hub find the first |
 | `POST /api/shutdown` | 204; quits the hub only |
 

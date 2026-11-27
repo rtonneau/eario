@@ -4,8 +4,8 @@
 //! starts, opens, stops and uninstalls them, always by slug. It also reads
 //! catalogs, previews and installs GitHub releases, checks for updates,
 //! updates and rolls back (ADR 0013; the blocking work is in
-//! [`crate::remote`]). The HTTP API and the command line are thin adapters
-//! over it.
+//! [`crate::remote`]), and updates the hub itself ([`crate::self_update`]).
+//! The HTTP API and the command line are thin adapters over it.
 //!
 //! Nothing on disk is trusted. Every operation reads the registry again, so an
 //! install made meanwhile with `--eario-install` is seen at once, and a run
@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use eario_core::{
     CHILD_ARGUMENT, DashboardState, HUB_LOG_LINES, HubCatalog, HubDashboard, HubInfo, HubOpen,
-    HubSettings, InstallPreview, LAUNCH_PROTOCOL_VERSION, RunFile, Source, UpdateCheck, is_repo,
-    is_slug,
+    HubSelfUpdate, HubSettings, HubUpdate, InstallPreview, LAUNCH_PROTOCOL_VERSION, RunFile,
+    Source, UpdateCheck, is_repo, is_slug,
 };
 use eario_runtime::hub_dir::{self, HUB_DIR_VARIABLE, HubDir, RegistryEntry};
 use eario_runtime::{HubDirError, ServeError};
@@ -42,6 +42,7 @@ use crate::github::{GitHub, GitHubClient, GitHubError};
 use crate::remote::{
     self, MANIFEST_TIMEOUT, MAX_STAGED, Purpose, StageRequest, Staged, StagingArea, same_repo,
 };
+use crate::self_update::{self, SelfUpdateConfig, SelfUpdateError};
 use crate::verify::{PublicKey, Target, VerifyError, is_sha256};
 
 /// Longest a started dashboard has to answer with its run file's token.
@@ -64,7 +65,8 @@ pub struct SupervisorOptions {
     pub start_timeout: Duration,
     /// See [`STOP_TIMEOUT`].
     pub stop_timeout: Duration,
-    /// See [`MANIFEST_TIMEOUT`].
+    /// See [`MANIFEST_TIMEOUT`]; it bounds the `--version` run of the hub's
+    /// own update too.
     pub manifest_timeout: Duration,
 }
 
@@ -191,6 +193,9 @@ pub enum HubError {
     /// A release, or a key for it, was refused by its verification.
     #[error(transparent)]
     Verify(#[from] VerifyError),
+    /// The hub did not update itself.
+    #[error(transparent)]
+    SelfUpdate(#[from] SelfUpdateError),
     /// Releases are not published for the platform the hub runs on.
     #[error(
         "this hub runs on a platform GitHub releases of dashboards are not published for ({os} {arch}); install dashboards built for it with --eario-install",
@@ -430,6 +435,7 @@ impl HubError {
             Self::Serve(error) => error.code(),
             Self::GitHub(error) => error.code(),
             Self::Verify(error) => error.code(),
+            Self::SelfUpdate(error) => error.code(),
             Self::UnsupportedPlatform => "hub_unsupported_platform",
             Self::NoAsset { .. } => "hub_no_asset",
             Self::AmbiguousAsset { .. } => "hub_ambiguous_asset",
@@ -476,6 +482,15 @@ struct Shared {
     remote: Mutex<RemoteState>,
     /// This supervisor's staging area, created at the first preview.
     staging: Mutex<Option<Arc<StagingArea>>>,
+    /// How the hub updates itself.
+    self_update: SelfUpdateConfig,
+    /// Held for the whole of a self-update, its blocking work included, so
+    /// two never run at once, even when the request that started one was
+    /// dropped.
+    self_updating: Arc<tokio::sync::Mutex<()>>,
+    /// The executable a self-update installed, which the hub restarts with
+    /// once its server has stopped; `None` before.
+    restart: tokio::sync::watch::Sender<Option<PathBuf>>,
 }
 
 /// How the supervisor reaches GitHub.
@@ -544,24 +559,41 @@ impl Supervisor {
     /// (see [`crate::github::Endpoint::from_env`]), created when first
     /// needed.
     pub fn new(hub: HubDir, options: SupervisorOptions) -> Result<Self, HubError> {
-        Self::with_access(hub, options, GitHubAccess::FromEnvironment(Mutex::new(None)))
+        let github = GitHubAccess::FromEnvironment(Mutex::new(None));
+        Self::with_access(hub, options, github, SelfUpdateConfig::compiled())
     }
 
     /// A supervisor of the hub directory `hub` that reaches GitHub through
     /// `github`, for example a client of a fake GitHub. Touches nothing on
-    /// disk.
+    /// disk. The hub updates itself as [`Supervisor::new`]'s does, with the
+    /// Eario release key compiled into it.
     pub fn with_github(
         hub: HubDir,
         options: SupervisorOptions,
         github: Arc<dyn GitHub>,
     ) -> Result<Self, HubError> {
-        Self::with_access(hub, options, GitHubAccess::Given(github))
+        let github = GitHubAccess::Given(github);
+        Self::with_access(hub, options, github, SelfUpdateConfig::compiled())
+    }
+
+    /// For tests: [`Supervisor::with_github`], whose self-update uses
+    /// `self_update` (see [`SelfUpdateConfig::for_tests`]) in place of the
+    /// compiled key and this process's executable.
+    #[cfg(feature = "fake-github")]
+    pub fn with_self_update(
+        hub: HubDir,
+        options: SupervisorOptions,
+        github: Arc<dyn GitHub>,
+        self_update: SelfUpdateConfig,
+    ) -> Result<Self, HubError> {
+        Self::with_access(hub, options, GitHubAccess::Given(github), self_update)
     }
 
     fn with_access(
         hub: HubDir,
         options: SupervisorOptions,
         github: GitHubAccess,
+        self_update: SelfUpdateConfig,
     ) -> Result<Self, HubError> {
         // Children run in another working directory and receive paths in the
         // hub directory, so those paths must be absolute.
@@ -575,6 +607,9 @@ impl Supervisor {
             github,
             remote: Mutex::new(RemoteState::default()),
             staging: Mutex::new(None),
+            self_update,
+            self_updating: Arc::new(tokio::sync::Mutex::new(())),
+            restart: tokio::sync::watch::Sender::new(None),
         };
         Ok(Self { shared: Arc::new(shared) })
     }
@@ -713,6 +748,9 @@ impl Supervisor {
             self.remove_run_files(stale).await;
         }
 
+        let config = &self.shared.self_update;
+        let version = config.version();
+        let available_version = self_update::available_version(last_check.as_ref(), config);
         let mut processes = self.processes();
         processes.reap();
         let dashboards = registry
@@ -744,7 +782,7 @@ impl Supervisor {
                 }
             })
             .collect();
-        Ok(HubInfo { eario_version: env!("CARGO_PKG_VERSION").to_owned(), dashboards, last_check })
+        Ok(HubInfo { eario_version: version.to_owned(), dashboards, last_check, available_version })
     }
 
     /// Starts an installed dashboard and returns once its process is created.
@@ -1378,11 +1416,12 @@ impl Supervisor {
     }
 
     /// Checks GitHub for a newer release of each dashboard installed from
-    /// it, stores the result in the hub directory, where
-    /// [`Supervisor::list`] reads it, and returns it. Only the latest
+    /// it, and of the hub itself, stores the result in the hub directory,
+    /// where [`Supervisor::list`] reads it, and returns it. Only the latest
     /// releases are read; nothing is downloaded. A repository that cannot be
     /// read is reported in the result (it "could not be checked"), not as an
-    /// error.
+    /// error; so is a hub that holds no release key
+    /// (`self_update_not_configured`), without a request.
     pub async fn check(&self) -> Result<UpdateCheck, HubError> {
         let supervisor = self.clone();
         blocking(move || {
@@ -1410,7 +1449,13 @@ impl Supervisor {
                         .collect(),
                 }
             };
-            let check = UpdateCheck { checked_at: crate::unix_seconds(), dashboards };
+            let config = &supervisor.shared.self_update;
+            let hub_update = self_update::check(config, || supervisor.github());
+            let check = UpdateCheck {
+                checked_at: crate::unix_seconds(),
+                dashboards,
+                hub: Some(hub_update),
+            };
             remote::write_last_check(hub, &check)?;
             Ok(check)
         })
@@ -1524,6 +1569,95 @@ impl Supervisor {
             "rolled back"
         );
         Ok(())
+    }
+
+    /// The latest release of the hub itself and whether it is newer than
+    /// this hub. Downloads and stores nothing. Refused
+    /// (`self_update_not_configured`) before any request when the hub holds
+    /// no release key.
+    pub async fn check_hub(&self) -> Result<HubUpdate, HubError> {
+        let supervisor = self.clone();
+        blocking(move || {
+            self_update::latest(&supervisor.shared.self_update, || supervisor.github())
+        })
+        .await
+    }
+
+    /// Replaces the hub's executable with the latest release of
+    /// [`self_update::HUB_REPO`], once it passed every check
+    /// [`crate::self_update`] describes: signed with the Eario release key
+    /// compiled into the hub, the SHA-256 the signed list gives, a version
+    /// strictly newer than this hub's. Refused when the hub holds no key
+    /// (`self_update_not_configured`), cannot write beside its executable, or
+    /// has updated itself already. On failure the executable is left as it
+    /// was.
+    ///
+    /// Running dashboards are not touched. Once the executable is replaced,
+    /// a hub serving this supervisor ([`crate::start`]) stops its server, and
+    /// [`crate::run`] starts the new executable; see
+    /// [`Supervisor::restart_executable`].
+    ///
+    /// The work runs to its end even when this future is dropped, as when
+    /// the client of the request goes away: the restart is then asked all
+    /// the same, and a self-update asked meanwhile waits for it.
+    pub async fn self_update(&self) -> Result<HubSelfUpdate, HubError> {
+        // Moved into the blocking work, which a dropped future does not
+        // cancel, and released only when that work ends.
+        let update = Arc::clone(&self.shared.self_updating).lock_owned().await;
+        if self.shared.restart.borrow().is_some() {
+            return Err(SelfUpdateError::Pending.into());
+        }
+        let supervisor = self.clone();
+        let updated = blocking(move || {
+            let _update = update;
+            let config = &supervisor.shared.self_update;
+            // Before any request, so before the system's certificates are
+            // read.
+            if !config.is_configured() {
+                return Err(SelfUpdateError::NotConfigured.into());
+            }
+            let github = supervisor.github()?;
+            let area = supervisor.staging_area()?;
+            let timeout = supervisor.shared.options.manifest_timeout;
+            let updated =
+                self_update::update(&area, github.as_ref(), config, Target::CURRENT, timeout)?;
+            // Here, not after the await: the executable is replaced, so the
+            // hub must restart even if nobody waits for this answer.
+            supervisor.shared.restart.send_replace(Some(updated.executable.clone()));
+            Ok(updated)
+        })
+        .await?;
+        Ok(HubSelfUpdate { previous_version: updated.previous_version, version: updated.version })
+    }
+
+    /// The executable a self-update installed, which the hub starts once its
+    /// server has stopped; `None` before any.
+    pub fn restart_executable(&self) -> Option<PathBuf> {
+        self.shared.restart.borrow().clone()
+    }
+
+    /// [`Supervisor::restart_executable`], once a self-update in progress
+    /// has ended. A hub whose server stopped asks it before it exits, so that
+    /// a self-update whose request was dropped, by Quit for example, still
+    /// restarts the hub on the executable it installed.
+    pub async fn restart_after_self_update(&self) -> Option<PathBuf> {
+        let _update = self.shared.self_updating.lock().await;
+        self.restart_executable()
+    }
+
+    /// A receiver that changes when a self-update asks the hub to restart.
+    /// It does not keep the supervisor alive.
+    pub(crate) fn restart_requests(&self) -> tokio::sync::watch::Receiver<Option<PathBuf>> {
+        self.shared.restart.subscribe()
+    }
+
+    /// Removes the executable the last self-update replaced, in the
+    /// background, as a hub does when it starts; see
+    /// [`self_update::remove_old`].
+    pub(crate) fn remove_old_executable(&self) {
+        let config = self.shared.self_update.clone();
+        // Detached: it ends on its own, at the latest after its patience.
+        drop(tokio::task::spawn_blocking(move || self_update::remove_old_executable(&config)));
     }
 
     /// The hub's settings.

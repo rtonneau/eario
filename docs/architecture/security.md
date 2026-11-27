@@ -8,8 +8,9 @@ Eario defends against and how. The code is in
 are in `http_tests.rs`. The hub, which starts dashboards and installs them
 from GitHub releases, is in `crates/eario-hub/src/`: `supervisor.rs` and
 `http.rs` (services and routes), `remote.rs` (staging, install, update),
-`verify.rs` (signatures and keys) and `github.rs` (the only network code),
-tested in `crates/eario-hub/tests/hub.rs`.
+`self_update.rs` (the hub's own update), `verify.rs` (signatures and keys)
+and `github.rs` (the only network code), tested in
+`crates/eario-hub/tests/hub.rs`.
 
 ## Threat model
 
@@ -24,12 +25,14 @@ Protected asset: the data the user loaded, and control of the application.
 | Injected content loads remote code or exfiltrates data | A Content Security Policy restricts scripts, styles, images and connections to the application's own origin. Nothing is loaded from a remote host. |
 | A crafted path reads files from disk | Static files are looked up by key in the embedded file table; the file system is never consulted. Uploaded file names are reduced to their last segment and are only used for display and format detection. |
 | A huge upload exhausts memory | Uploads are limited (256 MiB by default, configurable); JSON bodies to 2 MiB. |
-| A request runs a program or script | No endpoint or MCP tool executes commands or code supplied at run time. The hub starting an installed dashboard, and running a verified release for its manifest, is the one bounded exception, below. |
+| A request runs a program or script | No endpoint or MCP tool executes commands or code supplied at run time. The hub starting an installed dashboard, running a verified release for its manifest, and running and starting its own verified new version, is the one bounded exception, below. |
 | A request makes the hub start or install a program of its choice | Hub routes take only path segments, each validated strictly: a slug, an `owner/repo`, a SHA-256, `on` or `off`; never a URL, a path, an executable or arguments, and they read no body or query. The hub starts only its own copy in `bin/<slug>/`, with `--eario-child <run file>` and nothing else, and installs only a signed GitHub release. |
 | A spoofed or compromised release ships other code | The release's `SHA256SUMS.txt` must carry a valid minisign signature (`SHA256SUMS.txt.minisig`; a release without one is refused before its asset is downloaded), and the asset's SHA-256 must be the signed one. Nothing enters `bin/<slug>/` before every check has passed. A signature proves who published, not that the code is safe: the user decides whom to trust. |
 | Someone substitutes their own signing key | A key is trusted only when it is pinned for the installed repository, listed by a catalog for it, or accepted by the user by the SHA-256 of the whole key line (not the copyable minisign key id). A different key is `changed` and refused until accepted. A release signed by one key but carrying another's `minisign.pub` fails its signature. |
 | A release under a key not trusted yet runs on the machine | Until its key is trusted, the downloaded file is never run, not even for its manifest; the preview shows no name or version. Accepting the key hashes the staged file again before running it with `--eario-manifest` alone (no input, bounded output, a timeout). |
-| An old, vulnerable release is served again (downgrade, replay) | An update installs only a strictly newer manifest version (SemVer); an older or equal tag is refused before the download, and the signed executable's own version after it. Versions that cannot be compared are refused. Only a rollback, to the one previous version kept, installs an older version. |
+| An old, vulnerable release is served again (downgrade, replay) | An update installs only a strictly newer manifest version (SemVer); an older or equal tag is refused before the download, and the signed executable's own version after it. Versions that cannot be compared are refused. Only a rollback, to the one previous version kept, installs an older version. The hub's own update takes only a version strictly newer than its own, as its signed executable prints it with `--version`. |
+| A spoofed or compromised release replaces the hub itself | The hub's own releases are verified with the Eario release key compiled into it (`crates/eario-hub/eario-release.pub`), its only trust anchor for itself: never a key the release carries, a catalog's, or one trusted on first use, and no route or command takes another. A build whose key file is the placeholder does not update itself (`self_update_not_configured`). The asset must also have the signed SHA-256 before it is run, with `--version` alone. |
+| A failed self-update leaves no working hub | The verified file is copied beside the running executable and hashed again. On Unix the executable gets a second name, `<name>.old` (a hard link), and the copy is renamed over it, atomically. On Windows, and on a Unix file system without hard links, two renames swap it in; if the second fails, the first is undone, and only a crash or power loss between the two leaves `<name>.old` and `<name>.new` for the user to rename. On any failure the copy is removed. The replaced executable is kept as `<name>.old` until the next start. A hub that cannot write beside its executable refuses before downloading. One self-update runs at a time, to its end even if its request is dropped. If the new hub cannot be started (tried again for about 10 s while the system reports the file busy), the old one records it in `self-update.log` in the hub directory before it exits: the new version is in place and starts when run again. |
 | A redirect leads the download to another host | Every URL, the first and each redirect, must be HTTPS on the default port to one of `api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`; each redirect is checked before it is followed, at most 5. |
 | An oversized or endless download fills the disk or memory | Reads are capped while they stream, whatever the server declares: 2 MiB for an API answer or a catalog, the size the release lists for an asset and at most 512 MiB. Requests time out (30 s between reads, 60 s for a small file whole). |
 | A malicious page drives the install routes | The routes sit behind the token and Origin check. An install needs two requests, the preview and then the install repeating the previewed SHA-256, and a third, with the key's SHA-256, for a key not trusted yet. The one-step update route skips the SHA-256 confirmation only for an installed dashboard signed by its pinned key or a key already accepted by its SHA-256, never a changed key not yet accepted, and whose new version is strictly newer. |
@@ -142,11 +145,14 @@ The routes, relative to `/api` (the module documentation of
 - `POST /dashboards/{slug}/update-preview`, `/update/{sha256}`, `/update`
   (both steps at once, refused when the key changed) and `/rollback`.
 - `GET /settings`, `POST /settings/check-at-start/{on|off}`.
+- `POST /self-update`: replaces the hub's executable with its verified
+  newer release, answers, then restarts the hub.
 
 The command line (`eario-hub install`, `update`, `rollback`, `check`,
-`catalog`, `check-at-start`) calls the same services after a terminal
-confirmation; `--yes` confirms an install but never accepts a key, which
-takes a terminal answer or `--accept-key <key sha256>`.
+`catalog`, `check-at-start`, `self-update`) calls the same services after a
+terminal confirmation; `--yes` confirms an install but never accepts a key,
+which takes a terminal answer or `--accept-key <key sha256>`.
+`eario-hub self-update` refuses while a hub runs.
 
 **Trust order.** A release is verified with the key it carries as
 `minisign.pub`, or, without that file, the key the hub trusts for the
@@ -164,14 +170,43 @@ console window): its slug must be the asset name's prefix (or the installed
 slug), its launch protocol the hub's, and for an update its version strictly
 newer. A slug installed from another source is refused.
 
+**The hub's own update.** One key verifies a release of the hub: the
+minisign public key file `crates/eario-hub/eario-release.pub`, compiled
+into it. Nothing else is trusted for the hub, not even on first use: the
+release's `minisign.pub` and the catalogs are ignored, and no route or
+command can give another key (tests substitute one only through the
+`fake-github` feature, which a release build never enables). While the file
+is the placeholder, self-update is refused and the check reports
+`self_update_not_configured` without a request. The latest release of
+`rtonneau/eario` must have a newer tag, then the signature of
+`SHA256SUMS.txt` must verify and list `eario-hub-<target triple>[.exe]`,
+whose download, into `staging/`, must have the signed SHA-256. Only then
+is it run, with `--version` alone (no standard input, output bounded to
+64 KiB, killed after 20 s, no console window), and the version it prints
+must be strictly newer than the running hub's. It is then copied beside
+the running executable as `<name>.new`, hashed again, and swapped in,
+keeping the running executable as `<name>.old`: on Unix a hard link to it,
+then one rename of the new file over it; on Windows (or without hard
+links) two renames, the first undone if the second fails. The update runs
+to its end and asks for the restart itself, even when its request is
+dropped, and a second one waits for it. The hub answers, stops its server,
+removes `hub.json`, starts the new executable with no arguments, no
+standard streams, no console window and a process group of its own, and
+exits; the dashboards, separate processes, keep running. A new executable
+that cannot be started is recorded in `self-update.log` in the hub
+directory, since a restarted hub has no terminal. The next start removes
+`<name>.old`. A build without the release key lists no newer version of
+the hub, whatever an update check stored.
+
 **Outbound network.** Only `eario-hub` makes outbound requests, and only to
 GitHub: HTTPS on the default port to `api.github.com`, `github.com`,
 `objects.githubusercontent.com` and `release-assets.githubusercontent.com`,
 each redirect checked before it is followed (at most 5), with the system's
 certificate store. Reads are bounded while they stream (2 MiB for JSON, the
 listed size and at most 512 MiB for an asset) and time out (30 s between
-reads, 60 s for a small file whole). Requests are made at the hub's start,
-unless `check_updates_at_start` is off, and on a user action; a failure is
+reads, 60 s for a small file whole). Requests are made at the hub's start
+(for the hub's own releases, `rtonneau/eario`, only once it holds the
+release key), unless `check_updates_at_start` is off, and on a user action; a failure is
 reported ("could not check"), never fatal. Dashboards make no request. Debug
 builds can replace GitHub by a server on loopback with
 `EARIO_HUB_GITHUB_API`, for tests; release builds ignore it.
@@ -213,6 +248,9 @@ from another origin. Debug builds accept one additional origin given in
   to strictly validated path segments, keep installs to signed GitHub
   releases, and do not add a path, a URL, an executable or arguments
   without an ADR.
+- The hub's own update trusts the compiled Eario release key alone. Never
+  read a key for it from a release, a catalog, a request or the
+  environment.
 - Requests to a non-loopback host are made only by `eario-hub`'s `github.rs`, to the
   GitHub hosts above. Another host, or a request from another crate, needs
   an ADR.

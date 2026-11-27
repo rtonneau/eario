@@ -36,7 +36,12 @@ let refusal: { status: number; code: string; message: string } | null;
 let unreachable: boolean;
 
 function info(): HubInfo {
-  return { eario_version: '0.1.0', dashboards: structuredClone(dashboards), last_check: null };
+  return {
+    eario_version: '0.1.0',
+    dashboards: structuredClone(dashboards),
+    last_check: null,
+    available_version: null,
+  };
 }
 
 function json(body: unknown, status = 200): Response {

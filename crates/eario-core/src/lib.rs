@@ -24,9 +24,9 @@ pub use filter::{Filter, FilterOp, FilterValue};
 pub use id::{ComponentId, DatasetId, StateKey};
 pub use launch::{
     CATALOG_FORMAT_VERSION, CHILD_ARGUMENT, Catalog, CatalogEntry, DashboardState, DashboardUpdate,
-    HUB_LOG_LINES, HubCatalog, HubCatalogEntry, HubDashboard, HubInfo, HubOpen, HubSettings,
-    InstallPreview, KeyStatus, LAUNCH_PROTOCOL_VERSION, MANIFEST_ARGUMENT, Manifest, RunFile,
-    Source, UpdateCheck, is_repo, is_slug, slug,
+    HUB_LOG_LINES, HubCatalog, HubCatalogEntry, HubDashboard, HubInfo, HubOpen, HubSelfUpdate,
+    HubSettings, HubUpdate, InstallPreview, KeyStatus, LAUNCH_PROTOCOL_VERSION, MANIFEST_ARGUMENT,
+    Manifest, RunFile, Source, UpdateCheck, is_repo, is_slug, slug,
 };
 pub use payload::{
     ApiError, AppInfo, AppResponse, ChartData, ColumnInfo, ColumnKind, ColumnStats, ComponentData,

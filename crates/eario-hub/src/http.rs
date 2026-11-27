@@ -24,6 +24,7 @@
 //! | `POST /dashboards/{slug}/rollback` | `HubInfo`, once the previous version of `slug` is restored |
 //! | `GET /settings` | `HubSettings` |
 //! | `POST /settings/check-at-start/{on\|off}` | `HubSettings`, with the update check at start turned on or off |
+//! | `POST /self-update` | `HubSelfUpdate`, once the hub replaced its executable with a verified newer release; the hub then restarts, at a new address. Dashboards keep running. |
 //! | `POST /shutdown` | Added by the server: quits the hub. Dashboards keep running. |
 //!
 //! No route reads a request body or a query string, so none can be given a
@@ -43,6 +44,10 @@
 //! `update-preview`; the one-step `update` is refused with
 //! `hub_key_changed` when the key changed, and leaves its preview for
 //! `accept-key`.
+//!
+//! `self-update` takes one request: the hub accepts only a release signed
+//! with the Eario release key compiled into it, so there is no key for the
+//! user to accept ([`crate::self_update`]).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -50,11 +55,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use eario_core::{
-    ApiError, AppResponse, HubCatalog, HubInfo, HubOpen, HubSettings, InstallPreview,
+    ApiError, AppResponse, HubCatalog, HubInfo, HubOpen, HubSelfUpdate, HubSettings, InstallPreview,
 };
 use eario_runtime::HubDirError;
 
 use crate::github::GitHubError;
+use crate::self_update::SelfUpdateError;
 use crate::supervisor::{HubError, Supervisor};
 
 /// Path of the route that answers `204` without looking at any dashboard or
@@ -86,6 +92,7 @@ pub(crate) fn routes(supervisor: Supervisor) -> Router {
         .route("/dashboards/{slug}/rollback", post(rollback))
         .route("/settings", get(settings))
         .route("/settings/check-at-start/{switch}", post(set_check_at_start))
+        .route("/self-update", post(self_update))
         .with_state(supervisor)
 }
 
@@ -145,6 +152,25 @@ impl From<HubError> for Failure {
             | HubError::ManifestMismatch { .. }
             | HubError::CatalogVersion { .. } => StatusCode::BAD_GATEWAY,
             HubError::UnsupportedPlatform => StatusCode::INTERNAL_SERVER_ERROR,
+            // Refused in the hub's present state or build; the message says
+            // what the user can do.
+            HubError::SelfUpdate(
+                SelfUpdateError::NotConfigured
+                | SelfUpdateError::UnsupportedPlatform
+                | SelfUpdateError::NotWritable { .. }
+                | SelfUpdateError::NotNewer { .. }
+                | SelfUpdateError::VersionNotComparable { .. }
+                | SelfUpdateError::Pending
+                | SelfUpdateError::HubRunning { .. },
+            ) => StatusCode::CONFLICT,
+            // What GitHub served was refused.
+            HubError::SelfUpdate(SelfUpdateError::ProbeFailed { .. }) => StatusCode::BAD_GATEWAY,
+            // Local failures: the executable or its folder.
+            HubError::SelfUpdate(
+                SelfUpdateError::NoExecutable { .. }
+                | SelfUpdateError::Replace { .. }
+                | SelfUpdateError::RestoreFailed { .. },
+            ) => StatusCode::INTERNAL_SERVER_ERROR,
             HubError::GitHub(GitHubError::InvalidRepo(_)) => StatusCode::BAD_REQUEST,
             // Local failures: the disk or the system's certificate store.
             HubError::GitHub(GitHubError::Write { .. } | GitHubError::Certificates { .. }) => {
@@ -303,6 +329,10 @@ async fn rollback(
 
 async fn settings(State(supervisor): State<Supervisor>) -> Result<Json<HubSettings>, Failure> {
     Ok(Json(supervisor.settings().await?))
+}
+
+async fn self_update(State(supervisor): State<Supervisor>) -> Result<Json<HubSelfUpdate>, Failure> {
+    Ok(Json(supervisor.self_update().await?))
 }
 
 async fn set_check_at_start(

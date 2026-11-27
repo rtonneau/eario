@@ -18,4 +18,10 @@ dashboards: Array<HubDashboard>,
  * The last update check, `None` until one has run in this hub
  * directory.
  */
-last_check: UpdateCheck | null, };
+last_check: UpdateCheck | null, 
+/**
+ * A newer version of the hub itself that the last check found, while
+ * it is still newer than this hub: what a self-update would install, or
+ * a newer one. `None` otherwise.
+ */
+available_version: string | null, };

@@ -22,6 +22,10 @@
 //! meanwhile leaves alone. A dashboard that runs is neither updated nor
 //! rolled back.
 //!
+//! `self-update` replaces the executable it runs from, so it refuses while
+//! a hub runs: the user updates that hub from its own page, or quits it
+//! first. It never restarts anything; the next start runs the new version.
+//!
 //! Text from a release, a catalog or GitHub is printed with its control and
 //! bidirectional characters replaced, so it cannot rewrite the lines the
 //! user decides on, such as the key status.
@@ -34,6 +38,7 @@ use eario_core::{HubCatalog, InstallPreview, KeyStatus, Manifest, UpdateCheck};
 use eario_runtime::hub_dir::HubDir;
 
 use crate::remote;
+use crate::self_update::{HUB_SLUG, SelfUpdateError, VERSION_ARGUMENT};
 use crate::supervisor::{HubError, Supervisor, SupervisorOptions};
 
 /// What `eario-hub help` prints.
@@ -51,9 +56,11 @@ Commands:
   update <slug>               Update a dashboard to its latest release
   rollback <slug>             Restore the version the last update replaced
   check-at-start [on|off]     Show, or turn on or off, the update check when the hub starts
+  self-update                 Update the hub itself to its latest release (quit the hub first)
   help                        Show this help
 
 Options:
+  --version               Show the version of the hub
   --yes                   Do not ask for confirmations
   --accept-key <sha256>   With install or update: trust the key the release is
                           signed with if it has this SHA-256, as the command
@@ -68,6 +75,8 @@ enum Command {
     Hub,
     /// The help.
     Help,
+    /// The version.
+    Version,
     /// A command on the hub directory.
     Action(Action),
 }
@@ -83,6 +92,7 @@ enum Action {
     Update(String),
     Rollback(String),
     CheckAtStart(Option<bool>),
+    SelfUpdate,
 }
 
 /// The options of a command.
@@ -140,6 +150,9 @@ pub fn main(arguments: impl IntoIterator<Item = OsString>) -> ExitCode {
     let result = match command {
         Command::Hub => crate::run().map_err(CliError::from),
         Command::Help => write!(io::stdout().lock(), "{USAGE}").map_err(CliError::Terminal),
+        Command::Version => {
+            writeln!(io::stdout().lock(), "{}", version_line()).map_err(CliError::Terminal)
+        }
         Command::Action(action) => run_action(action, &options),
     };
     match result {
@@ -176,6 +189,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<(Command, Opti
                 options.accept_key = Some(value);
             }
             "--help" | "-h" => return Ok((Command::Help, Options::default())),
+            VERSION_ARGUMENT => return Ok((Command::Version, Options::default())),
             other if other.starts_with('-') => {
                 return Err(usage(format!("unknown option `{other}`")));
             }
@@ -197,6 +211,7 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<(Command, Opti
         ["check-at-start"] => action(Action::CheckAtStart(None)),
         ["check-at-start", "on"] => action(Action::CheckAtStart(Some(true))),
         ["check-at-start", "off"] => action(Action::CheckAtStart(Some(false))),
+        ["self-update"] => action(Action::SelfUpdate),
         _ => return Err(usage(format!("`{}` is not a command", words.join(" ")))),
     };
     let takes_key = matches!(command, Command::Action(Action::Install(_) | Action::Update(_)));
@@ -311,7 +326,45 @@ async fn execute(
             let settings = supervisor.set_check_updates_at_start(on).await?;
             terminal.say(check_at_start_text(settings.check_updates_at_start))
         }
+        Action::SelfUpdate => self_update(supervisor, terminal).await,
     }
+}
+
+/// What `eario-hub --version` prints, and what the hub's own update reads
+/// from a new executable: `eario-hub <version>`.
+fn version_line() -> String {
+    format!("{HUB_SLUG} {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Updates the hub's executable, which is this command's, to the latest
+/// release, after a confirmation. Refused while a hub runs.
+async fn self_update(supervisor: &Supervisor, terminal: &mut Terminal<'_>) -> Result<(), CliError> {
+    // The running hub's executable is the one to replace, from the hub.
+    if let Some(running) = crate::running_hub(supervisor.hub_dir()).await {
+        return Err(HubError::from(SelfUpdateError::HubRunning { address: running.address }).into());
+    }
+    let current = env!("CARGO_PKG_VERSION");
+    terminal.say("Reading the latest release of the Eario hub...")?;
+    let found = supervisor.check_hub().await?;
+    let Some(available) = found.available_version.as_deref() else {
+        return terminal.say(&format!(
+            "The Eario hub is up to date: version {current}, latest release {}.",
+            version(found.latest_version.as_deref())
+        ));
+    };
+    let question = format!(
+        "Update the Eario hub from version {current} to {}? The release is verified with the Eario release key built into this hub before it replaces this executable.",
+        shown(available)
+    );
+    if !terminal.confirm(&question, "updating the hub")? {
+        return terminal.say(NOTHING_CHANGED);
+    }
+    let updated = supervisor.self_update().await?;
+    terminal.say(&format!(
+        "Updated the Eario hub from version {} to {}. Start it with `eario-hub`.",
+        updated.previous_version,
+        shown(&updated.version)
+    ))
 }
 
 async fn install(
@@ -594,6 +647,9 @@ mod tests {
         assert_eq!(command(&[]), Some(Command::Hub));
         assert_eq!(command(&["help"]), Some(Command::Help));
         assert_eq!(command(&["--help"]), Some(Command::Help));
+        assert_eq!(command(&["--version"]), Some(Command::Version));
+        assert_eq!(command_of(&["self-update", "--yes"]), Some(Action::SelfUpdate));
+        assert_eq!(version_line(), format!("eario-hub {}", env!("CARGO_PKG_VERSION")));
     }
 
     #[test]
@@ -637,6 +693,8 @@ mod tests {
             &["check", "--accept-key", "ab"],
             &["catalog", "list", "--accept-key", "ab"],
             &["--yes"],
+            &["self-update", "now"],
+            &["self-update", "--accept-key", "ab"],
         ] {
             let code = parsed(arguments).err().map(|error| error.code());
             assert_eq!(code, Some("hub_usage"), "{arguments:?}");

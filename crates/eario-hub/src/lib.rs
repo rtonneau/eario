@@ -15,6 +15,9 @@
 //! - [`remote`]: the blocking work of installing and updating from GitHub:
 //!   staging, verification, the manifest of a downloaded executable, the
 //!   one previous version kept, the version rule.
+//! - [`self_update`]: the hub replaces its own executable with a newer
+//!   release, verified with the Eario release key compiled into it, and
+//!   restarts.
 //! - [`start`] serves the hub on the loopback interface, behind the same
 //!   Host/Origin check and session token as a dashboard, with the generic
 //!   frontend, and checks for updates in the background.
@@ -38,6 +41,7 @@ pub mod fake_github;
 pub mod github;
 mod http;
 pub mod remote;
+pub mod self_update;
 pub mod supervisor;
 pub mod verify;
 
@@ -97,8 +101,14 @@ impl RunningHub {
 /// serves the hub's API and the frontend on the loopback interface.
 ///
 /// Once serving, it checks GitHub for updates of the dashboards installed
-/// from it, in the background, unless the setting `check_updates_at_start`
-/// is off; that check never delays or stops the hub.
+/// from it and of itself, in the background, unless the setting
+/// `check_updates_at_start` is off; that check never delays or stops the
+/// hub. Also in the background, it removes the executable a self-update
+/// replaced (`<executable>.old`), if one is left.
+///
+/// When a self-update has replaced the hub's executable, the server stops
+/// as if asked to quit, and [`RunningHub::wait`] returns; the new
+/// executable is then [`Supervisor::restart_executable`].
 ///
 /// It does not write `hub.json`, open a browser or handle Ctrl+C; [`run`]
 /// does.
@@ -106,7 +116,17 @@ pub async fn start(supervisor: Supervisor, config: ServerConfig) -> Result<Runni
     supervisor.reattach().await?;
     supervisor.clean_staging().await;
     let server = eario_runtime::start_routes(http::routes(supervisor.clone()), config).await?;
+    let shutdown = server.shutdown_handle();
+    let mut restart = supervisor.restart_requests();
+    tokio::spawn(async move {
+        // An error means the supervisor is gone: nothing will restart.
+        if restart.wait_for(Option::is_some).await.is_ok() {
+            tracing::info!("the hub updated itself; stopping its server to restart");
+            shutdown.shutdown();
+        }
+    });
     supervisor.check_in_background();
+    supervisor.remove_old_executable();
     Ok(RunningHub { server, supervisor })
 }
 
@@ -118,6 +138,13 @@ pub async fn start(supervisor: Supervisor, config: ServerConfig) -> Result<Runni
 /// its address, opens the browser (unless `EARIO_NO_BROWSER` is set), and
 /// returns when the user chooses Quit in the hub or presses Ctrl+C. The
 /// dashboards it started keep running.
+///
+/// After a self-update it returns too, once its server has stopped and
+/// `hub.json` is removed, having started the new executable without
+/// arguments, standard streams or console window, in a process group of its
+/// own: the new hub then finds none running and starts. If the new
+/// executable cannot be started, `self-update.log` in the hub directory says
+/// so, since this hub may have no terminal.
 pub fn run() -> Result<(), HubError> {
     init_logging();
     let hub = HubDir::resolve()?;
@@ -169,12 +196,50 @@ async fn serve(hub: HubDir, config: ServerConfig) -> Result<(), HubError> {
         }
     });
 
+    let supervisor = running.supervisor().clone();
     let served = running.wait().await;
     if let Err(error) = remove_hub_file(&hub, &record.token).await {
         tracing::warn!(%error, file = %hub_file.display(), "could not remove hub.json");
     }
-    println!("The Eario hub stopped. Dashboards it started keep running.");
+    // Only now, with the server stopped and `hub.json` removed, so the new
+    // hub finds none running; and once a self-update still in progress has
+    // ended, so that one whose request Quit cut short restarts the hub too.
+    match supervisor.restart_after_self_update().await {
+        Some(executable) => {
+            // Blocking: it tries again while the system holds the new file.
+            let restarted = tokio::task::spawn_blocking(move || restart(&hub, &executable));
+            if let Err(error) = restarted.await {
+                tracing::error!(%error, "could not start the new hub");
+            }
+        }
+        None => println!("The Eario hub stopped. Dashboards it started keep running."),
+    }
     served
+}
+
+/// Starts the new hub a self-update installed at `executable`, detached, and
+/// says so; the new hub has no terminal and opens the browser itself. A
+/// failure is also recorded in `self-update.log` of `hub`
+/// ([`self_update::restart`]). Blocking.
+fn restart(hub: &HubDir, executable: &std::path::Path) {
+    match self_update::restart(hub, executable) {
+        // Not waited for: it outlives this process, which exits now.
+        Ok(child) => {
+            tracing::info!(pid = child.id(), "the new hub started");
+            println!(
+                "The Eario hub updated itself and restarts without this terminal. Dashboards keep running. If no browser opens, run {} again.",
+                executable.display()
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, executable = %executable.display(), "could not start the new hub");
+            println!(
+                "The Eario hub updated itself but could not start the new version ({error}); start {} again. This is recorded in {}.",
+                executable.display(),
+                hub.self_update_log_path().display()
+            );
+        }
+    }
 }
 
 /// The hub recorded in `hub.json` when it answers with its token.
@@ -183,7 +248,7 @@ async fn serve(hub: HubDir, config: ServerConfig) -> Result<(), HubError> {
 /// reads the registry, so a stale run file (two seconds to a closed port on
 /// Windows) or a broken registry would hide a running hub, and this start
 /// would replace it in `hub.json`.
-async fn running_hub(hub: &HubDir) -> Option<RunFile> {
+pub(crate) async fn running_hub(hub: &HubDir) -> Option<RunFile> {
     let path = hub.hub_file_path();
     let read = tokio::task::spawn_blocking(move || hub_dir::read_run_file_at(&path)).await;
     let recorded = match read {
