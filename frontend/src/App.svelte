@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
 
   import Header from './lib/components/Header.svelte';
+  import HubView from './lib/components/HubView.svelte';
   import Notifications from './lib/components/Notifications.svelte';
   import PageView from './lib/components/PageView.svelte';
   import { session } from './lib/session.svelte';
@@ -27,14 +28,24 @@
 
 {#if session.stopped}
   <main class="message">
-    <h1>The application has stopped</h1>
-    <p>You can close this tab. Start the application again to continue working.</p>
+    {#if session.hub !== null}
+      <h1>The hub has stopped</h1>
+      <p>
+        You can close this tab. The dashboards that were running keep running. Start the hub again
+        to manage them.
+      </p>
+    {:else}
+      <h1>The application has stopped</h1>
+      <p>You can close this tab. Start the application again to continue working.</p>
+    {/if}
   </main>
 {:else if session.fatal !== null}
   <main class="message">
     <h1>The dashboard cannot be shown</h1>
     <p role="alert">{session.fatal}</p>
   </main>
+{:else if session.hub !== null}
+  <HubView />
 {:else if session.info === null}
   <main class="message">
     <p class="muted">Loading…</p>

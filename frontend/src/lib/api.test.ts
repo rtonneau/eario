@@ -91,4 +91,31 @@ describe('api', () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
     await expect(api.shutdown()).resolves.toBeUndefined();
   });
+
+  it('calls the hub routes by slug, with the token', async () => {
+    fetchMock.mockImplementation(async () => respond(200, {}));
+    await api.hubStart('alpha');
+    await api.hubStop('alpha');
+    await api.hubOpen('alpha');
+    await api.hubUninstall('alpha');
+    await api.hubStopAll();
+    const calls = fetchMock.mock.calls.map(([url, init]) => [init?.method, url]);
+    expect(calls).toEqual([
+      ['POST', '/api/dashboards/alpha/start'],
+      ['POST', '/api/dashboards/alpha/stop'],
+      ['POST', '/api/dashboards/alpha/open'],
+      ['POST', '/api/dashboards/alpha/uninstall'],
+      ['POST', '/api/stop-all'],
+    ]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init?.headers as Record<string, string>)['x-eario-token']).toBe('abc123');
+      expect(init?.body).toBeUndefined();
+    }
+  });
+
+  it('never lets a slug change the path of a hub route', async () => {
+    fetchMock.mockResolvedValue(respond(200, {}));
+    await api.hubStart('../stop-all');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/dashboards/..%2Fstop-all/start');
+  });
 });

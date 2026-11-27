@@ -38,6 +38,8 @@ class Session {
   stopped = $state(false);
 
   private nextNotificationId = 1;
+  /** Counts the hub actions that came back, so a list asked for earlier is dropped. */
+  private hubActions = 0;
 
   /** Loads the dashboard from the backend. */
   async load(): Promise<void> {
@@ -54,6 +56,7 @@ class Session {
       const response = await api.app();
       if (response.kind === 'hub') {
         this.hub = response;
+        document.title = 'Eario hub';
         return;
       }
       const info: AppInfo = response;
@@ -101,6 +104,58 @@ class Session {
     } catch (error) {
       this.notify('error', `The theme could not be saved: ${errorMessage(error)}`);
     }
+  }
+
+  /**
+   * Asks the hub for its list again. Throws when the hub does not answer.
+   * A list that left before an action came back is dropped: it may show the
+   * state from before the action.
+   */
+  async refreshHub(): Promise<void> {
+    const actions = this.hubActions;
+    const response = await api.app();
+    if (response.kind !== 'hub') {
+      throw new Error('This address no longer serves the hub.');
+    }
+    if (actions === this.hubActions) {
+      this.hub = response;
+    }
+  }
+
+  /** Takes over the list a hub action answers with. */
+  private async hubAction(call: () => Promise<HubInfo>): Promise<void> {
+    const info = await call();
+    this.hubActions++;
+    this.hub = info;
+  }
+
+  /** Starts an installed dashboard. Throws when the hub refuses. */
+  startDashboard(slug: string): Promise<void> {
+    return this.hubAction(() => api.hubStart(slug));
+  }
+
+  /** Stops a dashboard. Throws when the hub refuses. */
+  stopDashboard(slug: string): Promise<void> {
+    return this.hubAction(() => api.hubStop(slug));
+  }
+
+  /** Removes a dashboard from the hub. Throws when the hub refuses. */
+  uninstallDashboard(slug: string): Promise<void> {
+    return this.hubAction(() => api.hubUninstall(slug));
+  }
+
+  /** Stops every dashboard of the hub. Throws when the hub refuses. */
+  stopAllDashboards(): Promise<void> {
+    return this.hubAction(() => api.hubStopAll());
+  }
+
+  /**
+   * Opens a running dashboard in a new tab, at the address the hub returns.
+   * Throws when the hub refuses.
+   */
+  async openDashboard(slug: string): Promise<void> {
+    const { url } = await api.hubOpen(slug);
+    window.open(url, '_blank', 'noopener');
   }
 
   /** Stops the application. */

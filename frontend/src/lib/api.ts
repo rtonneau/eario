@@ -5,6 +5,8 @@
 import type { ApiError } from './generated/ApiError';
 import type { AppResponse } from './generated/AppResponse';
 import type { ComponentData } from './generated/ComponentData';
+import type { HubInfo } from './generated/HubInfo';
+import type { HubOpen } from './generated/HubOpen';
 import type { Preferences } from './generated/Preferences';
 import type { StateUpdate } from './generated/StateUpdate';
 import type { JsonValue } from './generated/serde_json/JsonValue';
@@ -128,6 +130,18 @@ export const api = {
     request<Preferences>('PUT', '/preferences', JSON.stringify(preferences), true),
 
   shutdown: () => request<void>('POST', '/shutdown'),
+
+  // The hub's routes. The slug is the only parameter any of them takes.
+  hubStart: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/start`),
+
+  hubStop: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/stop`),
+
+  hubOpen: (slug: string) => request<HubOpen>('POST', `/dashboards/${segment(slug)}/open`),
+
+  hubUninstall: (slug: string) =>
+    request<HubInfo>('POST', `/dashboards/${segment(slug)}/uninstall`),
+
+  hubStopAll: () => request<HubInfo>('POST', '/stop-all'),
 };
 
 /** Message to show for any thrown value. */
