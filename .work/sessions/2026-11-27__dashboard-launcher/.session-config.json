@@ -258,6 +258,38 @@
         "ticket": "08-release-workflow",
         "commit": "20a7ec8"
       }
+    },
+    {
+      "at": "2026-11-27T15:36:06.061Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/10-several-dashboards-per-repo.md",
+        "03-implement/10-several-dashboards-per-repo/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "10-several-dashboards-per-repo"
+      }
+    },
+    {
+      "at": "2026-11-27T16:30:32.700Z",
+      "event": "handoff_saved",
+      "phase": "ship",
+      "files": [
+        "HANDOFF.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T17:02:10.966Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/10-several-dashboards-per-repo/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "10-several-dashboards-per-repo",
+        "commit": "97c295c"
+      }
     }
   ],
   "current_phase": "ship",

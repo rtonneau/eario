@@ -19,6 +19,7 @@ Build from the inside out. First the contract and registry format, then the pure
 - **Ticket 7:** Hub view: catalogs, add repository, install confirmation, update badges, rollback, check now, setting, self-update; Vitest and Playwright with axe against the fake server.
 - **Ticket 8:** Reusable release workflow: four targets, signed `SHA256SUMS.txt`; Eario's release uses it for data-explorer, signal-lab and the hub.
 - **Ticket 9:** Author and catalog docs: publishing a dashboard, catalog format with an example `catalog.json`, project status, roadmap, README.
+- **Ticket 10** (added during ship, user decision 27 Nov 2026; shipped before 9): several dashboards per repository, selected by slug, so the default catalog can list Eario's own examples.
 
 ## Sequencing Rationale
 
