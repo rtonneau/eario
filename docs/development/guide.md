@@ -212,7 +212,7 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
 | Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting, the hub's texts for keys and update checks. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
-| Hub tests | `crates/eario-hub/tests/hub.rs`, `examples/*/tests/launch.rs`, `crates/eario-runtime/src/hub_dir.rs` | The launch contract and the hub with the real example executables in a temporary hub directory: install, start, open, stop, re-attach, changed executable, slug-only routes. |
+| Hub tests | `crates/eario-hub/tests/hub.rs`, `crates/eario-hub/tests/catalog_example.rs`, `examples/*/tests/launch.rs`, `crates/eario-runtime/src/hub_dir.rs` | The launch contract and the hub with the real example executables in a temporary hub directory: install, start, open, stop, re-attach, changed executable, slug-only routes; install and update from a fake GitHub; `catalog_example.rs` reads `docs/catalog/catalog.json` with the hub's catalog type. |
 | Browser tests | `frontend/e2e/*.spec.ts` | The real examples and the real hub in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, inputs that recompute a derived dataset in Rust, and the hub view (list, start, open, stop, stop all, uninstall; against a fake GitHub: install from a catalog and from a repository with an unknown key, update, rollback, a changed key, a check that could not reach GitHub, catalogs and the check-at-start setting). |
 
 ### Browser tests
@@ -368,26 +368,14 @@ On the runners that can run them, it checks that each dashboard's
 `--eario-manifest` gives its slug and the tag's version, which needs
 `.version(env!("CARGO_PKG_VERSION"))` in the dashboard. The release stays a
 draft unless the caller sets `publish: true`; a hub sees only published
-releases. A hub installs from a repository whose release has one executable
-per target.
+releases. A release may carry several dashboards, which a hub installs one at a
+time by slug.
 
-Make the key pair once, on your own machine, with
-[minisign](https://jedisct1.github.io/minisign/):
-
-```text
-minisign -G -p minisign.pub -s minisign.key
-```
-
-It asks for a password; `-W` makes a key without one. rsign2
-(`cargo install rsign2`) writes the same files with
-`rsign generate -p minisign.pub -s minisign.key`. Commit `minisign.pub`.
-Never commit `minisign.key`: keep it, and a backup, outside the repository,
-and store its content and its password as the repository secrets
-`MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD`, for example with
-`gh secret set MINISIGN_SECRET_KEY < minisign.key` and
-`gh secret set MINISIGN_PASSWORD`. Installed copies pinned the public key,
-so after a lost secret key, a release signed with a new one is refused until
-each user accepts the new key (ADR 0013).
+A dashboard in another repository calls the workflow the same way. How to make
+the key pair (`minisign -G`), store the secrets `MINISIGN_SECRET_KEY` and
+`MINISIGN_PASSWORD`, write the caller, name the tag and get listed in a catalog
+is in [Publishing a dashboard](publishing-a-dashboard.md); this section covers
+only Eario's own release.
 
 Eario's own `.github/workflows/release.yml` calls it on a `v*` tag for
 data-explorer, signal-lab and the hub, which take the workspace version, so
@@ -402,6 +390,34 @@ refuses a file that is neither), set the secrets, set the version in
 attached. A hub installs the examples from that release one at a time, by
 slug (`eario-hub install rtonneau/eario --slug data-explorer`, or a catalog
 entry with a `slug`); it finds its own executable by name.
+
+### What only the maintainer can do
+
+Nothing below can be done from the repository's source alone, and none of it
+has been done yet. In this order:
+
+1. Make the Eario release key pair, as in
+   [The signing key](publishing-a-dashboard.md#the-signing-key). Keep
+   `minisign.key` and a backup outside the repository.
+2. Replace `crates/eario-hub/eario-release.pub` with that key's `minisign.pub`
+   and commit it. The hub's unit test accepts only the placeholder or a valid
+   key.
+3. In the Actions secrets of `rtonneau/eario`, set `MINISIGN_SECRET_KEY` and
+   `MINISIGN_PASSWORD`.
+4. Create the public repository `rtonneau/eario-catalog`, the catalog a hub
+   reads by default. Put in its root a `catalog.json` copied from
+   [`docs/catalog/catalog.json`](../catalog/catalog.json), with each
+   `public_key` replaced by the key line (the second line) of the release key's
+   `minisign.pub`.
+5. Raise `version` in `[workspace.package]` of `Cargo.toml` (the tag `v0.2.0`
+   already exists), commit, tag `v<version>` and push the tag. The `Release`
+   workflow builds, signs and attaches the files to a draft.
+6. Review the draft, then publish it. Try it with a throwaway hub directory:
+   `EARIO_HUB_DIR=<empty directory> eario-hub install rtonneau/eario --slug
+   data-explorer`.
+
+The workflows have never run on GitHub, so step 5 is also their first run: read
+its log before publishing.
 
 ## Publishing the crates (not done yet)
 

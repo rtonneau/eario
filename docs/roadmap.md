@@ -103,7 +103,42 @@ Left out:
   yet. It moves to M11, with the desktop shell. Today the hub is a terminal
   process on every platform.
 - Install from the hub interface, side-by-side versions and a hub update
-  action. Remaining limits are in [project-status.md](project-status.md).
+  action. The first and last were built afterwards, see "Install and update
+  from GitHub" below; side-by-side versions were not. Remaining limits are in
+  [project-status.md](project-status.md).
+
+### Install and update from GitHub (done, with ADR 0013)
+
+Built on M3, on the branch `feat/hub-github-install`, and counted here under
+M11's "Updating an installed dashboard from the hub". What landed:
+
+- Install a dashboard from a GitHub release, by catalog or `owner/repo`, with
+  a preview and a confirmation by the executable's SHA-256; update, check at
+  start and rollback to the previous version. In the hub view and in the
+  `eario-hub` command line.
+- Releases signed with minisign (`SHA256SUMS.txt.minisig`), a key per
+  repository pinned on first use, a changed key refused until accepted by its
+  SHA-256, and no downgrade.
+- Catalogs (`catalog.json` of a repository), and several dashboards in one
+  repository, installed by slug.
+- The hub updates itself from a release signed with the Eario release key
+  compiled into it.
+- A reusable release workflow, `release-dashboard.yml`, for any dashboard
+  repository, and Eario's own release through it. Guide for authors:
+  [publishing-a-dashboard.md](development/publishing-a-dashboard.md).
+
+What remains of it:
+
+- The first real release: the maintainer's steps (release key, secrets, the
+  catalog repository, a tag) are in the
+  [development guide](development/guide.md#what-only-the-maintainer-can-do).
+  The workflows and the self-update have never run against GitHub.
+- Private repositories and access tokens, which also lift the unauthenticated
+  rate limit.
+- A tray for the hub (M11), and showing `self-update.log` in the hub view.
+- Signing and notarization of the executables for macOS and Windows; today a
+  release is signed with minisign only.
+- Side-by-side versions of one dashboard.
 
 ## M4. Data: import settings and transformations
 
@@ -168,8 +203,12 @@ Left out:
 - A desktop shell (ADR 0010), hosting the hub as its main window
   next to its tray icon. The tray, deferred from M3, is built here, with a
   console-free hub on Windows.
-- Signing and installers, for the hub and for standalone dashboards.
-- Updating an installed dashboard from the hub.
+- Signing and installers, for the hub and for standalone dashboards: the
+  operating system's signing (Authenticode, Apple signing and notarization) and
+  installers. The minisign signature of releases is done.
+- Updating an installed dashboard from the hub: done, see "Install and update
+  from GitHub" under M3. Private repositories, a tray and the first real
+  release run remain.
 
 ## Further out
 

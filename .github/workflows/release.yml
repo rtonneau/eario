@@ -32,9 +32,8 @@ jobs:
       contents: write
     uses: ./.github/workflows/release-dashboard.yml
     with:
-      # The examples are downloads: a hub installs from a repository whose
-      # release has one executable per target. The hub updates itself from
-      # eario-hub-<target triple>[.exe].
+      # A hub installs each example by its slug (the default catalog lists
+      # both) and updates itself from eario-hub-<target triple>[.exe].
       executables: >-
         [
           {"package": "data-explorer"},

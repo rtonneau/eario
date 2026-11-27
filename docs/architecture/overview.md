@@ -292,11 +292,20 @@ Eario's configuration directory (`directories::ProjectDirs`: on Windows
 
 ```text
 hub/
-├── registry.json     installed dashboards: slug, path, size, SHA-256, manifest
+├── registry.json     installed dashboards: slug, path, size, SHA-256, manifest,
+│                     source (local or a GitHub repository), and for a GitHub
+│                     install its version, pinned key and previous version
 ├── hub.json          address and token of the running hub (one hub per user)
-├── bin/<slug>/       the hub's copy of each installed executable
+├── hub.lock          lock held while a file of the directory is read and written back
+├── catalogs.json     the repositories whose catalogs the hub reads
+├── settings.json     the hub's settings (the update check at start)
+├── updates.json      what the last update check found
+├── bin/<slug>/       the hub's copy of each installed executable, and the one
+│                     previous version an update keeps for rollback
+├── staging/          downloads being verified, one directory per hub process
 ├── run/<slug>.json   one per running dashboard, written by the dashboard
-└── logs/<slug>.log   output of each dashboard
+├── logs/<slug>.log   output of each dashboard
+└── self-update.log   written only when a self-updated hub could not start its successor
 ```
 
 `eario-hub` is a separate executable, a terminal process that prints its
@@ -368,6 +377,31 @@ A local executable is installed by its own `--eario-install`; a GitHub
 release through the routes above or the `eario-hub` command line, under ADR
 0013. There is no tray yet (ADR 0011, amendment). The security consequences are in
 [security.md](security.md).
+
+### Installing from GitHub releases
+
+Only the hub contacts GitHub (HTTPS, a fixed set of hosts, public repositories,
+no token); the dashboards stay offline. A release is installable when it has,
+for the user's machine, an executable `<slug>-<target triple>[.exe]` listed in
+a signed `SHA256SUMS.txt` (`SHA256SUMS.txt.minisig`), and a key to verify it
+with: the release's `minisign.pub`, or the key a catalog gives for the
+repository, or the key already pinned. The flow is two steps. A preview
+downloads the asset into `staging/`, checks the signature and the SHA-256 and,
+only when the key is trusted, runs the file with `--eario-manifest` to read
+its slug and version. The user then confirms by the executable's SHA-256, and
+the file moves into `bin/<slug>/`. A key the hub does not know, or that has
+changed, is accepted separately, by the SHA-256 of its whole key line.
+
+Updates, the check at start, rollback and the hub's own update follow the same
+verification; an update needs a strictly newer manifest version. The command
+line (`eario-hub help`) does the same as the routes: `catalog list|add|remove`,
+`install <owner/repo> [--slug <slug>]`, `check`, `update <slug>`,
+`rollback <slug>`, `check-at-start [on|off]` and `self-update`. A repository's
+release may carry several dashboards, which are installed one at a time by
+slug. The rules, with their reasons, are in
+[ADR 0013](../adr/0013-github-install-and-update.md); the author's side, with
+the catalog file format, is in
+[Publishing a dashboard](../development/publishing-a-dashboard.md).
 
 ## Frontend
 

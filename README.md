@@ -14,7 +14,7 @@ You describe a dashboard in Rust. Eario compiles it into a single executable
 that starts a local server, opens the browser, and lets the user work with
 their own files. Nothing leaves the machine.
 
-> **Status: early foundation (0.1.0, unreleased).** The architecture and one
+> **Status: early foundation (0.2.0, not published).** The architecture and one
 > complete vertical slice are in place and tested. The API will change. See
 > [project status](docs/project-status.md).
 
@@ -96,8 +96,10 @@ Implemented and tested:
 - Standalone or from a hub, from the same build: every dashboard
   executable can install itself into the Eario hub (`--eario-install`),
   and `eario-hub` lists the installed dashboards and starts, opens and
-  stops them. The hub is a terminal program for now; see
-  [Hub](#hub) below.
+  stops them. The hub can also install a dashboard from a signed GitHub
+  release, update it, check for updates, roll back one version and update
+  itself, from its page or with `eario-hub` commands. The hub is a terminal
+  program for now; see [Hub](#hub) below.
 - Loopback-only server with Host and Origin validation and a session token.
 - Clear import and validation errors.
 - Verified in CI on Linux and Windows: tests, browser tests in Chromium with
@@ -113,7 +115,8 @@ Experimental:
   connect. It never runs a computation: a derived dataset is readable once the
   dashboard has displayed it. See [ADR 0009](docs/adr/0009-mcp-integration.md).
 
-Planned, not implemented: a system tray for the hub, more chart types,
+Planned, not implemented: a system tray for the hub, private repositories for
+the hub's installs, operating-system signing of executables, more chart types,
 grouping and joins, saved sessions, data mining, Python scripts, an AI
 assistant, a visual dashboard editor, a desktop shell. See the
 [roadmap](docs/roadmap.md).
@@ -173,9 +176,36 @@ the dashboards running. The hub directory is `hub` in Eario's configuration
 directory (`%APPDATA%\eario\config\hub` on Windows, `~/.config/eario/hub`
 on Linux), or the one named by `EARIO_HUB_DIR`.
 
+#### Install and update from GitHub
+
+The hub can install a dashboard that is published as a signed release of a
+public GitHub repository, and keep it up to date. In the hub, use "Install
+from GitHub", or from a terminal:
+
+```text
+eario-hub catalog list                         # the catalogs and their dashboards
+eario-hub catalog add <owner/repo>             # read another catalog
+eario-hub install <owner/repo>                 # the latest release of a repository
+eario-hub install <owner/repo> --slug <slug>   # one of several dashboards
+eario-hub check                                # look for updates
+eario-hub update <slug>
+eario-hub rollback <slug>                      # the version the last update replaced
+eario-hub self-update                          # the hub itself (quit the hub first)
+eario-hub help
+```
+
+Each install shows the release, its size and SHA-256 and the signing key, and
+asks for a confirmation. A key the hub does not know yet is accepted only by
+its SHA-256, after you compared it with the one its author publishes. Only the
+hub contacts GitHub; dashboards stay offline. The hub's own update works once
+a release signed with the Eario release key exists; none has been published
+yet. To publish your own dashboard this way, see
+[Publishing a dashboard](docs/development/publishing-a-dashboard.md).
+
 Limits today: no tray icon (on Windows the hub keeps its console window
-open), no install from the hub interface, one version per dashboard. See
-[project status](docs/project-status.md).
+open), public repositories only, one version per dashboard (plus the previous
+one for rollback), and the release workflow that makes such releases has not
+run on GitHub yet. See [project status](docs/project-status.md).
 
 ## Architecture
 
@@ -208,7 +238,7 @@ the [decision records](docs/adr/README.md).
 | `crates/eario-data` | File readers, datasets, tabular queries |
 | `crates/eario-runtime` | Application services, local server, embedded frontend |
 | `crates/eario-mcp` | MCP server (optional) |
-| `crates/eario-hub` | The hub: installed dashboards, start, open, stop |
+| `crates/eario-hub` | The hub: installed dashboards, start, open, stop; install and update from GitHub releases |
 | `frontend/` | Generic Svelte and TypeScript frontend |
 | `examples/` | `hello-dashboard`, `data-explorer`, `signal-lab` |
 | `fixtures/` | Synthetic test data |
