@@ -234,6 +234,30 @@
         "ticket": "07-hub-view-remote",
         "commit": "6dccf8b"
       }
+    },
+    {
+      "at": "2026-11-27T14:42:00.881Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/08-release-workflow.md",
+        "03-implement/08-release-workflow/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "08-release-workflow"
+      }
+    },
+    {
+      "at": "2026-11-27T15:35:32.133Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/08-release-workflow/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "08-release-workflow",
+        "commit": "20a7ec8"
+      }
     }
   ],
   "current_phase": "ship",
