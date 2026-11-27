@@ -43,7 +43,7 @@ flowchart TD
 | `eario-data` | `TableReader` interface and its CSV, TSV, XLSX implementations; `Dataset`; filtering, paging, chart preparation, statistics; `Computation`, `ComputeContext` and the registry; the `polars` re-export. | polars, calamine |
 | `eario-runtime` | `App` (the application services, evaluation and cache of derived datasets), the Axum server and its security layer, user preferences, the embedded frontend. | axum, tokio, rust-embed |
 | `eario-mcp` | MCP tools over `App`, served on `/mcp`. | rmcp |
-| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
+| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards; install, update and roll back from GitHub releases), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
 | `eario` | What a dashboard author imports: `Dashboard`, `Page`, `State<T>`, widget constructors, `run()`, and `eario::polars`. | the crates above |
 
 Crates named in the initial plan but not created, because nothing needs them
@@ -334,8 +334,10 @@ the hub leaves dashboards running. A new hub keeps the run files that answer
 and deletes the others.
 
 Hub routes, under `/api`, behind the same Host and Origin checks and session
-token as a dashboard. The only handle they accept is the slug of an installed
-dashboard: no route takes a path, a command or arguments.
+token as a dashboard. They read no body or query: every parameter is a path
+segment, validated strictly (a slug, an `{owner}/{repo}`, a SHA-256 of 64
+lower-case hexadecimal digits, `on` or `off`). No route takes a path, a URL,
+a command or arguments.
 
 | Method and path | Answer |
 | --- | --- |
@@ -345,11 +347,24 @@ dashboard: no route takes a path, a command or arguments.
 | `POST /api/dashboards/{slug}/open` | `HubOpen`: the address with its token, to open in a new tab |
 | `POST /api/dashboards/{slug}/uninstall` | `HubInfo`; refused while it runs |
 | `POST /api/stop-all` | `HubInfo` |
+| `GET /api/catalogs` | `HubCatalog[]`, each catalog read from GitHub with its dashboards |
+| `POST /api/catalogs/{owner}/{repo}/add`, `/remove` | `HubCatalog[]` |
+| `POST /api/sources/{owner}/{repo}/preview` | `InstallPreview` of the latest release, downloaded and verified, not installed |
+| `POST /api/sources/{owner}/{repo}/accept-key/{key_sha256}` | `InstallPreview`, complete, once the previewed key is accepted |
+| `POST /api/sources/{owner}/{repo}/install/{sha256}` | `HubInfo`; installs the preview of that SHA-256 |
+| `POST /api/check` | `HubInfo` with the new `last_check` |
+| `POST /api/dashboards/{slug}/update-preview` | `InstallPreview` of the newer release |
+| `POST /api/dashboards/{slug}/update/{sha256}` | `HubInfo`; installs that previewed update |
+| `POST /api/dashboards/{slug}/update` | `HubInfo`; preview and update in one step |
+| `POST /api/dashboards/{slug}/rollback` | `HubInfo`; restores the previous version |
+| `GET /api/settings` | `HubSettings` |
+| `POST /api/settings/check-at-start/{on\|off}` | `HubSettings` |
 | `GET /api/alive` | 204; lets a second hub find the first |
 | `POST /api/shutdown` | 204; quits the hub only |
 
-Installing is not an API route: it is the dashboard's own `--eario-install`.
-There is no tray yet (ADR 0011, amendment). The security consequences are in
+A local executable is installed by its own `--eario-install`; a GitHub
+release through the routes above or the `eario-hub` command line, under ADR
+0013. There is no tray yet (ADR 0011, amendment). The security consequences are in
 [security.md](security.md).
 
 ## Frontend

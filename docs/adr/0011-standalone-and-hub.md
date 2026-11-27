@@ -2,7 +2,8 @@
 
 Status: Accepted (26 November 2026). Amended the same day at the start of
 M3: the interface technology is decided, and three points below changed (see
-"Amendments").
+"Amendments"). Amended on 27 November 2026 by ADR 0013 (install and update
+from GitHub releases).
 
 ## Context
 
@@ -196,3 +197,17 @@ choice is between a frozen dependency and a heavy event-loop dependency
 (winit or tao), and neither was accepted for M3. Revisit when the desktop
 shell of ADR 0010 is designed (M11), which brings its own event loop, or
 when a maintained tray crate offers a safe loop.
+
+## Amendment: install and update from GitHub (27 November 2026)
+
+[ADR 0013](0013-github-install-and-update.md) widens two points, for the hub
+only:
+
+- **Install from the HTTP API is allowed**, under ADR 0013's rules: a signed
+  GitHub release, previewed and then confirmed by its SHA-256, by routes that
+  take an `owner/repo`, a slug or a hash as path segments, never a path, a
+  URL, an executable or arguments. `--eario-install` keeps working; it never
+  replaces an entry installed from GitHub.
+- **Updates keep one previous version** (point 4) for a dashboard installed
+  from GitHub, which a rollback restores once. A local install is still
+  updated in place by `--eario-install`, with no previous version.

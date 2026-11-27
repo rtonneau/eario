@@ -20,8 +20,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use eario_core::{
-    ApiError, AppResponse, DashboardState, HubDashboard, HubInfo, HubOpen, HubSettings, KeyStatus,
-    LAUNCH_PROTOCOL_VERSION, RunFile, Source,
+    ApiError, AppResponse, DashboardState, HubCatalog, HubDashboard, HubInfo, HubOpen, HubSettings,
+    InstallPreview, KeyStatus, LAUNCH_PROTOCOL_VERSION, RunFile, Source,
 };
 use eario_hub::fake_github::{FakeAsset, FakeGitHub, TestKey};
 use eario_hub::github::{ClientOptions, Endpoint, GitHub, GitHubClient};
@@ -1784,6 +1784,496 @@ fn catalogs_are_added_and_removed_by_repository() -> TestResult {
     assert_eq!(other.run(other.supervisor.catalogs())?, ["lab/catalog"]);
     assert_eq!(hub.run(hub.supervisor.remove_catalog("lab/catalog"))?, Vec::<String>::new());
     assert!(hub.run(hub.supervisor.catalog_listing())?.is_empty());
+    Ok(())
+}
+
+// The routes of installs and updates from GitHub (ADR 0013), over HTTP: thin
+// adapters over the supervisor methods tested above, so these tests check
+// what the HTTP layer adds: strict path segments, the token, the Origin
+// check, and the status of each refusal.
+
+/// Sends one request without a body, with a `Host` header of its own.
+fn request_with_host(
+    address: &str,
+    method: &str,
+    path: &str,
+    token: &str,
+    host: &str,
+) -> Result<Answer, Failure> {
+    let mut stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(TIMEOUT))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nx-eario-token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let status = response.split_whitespace().nth(1).ok_or("answer without a status")?.parse()?;
+    let body = response.split_once("\r\n\r\n").map(|(_, body)| body.to_owned()).unwrap_or_default();
+    Ok(Answer { status, body })
+}
+
+/// Sends one request without a body, with an `Origin` header.
+fn request_from_origin(
+    address: &str,
+    method: &str,
+    path: &str,
+    token: &str,
+    origin: &str,
+) -> Result<Answer, Failure> {
+    let mut stream = TcpStream::connect(address)?;
+    stream.set_read_timeout(Some(TIMEOUT))?;
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nx-eario-token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let status = response.split_whitespace().nth(1).ok_or("answer without a status")?.parse()?;
+    let body = response.split_once("\r\n\r\n").map(|(_, body)| body.to_owned()).unwrap_or_default();
+    Ok(Answer { status, body })
+}
+
+/// A hub served in this process that reaches the fake GitHub.
+fn remote_test_hub(root: &Path, fake: &FakeGitHub) -> Result<TestHub, Failure> {
+    let supervisor = Supervisor::with_github(
+        HubDir::at(root),
+        SupervisorOptions::default(),
+        fake_client(fake)?,
+    )?;
+    TestHub::with_supervisor(supervisor)
+}
+
+impl TestHub {
+    fn get(&self, path: &str) -> Result<Answer, Failure> {
+        request(&self.address, "GET", path, Some(&self.token))
+    }
+
+    /// The hub's list from an answer of 200.
+    fn info(answer: &Answer) -> Result<HubInfo, Failure> {
+        if answer.status != 200 {
+            return Err(format!("expected 200, got {}: {}", answer.status, answer.body).into());
+        }
+        answer.json()
+    }
+}
+
+/// The JSON of an answer of 200.
+fn ok<T: serde::de::DeserializeOwned>(answer: &Answer) -> Result<T, Failure> {
+    if answer.status != 200 {
+        return Err(format!("expected 200, got {}: {}", answer.status, answer.body).into());
+    }
+    answer.json()
+}
+
+/// The registry entry of `slug` in `root`, which must be there.
+fn entry_of(root: &Path, slug: &str) -> Result<hub_dir::RegistryEntry, Failure> {
+    let registry = HubDir::at(root).read_registry()?;
+    registry.get(slug).cloned().ok_or_else(|| format!("{slug} is not installed").into())
+}
+
+/// The SHA-256 the hub identifies `key` by.
+fn key_sha256(key: &TestKey) -> Result<String, Failure> {
+    Ok(verify::PublicKey::from_base64(REPO, &key.public_key())?.sha256())
+}
+
+#[test]
+fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let hub = remote_test_hub(root.path(), &fake)?;
+    let hash = "a".repeat(64);
+
+    // `{owner}/{repo}` is a GitHub repository, nothing else.
+    let not_repos = [
+        ("..", "data-explorer"),
+        ("lab", ".."),
+        ("lab", "."),
+        ("lab%2Fdata-explorer", "x"),
+        ("lab", "data-explorer%2F..%2F.."),
+        ("lab", "data%5Cexplorer"),
+        ("https:", "github.com"),
+        ("lab", "data%20explorer"),
+        ("lab", "data-explorer%00"),
+        ("lab.x", "data-explorer"),
+    ];
+    let mut owner_too_long = "a".repeat(40);
+    owner_too_long.push_str("/x");
+    for (owner, repo) in not_repos {
+        let routes = [
+            format!("/api/catalogs/{owner}/{repo}/add"),
+            format!("/api/catalogs/{owner}/{repo}/remove"),
+            format!("/api/sources/{owner}/{repo}/preview"),
+            format!("/api/sources/{owner}/{repo}/accept-key/{hash}"),
+            format!("/api/sources/{owner}/{repo}/install/{hash}"),
+        ];
+        for path in routes {
+            let refusal =
+                hub.post(&path)?.refusal(400).map_err(|error| format!("{path}: {error}"))?;
+            assert_eq!(refusal.code, "github_invalid_repo", "{path}");
+        }
+    }
+    let path = format!("/api/sources/{owner_too_long}/preview");
+    assert_eq!(hub.post(&path)?.refusal(400)?.code, "github_invalid_repo");
+
+    // `{sha256}` and `{key_sha256}`: 64 lower-case hexadecimal digits. A
+    // minisign key id (16 digits) is not a key's SHA-256.
+    let not_hashes = [
+        "..".to_owned(),
+        "%2E%2E%2F%2E%2E%2Fbin".to_owned(),
+        "A".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        "g".repeat(64),
+        "0123456789abcdef".to_owned(),
+        format!("{}%20", "a".repeat(63)),
+    ];
+    for not_hash in &not_hashes {
+        let routes = [
+            format!("/api/sources/lab/data-explorer/accept-key/{not_hash}"),
+            format!("/api/sources/lab/data-explorer/install/{not_hash}"),
+            format!("/api/dashboards/data-explorer/update/{not_hash}"),
+        ];
+        for path in routes {
+            let refusal =
+                hub.post(&path)?.refusal(400).map_err(|error| format!("{path}: {error}"))?;
+            assert_eq!(refusal.code, "hub_invalid_sha256", "{path}");
+        }
+    }
+
+    // `{slug}`: a slug.
+    for slug in ["..", "%2E%2E", "Data%20Explorer", "data-explorer.exe", "%2Fbin%2Fsh"] {
+        let routes = [
+            format!("/api/dashboards/{slug}/update-preview"),
+            format!("/api/dashboards/{slug}/update"),
+            format!("/api/dashboards/{slug}/update/{hash}"),
+            format!("/api/dashboards/{slug}/rollback"),
+        ];
+        for path in routes {
+            let refusal =
+                hub.post(&path)?.refusal(400).map_err(|error| format!("{path}: {error}"))?;
+            assert_eq!(refusal.code, "hub_invalid_slug", "{path}");
+        }
+    }
+
+    // `on` or `off`, in lower case.
+    for switch in ["yes", "ON", "Off", "1", "true", "on%20"] {
+        let path = format!("/api/settings/check-at-start/{switch}");
+        let refusal = hub.post(&path)?.refusal(400).map_err(|error| format!("{path}: {error}"))?;
+        assert_eq!(refusal.code, "hub_invalid_switch", "{path}");
+    }
+    // A percent-encoded letter decodes to the letter: still only `on`.
+    let settings: HubSettings = ok(&hub.post("/api/settings/check-at-start/%6Fff")?)?;
+    assert!(!settings.check_updates_at_start);
+
+    // A path in place of a segment matches no route.
+    for path in [
+        "/api/sources/lab/data-explorer/x/preview",
+        "/api/sources/lab/preview",
+        "/api/catalogs/lab/catalog/x/add",
+        "/api/sources/lab/data-explorer/install/a/b",
+    ] {
+        assert_eq!(hub.post(path)?.refusal(404)?.code, "unknown_endpoint", "{path}");
+    }
+
+    // A query or a body is never read: the segments alone decide.
+    let path = format!(
+        "/api/sources/lab/data-explorer/install/{hash}?repo=evil/x&sha256=0&path=C%3A%5Cx.exe"
+    );
+    assert_eq!(hub.post(&path)?.refusal(404)?.code, "hub_no_preview");
+    let body = r#"{"repo":"evil/x","url":"https://evil.example/x.exe","path":"C:\\x.exe","args":["--evil"]}"#;
+    let path = format!("/api/sources/lab/data-explorer/install/{hash}");
+    let answer = request_with_body(&hub.address, "POST", &path, Some(&hub.token), body)?;
+    assert_eq!(answer.refusal(404)?.code, "hub_no_preview");
+    let path = "/api/settings/check-at-start/on?switch=off";
+    let settings: HubSettings = ok(&hub.post(path)?)?;
+    assert!(settings.check_updates_at_start);
+
+    // Nothing above reached GitHub, the registry or the catalogs.
+    assert!(fake.requests().is_empty(), "requests to GitHub: {:?}", fake.requests());
+    assert!(!HubDir::at(root.path()).catalogs_path().exists());
+    assert!(HubDir::at(root.path()).read_registry()?.dashboards.is_empty());
+
+    // Every new route sits behind the session token and the Host and Origin
+    // checks.
+    let routes = [
+        ("GET", "/api/catalogs".to_owned()),
+        ("POST", "/api/catalogs/lab/catalog/add".to_owned()),
+        ("POST", "/api/catalogs/lab/catalog/remove".to_owned()),
+        ("POST", "/api/sources/lab/data-explorer/preview".to_owned()),
+        ("POST", format!("/api/sources/lab/data-explorer/accept-key/{hash}")),
+        ("POST", format!("/api/sources/lab/data-explorer/install/{hash}")),
+        ("POST", "/api/check".to_owned()),
+        ("POST", "/api/dashboards/data-explorer/update-preview".to_owned()),
+        ("POST", format!("/api/dashboards/data-explorer/update/{hash}")),
+        ("POST", "/api/dashboards/data-explorer/update".to_owned()),
+        ("POST", "/api/dashboards/data-explorer/rollback".to_owned()),
+        ("GET", "/api/settings".to_owned()),
+        ("POST", "/api/settings/check-at-start/off".to_owned()),
+    ];
+    for (method, path) in &routes {
+        let answer = request(&hub.address, method, path, None)?;
+        assert_eq!(answer.refusal(401)?.code, "missing_token", "{method} {path}");
+        let answer = request(&hub.address, method, path, Some("wrong"))?;
+        assert_eq!(answer.refusal(401)?.code, "missing_token", "{method} {path}");
+        for origin in ["https://evil.example", "http://localhost:1", "null"] {
+            let answer = request_from_origin(&hub.address, method, path, &hub.token, origin)?;
+            let refusal = answer.refusal(403).map_err(|error| format!("{path}: {error}"))?;
+            assert_eq!(refusal.code, "forbidden_origin", "{method} {path} from {origin}");
+        }
+        // A foreign Host header (DNS rebinding) is refused too.
+        for host in ["evil.example", "evil.example:80", "127.0.0.2:1"] {
+            let answer = request_with_host(&hub.address, method, path, &hub.token, host)?;
+            let refusal = answer.refusal(403).map_err(|error| format!("{path}: {error}"))?;
+            assert_eq!(refusal.code, "forbidden_host", "{method} {path} with Host {host}");
+        }
+    }
+    assert!(fake.requests().is_empty(), "requests to GitHub: {:?}", fake.requests());
+    let settings: HubSettings = ok(&hub.get("/api/settings")?)?;
+    assert!(settings.check_updates_at_start, "no refused request changed the setting");
+    Ok(())
+}
+
+#[test]
+fn an_install_over_http_needs_the_preview_its_hash_and_an_accepted_key() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(20)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let executable = data_explorer_build("")?;
+    // No catalog lists the repository: its minisign.pub is trusted on first
+    // use.
+    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, executable.clone())], true);
+    let hub = remote_test_hub(root.path(), &fake)?;
+    let install = |sha256: &str| hub.post(&format!("/api/sources/{REPO}/install/{sha256}"));
+
+    // No preview: nothing to install, whatever the hash.
+    assert_eq!(install(&"a".repeat(64))?.refusal(404)?.code, "hub_no_preview");
+    assert_eq!(asset_downloads(&fake, &asset), 0);
+
+    let preview: InstallPreview = ok(&hub.post(&format!("/api/sources/{REPO}/preview"))?)?;
+    assert_eq!(preview.key_status, KeyStatus::Unknown);
+    assert_eq!(preview.manifest, None, "not run before its key is trusted");
+    assert_eq!(preview.key_sha256, key_sha256(&key)?);
+    assert_eq!(preview.public_key, key.public_key());
+
+    // Another hash, or another repository, is not this preview.
+    assert_eq!(install(&"0".repeat(64))?.refusal(409)?.code, "hub_preview_mismatch");
+    let other = hub.post(&format!("/api/sources/lab/other/install/{}", preview.sha256))?;
+    assert_eq!(other.refusal(404)?.code, "hub_no_preview");
+    // The right hash, but the key is not accepted.
+    let refusal = install(&preview.sha256)?.refusal(409)?;
+    assert_eq!(refusal.code, "hub_key_not_accepted");
+    assert!(refusal.message.contains(&preview.key_sha256), "{}", refusal.message);
+    assert_nothing_in_bin(root.path())?;
+
+    // Only the key's SHA-256 accepts it.
+    let accept = |sha256: &str| hub.post(&format!("/api/sources/{REPO}/accept-key/{sha256}"));
+    assert_eq!(accept(&"ab".repeat(32))?.refusal(409)?.code, "hub_key_mismatch");
+    assert_eq!(accept(&preview.sha256)?.refusal(409)?.code, "hub_key_mismatch");
+    let accepted: InstallPreview = ok(&accept(&preview.key_sha256)?)?;
+    assert_eq!(accepted.key_status, KeyStatus::Accepted);
+    assert_eq!(accepted.sha256, preview.sha256);
+    let manifest = accepted.manifest.ok_or("the full preview once the key is accepted")?;
+    assert_eq!((manifest.slug.as_str(), manifest.name.as_str()), (DATA_EXPLORER, "Data Explorer"));
+    assert_nothing_in_bin(root.path())?;
+
+    let info = TestHub::info(&install(&preview.sha256)?)?;
+    let installed = info
+        .dashboards
+        .iter()
+        .find(|dashboard| dashboard.slug == DATA_EXPLORER)
+        .ok_or("installed and listed")?;
+    assert_eq!(installed.source, Source::Github { repo: REPO.to_owned() });
+    assert_eq!(installed.state, DashboardState::Stopped);
+    let entry = entry_of(root.path(), DATA_EXPLORER)?;
+    assert_eq!(entry.pinned_key, Some(key.public_key()), "the accepted key is pinned");
+    assert_eq!(fs::read(&entry.path)?, executable);
+
+    // The preview was used up, and the repository is installed now.
+    assert_eq!(install(&preview.sha256)?.refusal(404)?.code, "hub_no_preview");
+    let again = hub.post(&format!("/api/sources/{REPO}/preview"))?;
+    assert_eq!(again.refusal(409)?.code, "hub_already_installed");
+    assert_eq!(staged_files(root.path())?, 0);
+
+    // It starts like a local install.
+    assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    assert_eq!(hub.action(DATA_EXPLORER, "stop")?.status, 200);
+    Ok(())
+}
+
+/// No dashboard has a directory in `bin/`.
+fn assert_nothing_in_bin(root: &Path) -> TestResult {
+    let bin = root.join("bin");
+    let count = match fs::read_dir(&bin) {
+        Ok(entries) => entries.count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    assert_eq!(count, 0, "something was written to {}", bin.display());
+    Ok(())
+}
+
+#[test]
+fn updates_checks_and_rollbacks_run_over_http() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let (key, new_key) = (test_key(21)?, test_key(22)?);
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let release = |key: &TestKey, marker: &str| -> Result<Vec<u8>, Failure> {
+        let build = data_explorer_build(marker)?;
+        publish(&fake, REPO, "v0.0.0", key, vec![FakeAsset::new(&asset, build.clone())], true);
+        Ok(build)
+    };
+    release(&key, "build 1")?;
+    serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, key.public_key())]);
+    let hub = remote_test_hub(root.path(), &fake)?;
+    let dashboard = |info: &HubInfo| -> Result<HubDashboard, Failure> {
+        let found = info.dashboards.iter().find(|dashboard| dashboard.slug == DATA_EXPLORER);
+        found.cloned().ok_or_else(|| "data-explorer is not listed".into())
+    };
+
+    // Installed from a catalog key: trusted at once.
+    let preview: InstallPreview = ok(&hub.post(&format!("/api/sources/{REPO}/preview"))?)?;
+    assert_eq!(preview.key_status, KeyStatus::Catalog);
+    TestHub::info(&hub.post(&format!("/api/sources/{REPO}/install/{}", preview.sha256))?)?;
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let first = entry_of(root.path(), DATA_EXPLORER)?;
+    assert_eq!(hub.action(DATA_EXPLORER, "rollback")?.refusal(409)?.code, "hub_no_previous");
+    let missing = hub.post("/api/dashboards/nope/update")?;
+    assert_eq!(missing.refusal(404)?.code, "hub_not_installed");
+
+    // Check now: an update is available.
+    let second_build = release(&key, "build 2")?;
+    let info = TestHub::info(&hub.post("/api/check")?)?;
+    let check = info.last_check.clone().ok_or("the check just made")?;
+    assert_eq!(check.dashboards.len(), 1);
+    assert_eq!(check.dashboards[0].available_version.as_deref(), Some("0.0.0"));
+    assert_eq!(dashboard(&info)?.available_version.as_deref(), Some("0.0.0"));
+
+    // Previewed, then installed by its hash.
+    let preview: InstallPreview = ok(&hub.action(DATA_EXPLORER, "update-preview")?)?;
+    assert_eq!(preview.key_status, KeyStatus::Pinned);
+    let wrong = hub.action(DATA_EXPLORER, &format!("update/{}", "0".repeat(64)))?;
+    assert_eq!(wrong.refusal(409)?.code, "hub_preview_mismatch");
+    let info = TestHub::info(&hub.action(DATA_EXPLORER, &format!("update/{}", preview.sha256))?)?;
+    assert!(dashboard(&info)?.has_previous);
+    assert_eq!(dashboard(&info)?.available_version, None);
+    let second = entry_of(root.path(), DATA_EXPLORER)?;
+    assert_eq!(fs::read(&second.path)?, second_build);
+    assert_eq!(second.sha256, preview.sha256);
+    assert_eq!(
+        second.previous.as_ref().map(|previous| previous.sha256.as_str()),
+        Some(first.sha256.as_str())
+    );
+
+    // Not newer: refused.
+    let refusal = hub.action(DATA_EXPLORER, "update")?.refusal(409)?;
+    assert_eq!(refusal.code, "hub_not_newer");
+
+    // Refused while it runs.
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.2")?;
+    let third_build = release(&key, "build 3")?;
+    assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    assert_eq!(hub.action(DATA_EXPLORER, "update")?.refusal(409)?.code, "hub_running");
+    assert_eq!(hub.action(DATA_EXPLORER, "rollback")?.refusal(409)?.code, "hub_running");
+    assert_eq!(hub.action(DATA_EXPLORER, "stop")?.status, 200);
+
+    // In one step, with the pinned key.
+    let info = TestHub::info(&hub.action(DATA_EXPLORER, "update")?)?;
+    assert!(dashboard(&info)?.has_previous);
+    let third = entry_of(root.path(), DATA_EXPLORER)?;
+    assert_eq!(fs::read(&third.path)?, third_build);
+
+    // Rolled back once: the previous version, and no older one.
+    let info = TestHub::info(&hub.action(DATA_EXPLORER, "rollback")?)?;
+    assert!(!dashboard(&info)?.has_previous);
+    let restored = entry_of(root.path(), DATA_EXPLORER)?;
+    assert_eq!(
+        (restored.path.as_path(), restored.sha256.as_str()),
+        (second.path.as_path(), second.sha256.as_str())
+    );
+    assert!(!third.path.exists(), "the newer copy is removed");
+    assert_eq!(hub.action(DATA_EXPLORER, "rollback")?.refusal(409)?.code, "hub_no_previous");
+
+    // A new key: refused in one step, then accepted by its SHA-256 and
+    // installed by the preview's hash.
+    let fourth_build = release(&new_key, "build 4")?;
+    let refusal = hub.action(DATA_EXPLORER, "update")?.refusal(409)?;
+    assert_eq!(refusal.code, "hub_key_changed");
+    let changed: InstallPreview = ok(&hub.action(DATA_EXPLORER, "update-preview")?)?;
+    assert_eq!(changed.key_status, KeyStatus::Changed);
+    assert_eq!(changed.manifest, None, "not run before the new key is accepted");
+    let path = format!("/api/dashboards/{DATA_EXPLORER}/update/{}", changed.sha256);
+    assert_eq!(hub.post(&path)?.refusal(409)?.code, "hub_key_changed");
+    assert_eq!(entry_of(root.path(), DATA_EXPLORER)?.pinned_key, Some(key.public_key()));
+    let accepted: InstallPreview =
+        ok(&hub.post(&format!("/api/sources/{REPO}/accept-key/{}", key_sha256(&new_key)?))?)?;
+    assert_eq!(accepted.key_status, KeyStatus::Accepted);
+    assert!(accepted.manifest.is_some());
+    TestHub::info(&hub.post(&path)?)?;
+    let fourth = entry_of(root.path(), DATA_EXPLORER)?;
+    assert_eq!(fs::read(&fourth.path)?, fourth_build);
+    assert_eq!(fourth.pinned_key, Some(new_key.public_key()), "the new key is pinned");
+    assert_eq!(staged_files(root.path())?, 0);
+    Ok(())
+}
+
+#[test]
+fn catalogs_and_the_check_at_start_setting_change_over_http() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(23)?;
+    serve_catalog(&fake, "lab/catalog", &[(REPO, key.public_key())]);
+    let hub = remote_test_hub(root.path(), &fake)?;
+    let default = eario_hub::remote::DEFAULT_CATALOG;
+
+    // The default catalog, not served here: listed with why.
+    let listing: Vec<HubCatalog> = ok(&hub.get("/api/catalogs")?)?;
+    assert_eq!(listing.len(), 1);
+    assert_eq!(listing[0].repo, default);
+    assert_eq!(
+        listing[0].error.as_ref().map(|error| error.code.as_str()),
+        Some("github_not_found")
+    );
+
+    // A repository without a catalog is not added: GitHub said no.
+    let refusal = hub.post("/api/catalogs/lab/nothing/add")?.refusal(502)?;
+    assert_eq!(refusal.code, "github_not_found");
+    let listing: Vec<HubCatalog> = ok(&hub.post("/api/catalogs/lab/catalog/add")?)?;
+    let repos: Vec<&str> = listing.iter().map(|catalog| catalog.repo.as_str()).collect();
+    assert_eq!(repos, [default, "lab/catalog"]);
+    assert_eq!(listing[1].name.as_deref(), Some("Lab"));
+    assert_eq!(listing[1].dashboards[0].repo, REPO);
+    assert_eq!(listing[1].dashboards[0].installed_slug, None);
+
+    let listing: Vec<HubCatalog> = ok(&hub.post(&format!("/api/catalogs/{default}/remove"))?)?;
+    let repos: Vec<&str> = listing.iter().map(|catalog| catalog.repo.as_str()).collect();
+    assert_eq!(repos, ["lab/catalog"]);
+    let again = hub.post(&format!("/api/catalogs/{default}/remove"))?;
+    assert_eq!(again.refusal(404)?.code, "hub_unknown_catalog");
+    let remote = RemoteHub::new(root.path(), &fake)?;
+    assert_eq!(remote.run(remote.supervisor.catalogs())?, ["lab/catalog"], "stored");
+
+    // The setting, stored in the hub directory.
+    let settings: HubSettings = ok(&hub.get("/api/settings")?)?;
+    assert!(settings.check_updates_at_start, "on by default");
+    let settings: HubSettings = ok(&hub.post("/api/settings/check-at-start/off")?)?;
+    assert!(!settings.check_updates_at_start);
+    assert!(!ok::<HubSettings>(&hub.get("/api/settings")?)?.check_updates_at_start);
+    assert!(!remote.run(remote.supervisor.settings())?.check_updates_at_start, "stored");
+    let settings: HubSettings = ok(&hub.post("/api/settings/check-at-start/on")?)?;
+    assert!(settings.check_updates_at_start);
+
+    // A check with nothing installed from GitHub reads nothing.
+    let before = fake.requests().len();
+    let info = TestHub::info(&hub.post("/api/check")?)?;
+    assert_eq!(info.last_check.map(|check| check.dashboards.len()), Some(0));
+    assert_eq!(fake.requests().len(), before);
     Ok(())
 }
 
