@@ -1,0 +1,449 @@
+name: Release dashboard
+
+# Reusable workflow: builds Eario executables for the four targets the hub
+# installs on, names them as the hub expects, lists their SHA-256 in
+# SHA256SUMS.txt, signs that list with minisign and attaches everything to the
+# GitHub release of the tag (ADR 0013). Any dashboard repository can call it:
+#
+#   on:
+#     push:
+#       tags: ['v*']
+#   permissions:
+#     contents: read
+#   jobs:
+#     release:
+#       permissions:
+#         contents: write
+#       uses: rtonneau/eario/.github/workflows/release-dashboard.yml@<tag or commit>
+#       with:
+#         executables: '[{"package": "my-dashboard"}]'
+#         publish: true
+#       secrets:
+#         MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+#         MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+#
+# The release it makes:
+#
+# - one executable per target and per entry of `executables`, named
+#   `<slug>-<target triple>`, with `.exe` on Windows;
+# - SHA256SUMS.txt, as `sha256sum` writes it (`<sha256>  <asset>`), listing
+#   the executables;
+# - SHA256SUMS.txt.minisig, its pre-hashed minisign signature, verified
+#   against the committed public key before anything is uploaded;
+# - minisign.pub, that public key file, unless `attach-public-key` is false.
+#
+# Before building, it refuses: a tag that is not `v<SemVer version>`, a
+# package whose version is not the tag's, an unknown target, a slug the hub
+# would refuse, and a public key file that is missing, malformed or the
+# placeholder Eario commits. After building, on the runners that can run the
+# executable (every target but x86_64-apple-darwin, cross-compiled on an Apple
+# silicon runner), it checks what the hub will read: `--eario-manifest` must
+# give the slug and the tag's version, or `--version` must print
+# `<slug> <version>`.
+#
+# A hub installs from a repository whose release has one executable per
+# target. A release with several (as Eario's own: two examples and the hub)
+# is for downloading by hand; the hub updates itself from it by name.
+#
+# Runners: windows-latest, ubuntu-latest, and macos-latest (Apple silicon)
+# for both macOS targets; GitHub no longer offers an Intel macOS runner that
+# is not deprecated, so x86_64-apple-darwin is cross-compiled. The Linux
+# executable needs the GNU C library of ubuntu-latest or later.
+#
+# The secret key is written to a file only readable by the runner's user in
+# the release job, used once and deleted; it is never printed. Third-party
+# actions are pinned to their major version, as in ci.yml.
+
+on:
+  workflow_call:
+    inputs:
+      executables:
+        description: >-
+          JSON array of the executables to release. Each entry: `package`, the
+          Cargo package (required); `binary`, its binary (default: the
+          package); `slug`, the dashboard's slug, as its manifest gives it
+          (default: the binary); `probe`, how to check the built executable:
+          `manifest` (default, a dashboard), `version` (prints
+          `<slug> <version>`, as the hub) or `none`.
+        type: string
+        required: true
+      targets:
+        description: Space-separated target triples to build, among the four the hub knows.
+        type: string
+        default: x86_64-pc-windows-msvc x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin
+      public-key:
+        description: >-
+          Path, from the repository root, of the committed minisign public key
+          file (`.pub`) the signature must verify with.
+        type: string
+        default: minisign.pub
+      attach-public-key:
+        description: >-
+          Attach the public key file as `minisign.pub`. A repository that no
+          hub catalog lists needs it.
+        type: boolean
+        default: true
+      publish:
+        description: Publish the release; false leaves it a draft, which no hub sees.
+        type: boolean
+        default: false
+      tag:
+        description: The release tag, `v<version>`. Default the tag that triggered the run.
+        type: string
+        default: ''
+      working-directory:
+        description: Directory of the Cargo workspace, from the repository root.
+        type: string
+        default: .
+      node-version:
+        description: Install this Node.js version before building (empty for none).
+        type: string
+        default: ''
+      before-build:
+        description: >-
+          Command run with bash in the working directory on every runner
+          before the build, for example `cargo xtask frontend`.
+        type: string
+        default: ''
+    secrets:
+      MINISIGN_SECRET_KEY:
+        description: Content of the minisign secret key file (`minisign -G` writes it).
+        required: true
+      MINISIGN_PASSWORD:
+        description: Its password; empty or unset for a key made with `minisign -G -W`.
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  plan:
+    name: Check the tag, versions and key
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      executables: ${{ steps.plan.outputs.executables }}
+    steps:
+      # The tag's commit, not the one that triggered the run: the version
+      # gate and the build must read the source the release is attached to.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.tag != '' && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      # The toolchain the rust-toolchain file names, or the default one.
+      - name: Install the Rust toolchain
+        working-directory: ${{ inputs.working-directory }}
+        run: rustup toolchain install
+      - name: Check the inputs
+        id: plan
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TARGETS: ${{ inputs.targets }}
+          INPUT_EXECUTABLES: ${{ inputs.executables }}
+          INPUT_PUBLIC_KEY: ${{ inputs.public-key }}
+          INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          set -f
+          fail() { echo "::error::$1"; exit 1; }
+
+          # The tag names the version the hub compares.
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            [ "$GITHUB_REF_TYPE" = tag ] || fail "a release runs for a tag: push a tag v<version>, or give the input tag"
+            tag="$GITHUB_REF_NAME"
+          fi
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          [[ "$tag" =~ $semver ]] || fail "the tag '$tag' is not v<SemVer version>, such as v1.2.0 or v1.2.0-rc.1"
+          version="${tag#v}"
+          prerelease=false
+          if [[ "$version" == *-* ]]; then prerelease=true; fi
+
+          # The public key the signature must verify with.
+          key_file="$INPUT_PUBLIC_KEY"
+          [ -f "$key_file" ] || fail "there is no public key file $key_file: commit the .pub file 'minisign -G' wrote and give its path as the input public-key"
+          mapfile -t lines < <(tr -d '\r' < "$key_file")
+          if [ "${lines[1]:-}" = PLACEHOLDER-NOT-A-KEY ]; then
+            fail "$key_file is the placeholder committed with the Eario sources, not a key: a hub built with it never updates itself, and nothing could verify this release. Commit the .pub file of the release key in its place (see docs/development/guide.md, Publishing a release), then tag again"
+          fi
+          if [ "${#lines[@]}" -ne 2 ] || [[ "${lines[0]}" != "untrusted comment: "* ]] || ! [[ "${lines[1]}" =~ ^RW[A-Za-z0-9+/]{54}$ ]]; then
+            fail "$key_file is not a minisign public key file: an untrusted comment line, then a key line of 56 base64 characters starting with RW"
+          fi
+
+          # Targets, and the runner of each.
+          matrix='[]'
+          seen=' '
+          for target in $INPUT_TARGETS; do
+            case "$target" in
+              x86_64-pc-windows-msvc) os=windows-latest ;;
+              x86_64-unknown-linux-gnu) os=ubuntu-latest ;;
+              aarch64-apple-darwin | x86_64-apple-darwin) os=macos-latest ;;
+              *) fail "unknown target '$target'; the hub knows x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu, aarch64-apple-darwin and x86_64-apple-darwin" ;;
+            esac
+            if [[ "$seen" == *" $target "* ]]; then fail "the target $target is listed twice"; fi
+            seen+="$target "
+            matrix=$(jq -c --arg target "$target" --arg os "$os" '. + [{target: $target, os: $os}]' <<<"$matrix")
+          done
+          [ "$matrix" != '[]' ] || fail "no target to build"
+
+          # Executables: one tab-separated line each, package, binary, slug, probe.
+          executables=$(jq -r '
+            if type != "array" or length == 0 then error("not a non-empty array") else .[] end
+            | if type != "object" or (.package | type) != "string" then error("an entry has no package") else . end
+            | (.binary // .package) as $binary
+            | [.package, $binary, (.slug // $binary), (.probe // "manifest")]
+            | if all(type == "string") then @tsv else error("binary, slug and probe are strings") end
+          ' <<<"$INPUT_EXECUTABLES") || fail "the input executables must be a JSON array of objects with a package, and optionally a binary, slug and probe (strings)"
+          metadata=$(cargo metadata --no-deps --format-version 1 --manifest-path "$INPUT_WORKING_DIRECTORY/Cargo.toml")
+          slugs=' '
+          while IFS=$'\t' read -r package binary slug probe; do
+            [ -n "$package" ] || continue
+            [[ "$package" =~ ^[A-Za-z0-9_-]+$ ]] || fail "'$package' is not a Cargo package name"
+            [[ "$binary" =~ ^[A-Za-z0-9_-]+$ ]] || fail "'$binary' is not a binary name"
+            [[ "$slug" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || fail "'$slug' is not a slug: lower-case letters and digits, joined by single dashes, as the dashboard's manifest gives it"
+            case "$probe" in manifest | version | none) ;; *) fail "the probe of $package is '$probe'; it is manifest, version or none" ;; esac
+            if [[ "$slugs" == *" $slug "* ]]; then fail "two executables have the slug $slug"; fi
+            slugs+="$slug "
+            found=$(jq -r --arg package "$package" '[.packages[] | select(.name == $package)] | if length == 1 then .[0].version else "" end' <<<"$metadata")
+            [ -n "$found" ] || fail "the workspace in $INPUT_WORKING_DIRECTORY has no package $package"
+            [ "$found" = "$version" ] || fail "$package has version $found, but the tag $tag says $version; set the version in Cargo.toml, then tag again"
+            has_binary=$(jq -r --arg package "$package" --arg binary "$binary" '[.packages[] | select(.name == $package) | .targets[] | select(any(.kind[]; . == "bin") and .name == $binary)] | length' <<<"$metadata")
+            [ "$has_binary" = 1 ] || fail "$package has no binary $binary"
+          done <<<"$executables"
+
+          delimiter="EOF_$(openssl rand -hex 16)"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "matrix=$matrix"
+            echo "executables<<$delimiter"
+            printf '%s\n' "$executables"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $tag (version $version, pre-release: $prerelease), signed with the key in $key_file"
+          printf '%s\n' "$executables"
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: plan
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+      # No npm or Cargo cache: these builds are signed with the release key,
+      # so nothing a CI run on another branch saved may enter them.
+      - uses: actions/setup-node@v4
+        if: inputs.node-version != ''
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Install the Rust toolchain
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TARGET: ${{ matrix.target }}
+        # The toolchain the rust-toolchain file names, or the default one.
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - name: Before the build
+        if: inputs.before-build != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          BEFORE_BUILD: ${{ inputs.before-build }}
+        run: bash -euo pipefail -c "$BEFORE_BUILD"
+      - name: Build and check the executables
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          EXECUTABLES: ${{ needs.plan.outputs.executables }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          suffix=''
+          if [[ "$TARGET" == *-windows-* ]]; then suffix=.exe; fi
+          target_dir="${CARGO_TARGET_DIR:-target}"
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          assets="$(cd "$GITHUB_WORKSPACE" && pwd)/release-assets"
+          mkdir -p "$assets"
+          while IFS=$'\t' read -r package binary slug probe; do
+            [ -n "$package" ] || continue
+            echo "::group::Build $binary of $package for $TARGET"
+            cargo build --release --locked --target "$TARGET" --package "$package" --bin "$binary" < /dev/null
+            echo "::endgroup::"
+            asset="$assets/$slug-$TARGET$suffix"
+            cp "$target_dir/$TARGET/release/$binary$suffix" "$asset"
+            if [ "$probe" = none ]; then continue; fi
+            if [ "$host" != "$TARGET" ]; then
+              echo "::notice::$slug-$TARGET$suffix is cross-compiled on $host and cannot run here: its $probe was not checked"
+              continue
+            fi
+            # What the hub reads before installing it, or before updating itself.
+            if [ "$probe" = manifest ]; then
+              manifest=$("$asset" --eario-manifest < /dev/null) || fail "$binary --eario-manifest failed"
+              echo "$binary --eario-manifest: $manifest"
+              grep -qF "\"slug\":\"$slug\"" <<<"$manifest" || fail "the manifest of $binary does not give the slug $slug; the hub would refuse the asset $slug-$TARGET$suffix"
+              grep -qF "\"version\":\"$VERSION\"" <<<"$manifest" || fail "the manifest of $binary does not give the version $VERSION; give the dashboard .version(env!(\"CARGO_PKG_VERSION\"))"
+            else
+              printed=$("$asset" --version < /dev/null) || fail "$binary --version failed"
+              [ "$printed" = "$slug $VERSION" ] || fail "$binary --version printed '$printed', not '$slug $VERSION'"
+            fi
+          done <<<"$EXECUTABLES"
+          ls -l "$assets"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.target }}
+          path: release-assets
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Sign and attach to the release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ needs.plan.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+          path: release-assets
+      - name: Check the assets and write SHA256SUMS.txt
+        env:
+          INPUT_TARGETS: ${{ inputs.targets }}
+          INPUT_PUBLIC_KEY: ${{ inputs.public-key }}
+          ATTACH_PUBLIC_KEY: ${{ inputs.attach-public-key }}
+          EXECUTABLES: ${{ needs.plan.outputs.executables }}
+        run: |
+          set -euo pipefail
+          set -f
+          fail() { echo "::error::$1"; exit 1; }
+          expected=()
+          for target in $INPUT_TARGETS; do
+            suffix=''
+            if [[ "$target" == *-windows-* ]]; then suffix=.exe; fi
+            while IFS=$'\t' read -r package _ slug _; do
+              [ -n "$package" ] || continue
+              expected+=("$slug-$target$suffix")
+            done <<<"$EXECUTABLES"
+          done
+          mapfile -t expected < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          mapfile -t found < <(find release-assets -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
+          if [ "${expected[*]}" != "${found[*]}" ]; then
+            fail "the built assets are '${found[*]}', not '${expected[*]}'"
+          fi
+
+          mkdir upload
+          cp -- "${expected[@]/#/release-assets/}" upload/
+          # Text mode: '<sha256>  <asset>', the format the hub reads.
+          (cd upload && sha256sum --text -- "${expected[@]}" > SHA256SUMS.txt)
+          cat upload/SHA256SUMS.txt
+
+          # The committed public key, with LF line ends whatever the checkout.
+          tr -d '\r' < "$INPUT_PUBLIC_KEY" > "$RUNNER_TEMP/release.pub"
+          if [ "$ATTACH_PUBLIC_KEY" = true ]; then cp "$RUNNER_TEMP/release.pub" upload/minisign.pub; fi
+      - name: Install minisign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends minisign
+          minisign -v
+      - name: Sign SHA256SUMS.txt
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::the secret MINISIGN_SECRET_KEY is empty: store the content of the minisign secret key file in it"
+            exit 1
+          fi
+          key_file="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key_file"' EXIT
+          # Readable by this user only; printf is a shell builtin, so the key
+          # never appears in a command line.
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key_file")
+          # A current minisign pre-hashes by default (the hub refuses legacy
+          # signatures; the next step checks). It reads the password from
+          # standard input, and asks none for a key without one.
+          cd upload
+          printf '%s\n' "${MINISIGN_PASSWORD:-}" | minisign -S -s "$key_file" -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig
+      - name: Remove the secret key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/minisign.key"
+      - name: Verify the signature with the committed public key
+        env:
+          INPUT_PUBLIC_KEY: ${{ inputs.public-key }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          cd upload
+          # -H: refuse a legacy (not pre-hashed) signature, as the hub does.
+          minisign -V -H -p "$RUNNER_TEMP/release.pub" -m SHA256SUMS.txt -x SHA256SUMS.txt.minisig \
+            || fail "SHA256SUMS.txt.minisig does not verify with $INPUT_PUBLIC_KEY: the secret MINISIGN_SECRET_KEY is not the secret key of that public key, or minisign made a legacy signature"
+          # Four lines, the algorithm ED (pre-hashed): what the hub accepts.
+          [ "$(wc -l < SHA256SUMS.txt.minisig)" -eq 4 ] || fail "SHA256SUMS.txt.minisig does not have four lines"
+          [[ "$(sed -n 2p SHA256SUMS.txt.minisig)" == RU* ]] || fail "SHA256SUMS.txt.minisig is not a pre-hashed signature"
+          sha256sum --check --strict SHA256SUMS.txt
+          ls -l
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          cd upload
+          files=(*)
+          if draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2> /dev/null)"; then
+            # Files are only ever added to a draft: replacing them one by one
+            # on a published release would show hubs a release whose files
+            # and signature disagree.
+            if [ "$draft" != true ]; then
+              echo "::error::the release $TAG is already published; turn it back into a draft (or delete it) before running the release again"
+              exit 1
+            fi
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber -- "${files[@]}"
+          else
+            flags=(--draft --verify-tag --generate-notes --title "$TAG")
+            if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}" -- "${files[@]}"
+          fi
+          # Published only once every file is there, so no hub sees a release
+          # without its signature.
+          if [ "$PUBLISH" = true ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
+          {
+            echo "## Release $TAG"
+            echo
+            echo '```text'
+            cat SHA256SUMS.txt
+            echo '```'
+            echo
+            if [ "$PUBLISH" = true ]; then echo "Published."; else echo "Left a draft: publish it for hubs to see it."; fi
+          } >> "$GITHUB_STEP_SUMMARY"

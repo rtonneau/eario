@@ -1,65 +1,53 @@
 name: Release
 
-# Builds the data-explorer example as a standalone executable for each
-# platform when a version tag is pushed, and attaches the files to a draft
-# GitHub release. It does not publish anything to crates.io.
+# On a version tag `v<workspace version>`, builds data-explorer, signal-lab
+# and the hub for the four targets the hub knows, signs their
+# SHA256SUMS.txt with the Eario release key and attaches everything to a
+# draft GitHub release, through the reusable release-dashboard.yml. Publish
+# the draft for hubs to see it: a hub updates itself from the latest
+# published release. It does not publish anything to crates.io.
+#
+# Needs the secrets MINISIGN_SECRET_KEY (the secret key file of the Eario
+# release key) and MINISIGN_PASSWORD (its password), and
+# crates/eario-hub/eario-release.pub to be that key's public key file: while
+# it is the placeholder, the release stops before building, so no hub release
+# is signed with a key that no hub holds. See docs/development/guide.md,
+# "Publishing a release".
 
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
-env:
-  CARGO_TERM_COLOR: always
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            binary: data-explorer
-            archive: data-explorer-linux-x86_64
-          - os: windows-latest
-            binary: data-explorer.exe
-            archive: data-explorer-windows-x86_64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install the Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Build the frontend and the executable
-        run: cargo xtask dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.archive }}
-          path: target/release/${{ matrix.binary }}
-          if-no-files-found: error
-
   release:
-    name: Draft release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Create a draft release with the executables
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          mv artifacts/data-explorer-linux-x86_64/data-explorer data-explorer-linux-x86_64
-          mv artifacts/data-explorer-windows-x86_64/data-explorer.exe data-explorer-windows-x86_64.exe
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --generate-notes \
-            data-explorer-linux-x86_64 data-explorer-windows-x86_64.exe
+    name: Release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-dashboard.yml
+    with:
+      # The examples are downloads: a hub installs from a repository whose
+      # release has one executable per target. The hub updates itself from
+      # eario-hub-<target triple>[.exe].
+      executables: >-
+        [
+          {"package": "data-explorer"},
+          {"package": "signal-lab"},
+          {"package": "eario-hub", "probe": "version"}
+        ]
+      # The key compiled into the hub, which verifies its self-update.
+      public-key: crates/eario-hub/eario-release.pub
+      attach-public-key: true
+      publish: false
+      # eario-runtime embeds the built frontend.
+      node-version: '24'
+      before-build: cargo xtask frontend
+    secrets:
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}

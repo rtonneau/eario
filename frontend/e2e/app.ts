@@ -1,4 +1,5 @@
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,22 @@ import { promisify } from 'node:util';
 import { type Page, test as base, expect } from '@playwright/test';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+/**
+ * Version every example's manifest declares: the workspace version, from
+ * `[workspace.package]` in the root `Cargo.toml`, which the examples inherit.
+ */
+export const EXAMPLE_VERSION = workspaceVersion();
+
+function workspaceVersion(): string {
+  const manifest = readFileSync(path.join(repositoryRoot, 'Cargo.toml'), 'utf8');
+  const section = manifest.split(/^\[/m).find((part) => part.startsWith('workspace.package]'));
+  const version = section?.match(/^version = "([^"]+)"\r?$/m)?.[1];
+  if (version === undefined) {
+    throw new Error('Cargo.toml has no version in [workspace.package]');
+  }
+  return version;
+}
 
 /** Directory of the example executables; `cargo xtask e2e` builds them there. */
 const binDir = process.env.EARIO_E2E_BIN_DIR ?? path.join(repositoryRoot, 'target', 'debug');
@@ -236,8 +253,9 @@ export interface RemoteHub {
   control: (change: string) => Promise<void>;
   /**
    * Sets the version the hub's registry records for `slug`, as the hub's
-   * integration tests do. Every example's manifest says 0.0.0, so a release
-   * is only newer than an installed version set back this way.
+   * integration tests do. Every example's manifest says {@link EXAMPLE_VERSION},
+   * as the releases the fake GitHub serves do, so a release is only newer than
+   * an installed version set back this way.
    */
   setInstalledVersion: (slug: string, version: string) => Promise<void>;
 }

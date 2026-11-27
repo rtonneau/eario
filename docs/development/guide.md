@@ -247,8 +247,9 @@ that install, signed releases of `data-explorer` and `signal-lab` made from
 the executables in `EARIO_E2E_BIN_DIR`, with test keys from fixed seeds. A
 test changes what it serves through its control address (a newer build, a
 build signed with another key, a refused release), never through the hub.
-Every example's manifest says version 0.0.0, so a test that updates first
-sets the installed version back in the hub directory's `registry.json`, as
+Every example's manifest says the workspace version, and so do the releases
+the fake serves, so a test that updates first sets the installed version
+back to a pre-release of it in the hub directory's `registry.json`, as
 `crates/eario-hub/tests/hub.rs` does.
 
 Wait on what the user sees (roles, labels, `role="status"` text), never on
@@ -349,6 +350,57 @@ produces `target/release/data-explorer` and `target/release/eario-hub` (`.exe`
 on Windows) with the frontend embedded, and prints their paths. To build
 your own application the same way, build the frontend once, then
 `cargo build --release` your crate.
+
+## Publishing a release
+
+`.github/workflows/release-dashboard.yml` is a reusable workflow
+(`workflow_call`) that makes a release the hub can install from and update
+(ADR 0013). For each target (`x86_64-pc-windows-msvc`,
+`x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`) it
+builds each executable given, names it `<slug>-<target triple>` (`.exe` on
+Windows), writes `SHA256SUMS.txt` with `sha256sum`, signs it with minisign,
+verifies the signature with the committed public key, and attaches the files,
+with that key as `minisign.pub`, to the release of the tag. The header of the
+workflow lists its inputs and shows a caller. Before building, it refuses a
+tag that is not `v<SemVer version>`, a package whose version is not the
+tag's, and a public key file that is missing, malformed or the placeholder.
+On the runners that can run them, it checks that each dashboard's
+`--eario-manifest` gives its slug and the tag's version, which needs
+`.version(env!("CARGO_PKG_VERSION"))` in the dashboard. The release stays a
+draft unless the caller sets `publish: true`; a hub sees only published
+releases. A hub installs from a repository whose release has one executable
+per target.
+
+Make the key pair once, on your own machine, with
+[minisign](https://jedisct1.github.io/minisign/):
+
+```text
+minisign -G -p minisign.pub -s minisign.key
+```
+
+It asks for a password; `-W` makes a key without one. rsign2
+(`cargo install rsign2`) writes the same files with
+`rsign generate -p minisign.pub -s minisign.key`. Commit `minisign.pub`.
+Never commit `minisign.key`: keep it, and a backup, outside the repository,
+and store its content and its password as the repository secrets
+`MINISIGN_SECRET_KEY` and `MINISIGN_PASSWORD`, for example with
+`gh secret set MINISIGN_SECRET_KEY < minisign.key` and
+`gh secret set MINISIGN_PASSWORD`. Installed copies pinned the public key,
+so after a lost secret key, a release signed with a new one is refused until
+each user accepts the new key (ADR 0013).
+
+Eario's own `.github/workflows/release.yml` calls it on a `v*` tag for
+data-explorer, signal-lab and the hub, which take the workspace version, so
+the tag must be `v<workspace version>`. It builds the frontend first
+(`cargo xtask frontend`), signs with the key whose public key file is
+`crates/eario-hub/eario-release.pub`, the key compiled into the hub, and
+leaves a draft to review and publish. While that file is the placeholder,
+the release stops before building. To release Eario: replace the
+placeholder with the release key's `minisign.pub` (the hub's unit test
+refuses a file that is neither), set the secrets, set the version in
+`Cargo.toml`, tag `v<version>`, and publish the draft once its files are
+attached. The examples' files are downloads: a hub cannot install from a
+release with several executables per target, but it finds its own by name.
 
 ## Publishing the crates (not done yet)
 

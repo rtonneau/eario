@@ -133,7 +133,13 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 - **The hub on Linux and macOS.** Not built or run by hand; Linux is covered by CI only.
 - **macOS.** Never built or run. Linux is covered by CI only (build, tests,
   browser tests), not by manual use.
-- **The release workflow.** It was written, not run.
+- **The release workflows.** `release.yml` and the reusable
+  `release-dashboard.yml` (four targets, signed `SHA256SUMS.txt`) were
+  checked with actionlint and shellcheck, and their shell steps were run
+  locally with throwaway keys, but they have never run on GitHub: that needs
+  the release key's secrets and a tag. The x86_64 macOS executable is
+  cross-compiled and never run. Eario's release stops before building while
+  `crates/eario-hub/eario-release.pub` is the placeholder.
 - **Opening the default browser** (`webbrowser::open`). The code path exists;
   all runs used `EARIO_NO_BROWSER`.
 - **Ctrl+C handling.** Implemented; only shutdown through the API and from

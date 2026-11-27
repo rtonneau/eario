@@ -38,6 +38,17 @@ type Failure = Box<dyn std::error::Error>;
 const HUB_EXECUTABLE: &str = env!("CARGO_BIN_EXE_eario-hub");
 const DATA_EXPLORER: &str = "data-explorer";
 const SIGNAL_LAB: &str = "signal-lab";
+/// Version of every example's manifest: the workspace version, which the
+/// examples and this crate both declare.
+const EXAMPLE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Tag of a release of [`EXAMPLE_VERSION`].
+const TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+/// Pre-releases of [`EXAMPLE_VERSION`], so older than it: what a test sets
+/// the installed version back to before an update.
+const EARLIER_1: &str = concat!(env!("CARGO_PKG_VERSION"), "-test.1");
+const EARLIER_2: &str = concat!(env!("CARGO_PKG_VERSION"), "-test.2");
+/// A version newer than every example's.
+const AHEAD: &str = "500.0.0";
 /// Longest wait for a state, a file or a process.
 const TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a dashboard waits for open connections once asked to stop
@@ -250,7 +261,7 @@ fn both_examples_start_open_and_stop_through_the_hub() -> TestResult {
     assert_eq!(info.eario_version, env!("CARGO_PKG_VERSION"));
     for dashboard in &info.dashboards {
         assert_eq!(dashboard.state, DashboardState::Stopped);
-        assert_eq!(dashboard.version.as_deref(), Some("0.0.0"));
+        assert_eq!(dashboard.version.as_deref(), Some(EXAMPLE_VERSION));
     }
     assert_eq!(hub.action(DATA_EXPLORER, "open")?.refusal(409)?.code, "hub_not_running");
 
@@ -703,8 +714,9 @@ fn answer_everything() -> Result<String, Failure> {
 
 // Installs and updates from GitHub (ADR 0013), against a fake GitHub on the
 // loopback interface. The asset is the real data-explorer executable, signed
-// with test keys. Every example declares version 0.0.0, so a test that needs
-// an older installed version sets it back in the registry; and each release
+// with test keys. Every example declares the workspace version
+// ([`EXAMPLE_VERSION`]), so a test that needs an older installed version sets
+// it back in the registry to a pre-release of it; and each release
 // appends a few bytes to the executable (which still runs), so every version
 // is a different file.
 
@@ -916,7 +928,7 @@ fn a_release_listed_by_a_catalog_installs_and_runs() -> TestResult {
     let asset = asset_of(DATA_EXPLORER, target)?;
     let executable = data_explorer_build("")?;
     // No minisign.pub: the catalog's key verifies the release.
-    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, executable.clone())], false);
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, executable.clone())], false);
     serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, key.public_key())]);
     let hub = RemoteHub::new(root.path(), &fake)?;
 
@@ -931,8 +943,8 @@ fn a_release_listed_by_a_catalog_installs_and_runs() -> TestResult {
     // A trusted key: the verified file was run for its manifest.
     let manifest = preview.manifest.clone().ok_or("the preview of a trusted key is complete")?;
     assert_eq!((manifest.slug.as_str(), manifest.name.as_str()), (DATA_EXPLORER, "Data Explorer"));
-    assert_eq!(manifest.version.as_deref(), Some("0.0.0"));
-    assert_eq!((preview.tag.as_str(), preview.asset.as_str()), ("v0.0.0", asset.as_str()));
+    assert_eq!(manifest.version.as_deref(), Some(EXAMPLE_VERSION));
+    assert_eq!((preview.tag.as_str(), preview.asset.as_str()), (TAG, asset.as_str()));
     assert_eq!(preview.size, executable.len() as u64);
     assert_eq!(preview.public_key, key.public_key());
     let key_line = key.public_key();
@@ -992,14 +1004,7 @@ fn a_repository_no_catalog_lists_is_trusted_once_its_key_is_accepted() -> TestRe
     let fake = FakeGitHub::start()?;
     let key = test_key(2)?;
     let asset = asset_of(DATA_EXPLORER, target)?;
-    publish(
-        &fake,
-        REPO,
-        "v0.0.0",
-        &key,
-        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
-        true,
-    );
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, data_explorer_build("")?)], true);
     // The default catalog does not exist: its key vouches for nothing.
     let hub = RemoteHub::new(root.path(), &fake)?;
 
@@ -1045,27 +1050,20 @@ fn a_changed_key_is_refused_until_accepted() -> TestResult {
     let fake = FakeGitHub::start()?;
     let (first, second) = (test_key(3)?, test_key(4)?);
     let asset = asset_of(DATA_EXPLORER, target)?;
-    publish(
-        &fake,
-        REPO,
-        "v0.0.0",
-        &first,
-        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
-        true,
-    );
+    publish(&fake, REPO, TAG, &first, vec![FakeAsset::new(&asset, data_explorer_build("")?)], true);
     serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, first.public_key())]);
     let hub = RemoteHub::new(root.path(), &fake)?;
     let preview = hub.run(hub.supervisor.preview(REPO))?;
     assert_eq!(preview.key_status, KeyStatus::Catalog);
     hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let installed = fs::read(
         &HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).ok_or("entry")?.path,
     )?;
 
     // A newer release signed with another key, which it carries.
     let newer = FakeAsset::new(&asset, data_explorer_build("v2")?);
-    publish(&fake, REPO, "v0.0.0", &second, vec![newer.clone()], true);
+    publish(&fake, REPO, TAG, &second, vec![newer.clone()], true);
     let changed = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
     assert_eq!(changed.key_status, KeyStatus::Changed);
     assert_eq!(changed.public_key, second.public_key());
@@ -1084,18 +1082,18 @@ fn a_changed_key_is_refused_until_accepted() -> TestResult {
     let mut files = vec![newer.clone()];
     let [signature, sums, _] = second.release_files(&files);
     files.extend([signature, sums, FakeAsset::new(verify::KEY_FILE, first.pub_file())]);
-    fake.release(REPO, "v0.0.0", &files);
+    fake.release(REPO, TAG, &files);
     let forged = hub.run(hub.supervisor.preview_update(DATA_EXPLORER));
     assert_eq!(refusal(forged), Some("release_wrong_key"));
 
     // Accepted by its SHA-256, the new key is pinned by the update.
-    publish(&fake, REPO, "v0.0.0", &second, vec![newer], true);
+    publish(&fake, REPO, TAG, &second, vec![newer], true);
     let changed = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
     assert_eq!(changed.manifest, None);
     let accepted = hub.run(hub.supervisor.accept_key(REPO, &changed.key_sha256))?;
     assert_eq!(accepted.key_status, KeyStatus::Accepted);
     let manifest = accepted.manifest.ok_or("the full preview once the key is accepted")?;
-    assert_eq!(manifest.version.as_deref(), Some("0.0.0"), "newer than 0.0.0-test.1");
+    assert_eq!(manifest.version.as_deref(), Some(EXAMPLE_VERSION), "newer than its pre-release");
     hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &changed.sha256))?;
     let entry =
         HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
@@ -1112,8 +1110,8 @@ fn a_slug_installed_from_elsewhere_is_refused() -> TestResult {
     let key = test_key(5)?;
     let asset = asset_of(DATA_EXPLORER, target)?;
     let release = vec![FakeAsset::new(&asset, data_explorer_build("")?)];
-    publish(&fake, REPO, "v0.0.0", &key, release.clone(), true);
-    publish(&fake, "elsewhere/data-explorer", "v0.0.0", &key, release, true);
+    publish(&fake, REPO, TAG, &key, release.clone(), true);
+    publish(&fake, "elsewhere/data-explorer", TAG, &key, release, true);
     let hub = RemoteHub::new(root.path(), &fake)?;
 
     // Installed locally.
@@ -1160,7 +1158,7 @@ fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
     }
     let mut files = vec![tampered];
     files.extend(key.release_files(std::slice::from_ref(&genuine)));
-    fake.release(REPO, "v0.0.0", &files);
+    fake.release(REPO, TAG, &files);
     let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("a tampered asset")?;
     assert_eq!(error.code(), "release_hash_mismatch");
     assert!(error.to_string().contains(&asset), "{error}");
@@ -1171,7 +1169,7 @@ fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
     let [_, sums, pub_file] = key.release_files(std::slice::from_ref(&genuine));
     unsigned.extend([sums, pub_file]);
     let downloads = asset_downloads(&fake, &asset);
-    fake.release(REPO, "v0.0.0", &unsigned);
+    fake.release(REPO, TAG, &unsigned);
     let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("an unsigned release")?;
     assert_eq!(error.code(), "release_missing_signature");
     assert!(error.to_string().contains(REPO), "{error}");
@@ -1184,7 +1182,7 @@ fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
     let mut changed = sums.content.clone();
     changed.extend_from_slice(format!("{}  evil.exe\n", "ab".repeat(32)).as_bytes());
     files.extend([signature, FakeAsset::new(verify::SUMS_FILE, changed), pub_file]);
-    fake.release(REPO, "v0.0.0", &files);
+    fake.release(REPO, TAG, &files);
     assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO))), Some("release_bad_signature"));
     assert_nothing_installed(root.path(), DATA_EXPLORER)?;
     Ok(())
@@ -1230,7 +1228,7 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
     // Signed and listed in the checksums, but not an executable: running it
     // fails, so a preview that ran it would fail with `hub_manifest_failed`.
     let not_executable = FakeAsset::new(&asset, "not an executable");
-    publish(&fake, REPO, "v0.0.0", &untrusted, vec![not_executable.clone()], true);
+    publish(&fake, REPO, TAG, &untrusted, vec![not_executable.clone()], true);
     let hub = RemoteHub::new(root.path(), &fake)?;
 
     // An unknown key: verified, staged, not run.
@@ -1253,10 +1251,10 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
     // A changed key on an update: the same.
     let trusted = test_key(18)?;
     install_from_github(&hub, &fake, &trusted, "build 1")?;
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let before = HubDir::at(root.path()).read_registry()?;
     let copies = bin_files(root.path(), DATA_EXPLORER)?;
-    publish(&fake, REPO, "v0.0.0", &untrusted, vec![not_executable], true);
+    publish(&fake, REPO, TAG, &untrusted, vec![not_executable], true);
     let pending = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
     assert_eq!(pending.key_status, KeyStatus::Changed);
     assert_eq!(pending.manifest, None);
@@ -1270,7 +1268,7 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
 
     // A staged file that went away is not accepted: preview it again.
     let newer = FakeAsset::new(&asset, data_explorer_build("build 2")?);
-    publish(&fake, REPO, "v0.0.0", &untrusted, vec![newer], true);
+    publish(&fake, REPO, TAG, &untrusted, vec![newer], true);
     let pending = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
     for path in staged_paths(root.path())? {
         fs::remove_file(path)?;
@@ -1296,7 +1294,7 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
     publish(
         &fake,
         REPO,
-        "v0.0.0",
+        TAG,
         &trusted,
         vec![FakeAsset::new(&asset, data_explorer_build("")?)],
         true,
@@ -1320,7 +1318,7 @@ fn a_starting_hub_keeps_the_previews_of_running_processes() -> TestResult {
     let key = test_key(19)?;
     let asset = asset_of(DATA_EXPLORER, target)?;
     let build = FakeAsset::new(&asset, data_explorer_build("")?);
-    publish(&fake, REPO, "v0.0.0", &key, vec![build], true);
+    publish(&fake, REPO, TAG, &key, vec![build], true);
 
     // Left by processes that ended (no process has id 1 or 2 here): an area
     // whose lock nobody holds, an area without a lock, a stray file.
@@ -1421,7 +1419,7 @@ fn install_from_github(
     let Some(target) = Target::CURRENT else { return Err("no target".into()) };
     let asset = asset_of(DATA_EXPLORER, target)?;
     let build = data_explorer_build(marker)?;
-    publish(fake, REPO, "v0.0.0", key, vec![FakeAsset::new(&asset, build)], true);
+    publish(fake, REPO, TAG, key, vec![FakeAsset::new(&asset, build)], true);
     serve_catalog(fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, key.public_key())]);
     let preview = hub.run(hub.supervisor.preview(REPO))?;
     hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
@@ -1438,32 +1436,32 @@ fn an_update_keeps_one_previous_version_and_a_rollback_restores_it() -> TestResu
     let hub_dir = HubDir::at(root.path());
     let asset = asset_of(DATA_EXPLORER, target)?;
     install_from_github(&hub, &fake, &key, "build 1")?;
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let first = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     assert_eq!(refusal(hub.run(hub.supervisor.rollback(DATA_EXPLORER))), Some("hub_no_previous"));
 
     // First update: the installed version becomes the previous one.
     let second_build = data_explorer_build("build 2")?;
-    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, second_build.clone())], true);
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, second_build.clone())], true);
     let preview = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
     assert_eq!(preview.key_status, KeyStatus::Pinned);
     hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &preview.sha256))?;
     let second = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     assert_eq!(fs::read(&second.path)?, second_build);
-    assert_eq!(second.manifest.version.as_deref(), Some("0.0.0"), "from the new manifest");
+    assert_eq!(second.manifest.version.as_deref(), Some(EXAMPLE_VERSION), "from the new manifest");
     let previous = second.previous.clone().ok_or("a previous version")?;
     assert_eq!((previous.size, previous.sha256.as_str()), (first.size, first.sha256.as_str()));
-    assert_eq!(previous.manifest.version.as_deref(), Some("0.0.0-test.1"));
+    assert_eq!(previous.manifest.version.as_deref(), Some(EARLIER_1));
     let first_name = first.path.file_name().and_then(|name| name.to_str()).ok_or("name")?;
     assert_eq!(previous.file_name, first_name);
     assert_eq!(bin_files(root.path(), DATA_EXPLORER)?.len(), 2);
     assert!(hub.state(DATA_EXPLORER)?.has_previous);
 
     // Second update: the first version is removed.
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.2")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_2)?;
     let second = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     let third_build = data_explorer_build("build 3")?;
-    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, third_build.clone())], true);
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, third_build.clone())], true);
     hub.run(hub.supervisor.update(DATA_EXPLORER))?;
     let third = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     assert_eq!(fs::read(&third.path)?, third_build);
@@ -1483,7 +1481,7 @@ fn an_update_keeps_one_previous_version_and_a_rollback_restores_it() -> TestResu
     let restored = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     assert_eq!(restored.path, second.path);
     assert_eq!((restored.size, restored.sha256.as_str()), (second.size, second.sha256.as_str()));
-    assert_eq!(restored.manifest.version.as_deref(), Some("0.0.0-test.2"));
+    assert_eq!(restored.manifest.version.as_deref(), Some(EARLIER_2));
     assert_eq!(restored.previous, None);
     assert_eq!(restored.pinned_key, Some(key.public_key()));
     assert!(!third.path.exists(), "the newer copy is removed");
@@ -1495,7 +1493,7 @@ fn an_update_keeps_one_previous_version_and_a_rollback_restores_it() -> TestResu
     hub.run(hub.supervisor.stop(DATA_EXPLORER))?;
 
     // A previous version whose copy was changed is not restored.
-    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, third_build)], true);
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, third_build)], true);
     hub.run(hub.supervisor.update(DATA_EXPLORER))?;
     fs::write(&second.path, b"changed")?;
     let error = hub.run(hub.supervisor.rollback(DATA_EXPLORER)).err().ok_or("changed copy")?;
@@ -1522,12 +1520,12 @@ fn an_update_is_refused_while_the_dashboard_runs() -> TestResult {
     let key = test_key(10)?;
     let hub = RemoteHub::new(root.path(), &fake)?;
     install_from_github(&hub, &fake, &key, "build 1")?;
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let asset = asset_of(DATA_EXPLORER, target)?;
     publish(
         &fake,
         REPO,
-        "v0.0.0",
+        TAG,
         &key,
         vec![FakeAsset::new(&asset, data_explorer_build("build 2")?)],
         true,
@@ -1570,22 +1568,22 @@ fn an_update_to_an_older_or_incomparable_version_is_refused() -> TestResult {
     install_from_github(&hub, &fake, &key, "build 1")?;
     let older = vec![FakeAsset::new(&asset, data_explorer_build("build 0")?)];
 
-    // Installed 0.0.1; the release, 0.0.0, is older: refused by its tag,
+    // Installed a version ahead of the release, which is older: refused by its tag,
     // before any download.
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.1")?;
-    publish(&fake, REPO, "v0.0.0", &key, older.clone(), true);
+    set_installed_version(root.path(), DATA_EXPLORER, AHEAD)?;
+    publish(&fake, REPO, TAG, &key, older.clone(), true);
     let downloads = asset_downloads(&fake, &asset);
     let error = hub.run(hub.supervisor.update(DATA_EXPLORER)).err().ok_or("a downgrade")?;
     assert_eq!(error.code(), "hub_not_newer");
-    assert!(error.to_string().contains("0.0.1"), "{error}");
+    assert!(error.to_string().contains(AHEAD), "{error}");
     assert_eq!(asset_downloads(&fake, &asset), downloads);
     // The same version is no update either.
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EXAMPLE_VERSION)?;
     assert_eq!(refusal(hub.run(hub.supervisor.update(DATA_EXPLORER))), Some("hub_not_newer"));
 
     // A newer tag on an older executable: its signed manifest decides.
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.1")?;
-    publish(&fake, REPO, "v9.0.0", &key, older.clone(), true);
+    set_installed_version(root.path(), DATA_EXPLORER, AHEAD)?;
+    publish(&fake, REPO, "v900.0.0", &key, older.clone(), true);
     let error = hub.run(hub.supervisor.update(DATA_EXPLORER)).err().ok_or("an older executable")?;
     assert_eq!(error.code(), "hub_not_newer");
     assert_eq!(asset_downloads(&fake, &asset), downloads + 1, "refused after the download");
@@ -1615,7 +1613,7 @@ fn a_check_reports_updates_and_what_could_not_be_checked() -> TestResult {
     install(root.path(), SIGNAL_LAB)?;
     assert_eq!(hub.run(hub.supervisor.last_check())?, None);
 
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let downloads = |fake: &FakeGitHub| {
         fake.requests().iter().filter(|path| path.starts_with("/assets/")).count()
     };
@@ -1625,8 +1623,8 @@ fn a_check_reports_updates_and_what_could_not_be_checked() -> TestResult {
     assert_eq!(check.dashboards.len(), 1, "only dashboards installed from GitHub: {check:?}");
     let found = &check.dashboards[0];
     assert_eq!((found.slug.as_str(), found.repo.as_str()), (DATA_EXPLORER, REPO));
-    assert_eq!(found.latest_version.as_deref(), Some("0.0.0"));
-    assert_eq!(found.available_version.as_deref(), Some("0.0.0"));
+    assert_eq!(found.latest_version.as_deref(), Some(EXAMPLE_VERSION));
+    assert_eq!(found.available_version.as_deref(), Some(EXAMPLE_VERSION));
     assert_eq!(found.error, None);
     assert!(check.checked_at > 0);
 
@@ -1636,7 +1634,7 @@ fn a_check_reports_updates_and_what_could_not_be_checked() -> TestResult {
     let listed =
         |slug: &str| info.dashboards.iter().find(|dashboard| dashboard.slug == slug).cloned();
     let explorer = listed(DATA_EXPLORER).ok_or("listed")?;
-    assert_eq!(explorer.available_version.as_deref(), Some("0.0.0"));
+    assert_eq!(explorer.available_version.as_deref(), Some(EXAMPLE_VERSION));
     assert_eq!(listed(SIGNAL_LAB).ok_or("listed")?.available_version, None);
     assert_eq!(hub.run(hub.supervisor.last_check())?, Some(check.clone()));
 
@@ -1645,7 +1643,7 @@ fn a_check_reports_updates_and_what_could_not_be_checked() -> TestResult {
     publish(
         &fake,
         REPO,
-        "v0.0.0",
+        TAG,
         &key,
         vec![FakeAsset::new(&asset, data_explorer_build("build 2")?)],
         true,
@@ -1656,7 +1654,7 @@ fn a_check_reports_updates_and_what_could_not_be_checked() -> TestResult {
     // Up to date.
     let check = hub.run(hub.supervisor.check())?;
     assert_eq!(check.dashboards[0].available_version, None);
-    assert_eq!(check.dashboards[0].latest_version.as_deref(), Some("0.0.0"));
+    assert_eq!(check.dashboards[0].latest_version.as_deref(), Some(EXAMPLE_VERSION));
 
     // Offline: the dashboard could not be checked, and the hub still lists.
     drop(fake);
@@ -1680,7 +1678,7 @@ fn the_hub_checks_for_updates_at_start_unless_turned_off() -> TestResult {
     {
         let hub = RemoteHub::new(root.path(), &fake)?;
         install_from_github(&hub, &fake, &key, "build 1")?;
-        set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+        set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
         let settings = hub.run(hub.supervisor.set_check_updates_at_start(false))?;
         assert!(!settings.check_updates_at_start);
     }
@@ -2051,7 +2049,7 @@ fn an_install_over_http_needs_the_preview_its_hash_and_an_accepted_key() -> Test
     let executable = data_explorer_build("")?;
     // No catalog lists the repository: its minisign.pub is trusted on first
     // use.
-    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, executable.clone())], true);
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, executable.clone())], true);
     let hub = remote_test_hub(root.path(), &fake)?;
     let install = |sha256: &str| hub.post(&format!("/api/sources/{REPO}/install/{sha256}"));
 
@@ -2132,7 +2130,7 @@ fn updates_checks_and_rollbacks_run_over_http() -> TestResult {
     let asset = asset_of(DATA_EXPLORER, target)?;
     let release = |key: &TestKey, marker: &str| -> Result<Vec<u8>, Failure> {
         let build = data_explorer_build(marker)?;
-        publish(&fake, REPO, "v0.0.0", key, vec![FakeAsset::new(&asset, build.clone())], true);
+        publish(&fake, REPO, TAG, key, vec![FakeAsset::new(&asset, build.clone())], true);
         Ok(build)
     };
     release(&key, "build 1")?;
@@ -2147,7 +2145,7 @@ fn updates_checks_and_rollbacks_run_over_http() -> TestResult {
     let preview: InstallPreview = ok(&hub.post(&format!("/api/sources/{REPO}/preview"))?)?;
     assert_eq!(preview.key_status, KeyStatus::Catalog);
     TestHub::info(&hub.post(&format!("/api/sources/{REPO}/install/{}", preview.sha256))?)?;
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let first = entry_of(root.path(), DATA_EXPLORER)?;
     assert_eq!(hub.action(DATA_EXPLORER, "rollback")?.refusal(409)?.code, "hub_no_previous");
     let missing = hub.post("/api/dashboards/nope/update")?;
@@ -2158,8 +2156,8 @@ fn updates_checks_and_rollbacks_run_over_http() -> TestResult {
     let info = TestHub::info(&hub.post("/api/check")?)?;
     let check = info.last_check.clone().ok_or("the check just made")?;
     assert_eq!(check.dashboards.len(), 1);
-    assert_eq!(check.dashboards[0].available_version.as_deref(), Some("0.0.0"));
-    assert_eq!(dashboard(&info)?.available_version.as_deref(), Some("0.0.0"));
+    assert_eq!(check.dashboards[0].available_version.as_deref(), Some(EXAMPLE_VERSION));
+    assert_eq!(dashboard(&info)?.available_version.as_deref(), Some(EXAMPLE_VERSION));
 
     // Previewed, then installed by its hash.
     let preview: InstallPreview = ok(&hub.action(DATA_EXPLORER, "update-preview")?)?;
@@ -2182,7 +2180,7 @@ fn updates_checks_and_rollbacks_run_over_http() -> TestResult {
     assert_eq!(refusal.code, "hub_not_newer");
 
     // Refused while it runs.
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.2")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_2)?;
     let third_build = release(&key, "build 3")?;
     assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
     hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
@@ -2317,7 +2315,7 @@ fn the_command_line_installs_updates_and_rolls_back() -> TestResult {
     publish(
         &fake,
         REPO,
-        "v0.0.0",
+        TAG,
         &key,
         vec![FakeAsset::new(&asset, data_explorer_build("build 1")?)],
         true,
@@ -2361,13 +2359,13 @@ fn the_command_line_installs_updates_and_rolls_back() -> TestResult {
     let (status, printed, errors) = hub_cli(root.path(), &api, &["check"])?;
     assert!(status.success(), "{errors}");
     assert!(printed.contains("up to date"), "{printed}");
-    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let newer = data_explorer_build("build 2")?;
-    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, newer.clone())], true);
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, newer.clone())], true);
     let (status, printed, errors) = hub_cli(root.path(), &api, &["check"])?;
     assert!(status.success(), "{errors}");
-    assert!(printed.contains("version 0.0.0 available"), "{printed}");
-    assert_eq!(hub.dashboard(DATA_EXPLORER)?.available_version.as_deref(), Some("0.0.0"));
+    assert!(printed.contains(&format!("version {EXAMPLE_VERSION} available")), "{printed}");
+    assert_eq!(hub.dashboard(DATA_EXPLORER)?.available_version.as_deref(), Some(EXAMPLE_VERSION));
 
     // Not while it runs from the hub.
     assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
@@ -2414,14 +2412,7 @@ fn the_command_line_trusts_a_new_key_only_when_told_its_sha256() -> TestResult {
     let api = fake.base_url();
     let key = test_key(16)?;
     let asset = asset_of(DATA_EXPLORER, target)?;
-    publish(
-        &fake,
-        REPO,
-        "v0.0.0",
-        &key,
-        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
-        true,
-    );
+    publish(&fake, REPO, TAG, &key, vec![FakeAsset::new(&asset, data_explorer_build("")?)], true);
     let key_sha256 = verify::PublicKey::from_base64(REPO, &key.public_key())?.sha256();
 
     // --yes does not trust a key, and the executable is not run.
@@ -2443,7 +2434,7 @@ fn the_command_line_trusts_a_new_key_only_when_told_its_sha256() -> TestResult {
     assert!(status.success(), "{errors}");
     // The key first, then the full preview, read once the key is accepted.
     let accepted = printed.find("Key accepted.").ok_or_else(|| printed.clone())?;
-    let full = printed.find("Data Explorer (`data-explorer`), version 0.0.0");
+    let full = printed.find(&format!("Data Explorer (`data-explorer`), version {EXAMPLE_VERSION}"));
     assert!(full.is_some_and(|full| full > accepted), "{printed}");
     assert!(printed.contains("Installed Data Explorer"), "{printed}");
     let entry =

@@ -11,11 +11,11 @@
 //!   `lab/data-explorer` with the key that signs its releases;
 //! - the catalog `lab/catalog`, listing `lab/signal-lab`, for a test to add;
 //! - with `<directory>`, the directory of the example executables built by
-//!   `cargo xtask e2e`: the latest release `v0.0.0` of `lab/data-explorer`
-//!   (data-explorer, signed with the catalog's key) and of `lab/signal-lab`
-//!   (signal-lab, signed with a key no catalog lists). Each release carries
-//!   its `minisign.pub`. Without it, only the catalogs are served: enough for
-//!   a hub that must not reach the real GitHub.
+//!   `cargo xtask e2e`: the latest release `v<workspace version>` of
+//!   `lab/data-explorer` (data-explorer, signed with the catalog's key) and
+//!   of `lab/signal-lab` (signal-lab, signed with a key no catalog lists).
+//!   Each release carries its `minisign.pub`. Without it, only the catalogs
+//!   are served: enough for a hub that must not reach the real GitHub.
 //!
 //! The keys come from fixed test seeds: they are never real keys.
 //!
@@ -33,9 +33,10 @@
 //! | `/data-explorer/offline` | GitHub refuses the release of data-explorer (rate limit) |
 //!
 //! A new build is the same executable with a few bytes appended (it still
-//! runs), so it is another file with the same manifest, version `0.0.0`. A
-//! test that updates sets the installed version back first, as the
-//! integration tests of this crate do.
+//! runs), so it is another file with the same manifest, whose version is the
+//! workspace version, as every example's and this crate's. A test that
+//! updates sets the installed version back first, as the integration tests
+//! of this crate do.
 
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Write};
@@ -57,8 +58,9 @@ const DATA_EXPLORER_REPO: &str = "lab/data-explorer";
 const SIGNAL_LAB_REPO: &str = "lab/signal-lab";
 /// A catalog that is not in the hub's list until a test adds it.
 const LAB_CATALOG: &str = "lab/catalog";
-/// Tag of every release served.
-const TAG: &str = "v0.0.0";
+/// Tag of every release served: `v` and the version the examples declare,
+/// the workspace version, which this crate declares too.
+const TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 /// Largest request head the control listener reads, in bytes.
 const MAX_HEAD_BYTES: usize = 16 * 1024;
 

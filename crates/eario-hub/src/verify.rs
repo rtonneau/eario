@@ -784,6 +784,46 @@ QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfN
     }
 
     #[test]
+    fn the_list_the_release_workflow_writes_and_signs_is_read() -> TestResult {
+        // What `sha256sum --text -- <assets>` printed for these four files,
+        // named by `asset_name`, as `.github/workflows/release-dashboard.yml`
+        // runs it (GNU coreutils, names in `LC_ALL=C sort` order), and its
+        // signature by `minisign -S` 0.12 with a throwaway key whose secret
+        // key was deleted after signing (session
+        // 2026-11-27__dashboard-launcher, ticket 08).
+        let sums = "\
+605c2b64fa277b8682bf44b0cc88def63b264f72885aa66c7431dae3c9514d38  signal-lab-aarch64-apple-darwin
+caa03297f5e443c638ff1dc72dabe74daf400a27d285582b647dd3e68e034368  signal-lab-x86_64-apple-darwin
+51275f0d1a161e1a1bfe2f226348d4227fe90cc9366492b13bdbb04501700a1a  signal-lab-x86_64-pc-windows-msvc.exe
+b0a2f490e5e67e7963c10e2dfe53735beb83a83a115b56b61d615e144b0ac5c1  signal-lab-x86_64-unknown-linux-gnu
+";
+        let pub_file = "\
+untrusted comment: minisign public key 276B6B4C3E53962B
+RWQrllM+TGtrJ3+q0A+JQpzZxuAwWZjhjCiZROx2paOrqntpu2dOz+y/
+";
+        let signature = "\
+untrusted comment: signature from minisign secret key
+RUQrllM+TGtrJ2Ja6qYYw/NcFnitErv07/BjNYC88mCWA7XZgsHjwvgaK1LP3dRAYDAAVpa64mw5Zbqb2ufJkKQol4nARWWYHAM=
+trusted comment: timestamp:1795791815\tfile:SHA256SUMS.txt\thashed
+CMhqOn6KzLBY2Zhg18LptvSf6ap/3fOGGHIhrkDH1uYBs/6JYIvk/jO7iVtvJaL1FFtF1PFhYfIDc2Xl4LaHDA==
+";
+        let contents = [
+            (Target::WindowsX86_64, "windows build"),
+            (Target::LinuxX86_64, "linux build"),
+            (Target::MacosAarch64, "apple silicon build"),
+            (Target::MacosX86_64, "intel mac build"),
+        ];
+        let key = PublicKey::from_pub_file(REPO, pub_file.as_bytes())?;
+        assert_eq!(key.fingerprint(), "276B6B4C3E53962B");
+        let sums = verify_sums(REPO, &key, sums.as_bytes(), Some(signature.as_bytes()))?;
+        for (target, content) in contents {
+            let asset = asset_name("signal-lab", target)?;
+            assert_eq!(sums.sha256(&asset)?, sha256_hex(content.as_bytes()), "{asset}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn malformed_checksum_lines_are_refused_with_their_number() {
         let hash = "ab".repeat(32);
         let good = format!("{hash}  good\n");

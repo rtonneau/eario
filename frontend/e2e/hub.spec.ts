@@ -1,7 +1,10 @@
 import type { Locator, Page } from '@playwright/test';
 
-import { type RemoteHub, expect, test } from './app';
+import { EXAMPLE_VERSION, type RemoteHub, expect, test } from './app';
 import { expectAccessible } from './axe';
+
+/** What the tests set the installed data-explorer back to: older than every release. */
+const EARLIER = `${EXAMPLE_VERSION}-e2e.1`;
 
 /** Longest wait for a dashboard to reach a state: its process has to start. */
 const STATE_TIMEOUT_MS = 30_000;
@@ -140,13 +143,12 @@ async function installFromCatalog(page: Page): Promise<void> {
 
 /** Sets the installed data-explorer back, changes the release, and checks. */
 async function offerUpdate(page: Page, hub: RemoteHub, change: string): Promise<void> {
-  await hub.setInstalledVersion('data-explorer', '0.0.0-e2e.1');
+  await hub.setInstalledVersion('data-explorer', EARLIER);
   await hub.control(change);
   await page.getByRole('button', { name: 'Check now' }).click();
-  await expect(card(page, 'Data Explorer').getByText('v0.0.0 available')).toBeVisible({
-    timeout: REMOTE_TIMEOUT_MS,
-  });
-  await expect(pageStatus(page)).toContainText('Data Explorer v0.0.0 is available.');
+  const available = card(page, 'Data Explorer').getByText(`v${EXAMPLE_VERSION} available`);
+  await expect(available).toBeVisible({ timeout: REMOTE_TIMEOUT_MS });
+  await expect(pageStatus(page)).toContainText(`Data Explorer v${EXAMPLE_VERSION} is available.`);
 }
 
 test.describe('hub with GitHub', () => {
@@ -166,7 +168,7 @@ test.describe('hub with GitHub', () => {
     await installFromCatalog(page);
     const explorer = card(page, 'Data Explorer');
     await expect(explorer.getByText('From GitHub: lab/data-explorer')).toBeVisible();
-    await expect(explorer.getByText('Version 0.0.0')).toBeVisible();
+    await expect(explorer.getByText(`Version ${EXAMPLE_VERSION}`)).toBeVisible();
     await expect(
       page.getByRole('list', { name: 'Dashboards of Example catalog' }).getByText('Installed'),
     ).toBeVisible();
@@ -185,13 +187,15 @@ test.describe('hub with GitHub', () => {
     await expectAccessible(page, 'update dialog, pinned key');
     await dialog(page).getByRole('button', { name: 'Update', exact: true }).click();
     await expect(dialog(page)).toHaveCount(0, { timeout: REMOTE_TIMEOUT_MS });
-    await expect(pageStatus(page)).toHaveText('Data Explorer updated to version 0.0.0.');
-    await expect(explorer.getByText('v0.0.0 available')).toHaveCount(0);
+    await expect(pageStatus(page)).toHaveText(
+      `Data Explorer updated to version ${EXAMPLE_VERSION}.`,
+    );
+    await expect(explorer.getByText(`v${EXAMPLE_VERSION} available`)).toHaveCount(0);
     await expectAccessible(page, 'hub after an update');
 
     page.once('dialog', (confirmation) => void confirmation.accept());
     await explorer.getByRole('button', { name: 'Roll back Data Explorer' }).click();
-    await expect(pageStatus(page)).toHaveText('Data Explorer rolled back to version 0.0.0-e2e.1.', {
+    await expect(pageStatus(page)).toHaveText(`Data Explorer rolled back to version ${EARLIER}.`, {
       timeout: REMOTE_TIMEOUT_MS,
     });
     await expect(explorer.getByRole('button', { name: 'Roll back Data Explorer' })).toHaveCount(0);
@@ -221,7 +225,7 @@ test.describe('hub with GitHub', () => {
     await page.keyboard.press('Escape');
     await expect(dialog(page)).toHaveCount(0);
     await expect(pageStatus(page)).toHaveText('Nothing was updated.');
-    await expect(explorer.getByText('Version 0.0.0-e2e.1')).toBeVisible();
+    await expect(explorer.getByText(`Version ${EARLIER}`)).toBeVisible();
     await expect(update).toBeFocused();
     await expectAccessible(page, 'hub after a refused key change');
 
@@ -261,9 +265,11 @@ test.describe('hub with GitHub', () => {
       timeout: REMOTE_TIMEOUT_MS,
     });
     await expect(dialog(page).getByRole('heading', { name: 'Install Signal Lab?' })).toBeVisible();
-    await expect(dialog(page).getByText('Signal Lab, version 0.0.0', { exact: true })).toBeVisible();
+    await expect(
+      dialog(page).getByText(`Signal Lab, version ${EXAMPLE_VERSION}`, { exact: true }),
+    ).toBeVisible();
     await expect(dialog(page).getByRole('status')).toHaveText(
-      'Key trusted. Signal Lab, version 0.0.0.',
+      `Key trusted. Signal Lab, version ${EXAMPLE_VERSION}.`,
     );
     // Not lost with the button it was on, and not on the one that installs.
     await expect(dialog(page).getByRole('button', { name: 'Cancel' })).toBeFocused();

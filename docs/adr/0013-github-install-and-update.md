@@ -27,7 +27,7 @@ Users should be able to install and update dashboards that live in other GitHub 
 
 - The hub can now run code that was not on the user's machine before: published under a key the user trusted. A signature proves who published, not that the code is safe.
 - The hub keeps more state: `catalogs.json`, `settings.json`, `updates.json`, `staging/`, a pinned key and a previous version per GitHub entry.
-- Releases must follow the asset convention and be signed. Publishers that no catalog lists also attach `minisign.pub`.
+- Releases must follow the asset convention and be signed. Publishers that no catalog lists also attach `minisign.pub`. The reusable workflow `.github/workflows/release-dashboard.yml` makes such a release; Eario's own `release.yml` uses it for the examples and the hub. A release with several executables per target, as Eario's, cannot be installed from (the asset is ambiguous); the hub still finds its own by name.
 - A key accepted but not installed is remembered by the running hub only; a pin is removed with its entry at uninstall, so a reinstall trusts on first use again.
 - Unauthenticated GitHub allows about 60 API requests per hour, enough for a check at start; private repositories are not supported.
 - A hub built with the placeholder `eario-release.pub` never updates itself. Releasing Eario includes committing the real public key and signing the hub's `SHA256SUMS.txt` with its secret key; a lost secret key means a hub that cannot update itself, and a new key reaches users only in a hub they install by hand.
