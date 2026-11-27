@@ -20,6 +20,7 @@ now stale; the frontend fetches those again and nothing else.
 ```mermaid
 flowchart TD
     eario["eario<br/>facade: Dashboard, widgets, prelude"]
+    hub["eario-hub<br/>hub: supervisor, API by slug"]
     mcp["eario-mcp<br/>MCP server (optional)"]
     runtime["eario-runtime<br/>App services, HTTP server, preferences, embedded frontend"]
     data["eario-data<br/>readers, Dataset, queries (Polars)"]
@@ -32,6 +33,8 @@ flowchart TD
     data --> core
     runtime --> core
     eario --> core
+    hub --> runtime
+    hub --> core
 ```
 
 | Crate | Responsibility | Main dependencies |
@@ -40,6 +43,7 @@ flowchart TD
 | `eario-data` | `TableReader` interface and its CSV, TSV, XLSX implementations; `Dataset`; filtering, paging, chart preparation, statistics; `Computation`, `ComputeContext` and the registry; the `polars` re-export. | polars, calamine |
 | `eario-runtime` | `App` (the application services, evaluation and cache of derived datasets), the Axum server and its security layer, user preferences, the embedded frontend. | axum, tokio, rust-embed |
 | `eario-mcp` | MCP tools over `App`, served on `/mcp`. | rmcp |
+| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
 | `eario` | What a dashboard author imports: `Dashboard`, `Page`, `State<T>`, widget constructors, `run()`, and `eario::polars`. | the crates above |
 
 Crates named in the initial plan but not created, because nothing needs them
@@ -269,6 +273,85 @@ extension receive `index.html`.
 When the `mcp` feature is enabled and the application opts in, `/mcp` serves
 the MCP Streamable HTTP transport behind the same checks (ADR 0009).
 
+## Launch contract and the hub
+
+Every executable built with `Dashboard::run()` also understands a few
+arguments that start with `--eario-` (ADR 0011), without code from its author.
+With none of them it behaves as before: standalone, opens the browser.
+
+| Argument | Effect |
+| --- | --- |
+| `--eario-manifest` | Prints the `Manifest` (name, slug, version, Eario and launch protocol versions, description) as JSON and exits. |
+| `--eario-install [--yes]` | Copies the executable into `<hub dir>/bin/<slug>/` and records it in `registry.json` with its size and SHA-256, after a confirmation in the terminal that `--yes` skips. Refused while that dashboard runs. |
+| `--eario-uninstall [--yes]` | Removes that copy and its entry. |
+| `--eario-child <run-file>` | Child mode, used by the hub: no browser, no signal handler, no console window, logs to `logs/<slug>.log`. Once listening it writes the `RunFile` (process id, address, token), and removes it on stop. |
+
+The hub directory is the one named by `EARIO_HUB_DIR`, otherwise `hub` in
+Eario's configuration directory (`directories::ProjectDirs`: on Windows
+`%APPDATA%\eario\config\hub`, on Linux `~/.config/eario/hub`).
+
+```text
+hub/
+├── registry.json     installed dashboards: slug, path, size, SHA-256, manifest
+├── hub.json          address and token of the running hub (one hub per user)
+├── bin/<slug>/       the hub's copy of each installed executable
+├── run/<slug>.json   one per running dashboard, written by the dashboard
+└── logs/<slug>.log   output of each dashboard
+```
+
+`eario-hub` is a separate executable, a terminal process that prints its
+address and opens the browser. It serves the same generic frontend, which
+shows the hub view because `GET /api/app` answers `"kind": "hub"`. A
+`Supervisor` holds the services; the HTTP routes are thin adapters over it.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant H as Hub (frontend and API)
+    participant S as Supervisor
+    participant C as Dashboard (child)
+
+    U->>C: dashboard.exe --eario-install
+    C->>S: copy to bin/slug, write registry.json
+    U->>H: opens the hub
+    H->>S: GET /api/app
+    S-->>H: HubInfo (installed dashboards, state of each)
+    U->>H: Start
+    H->>S: POST /api/dashboards/slug/start
+    S->>S: check size and SHA-256 of bin/slug
+    S->>C: spawn with --eario-child run/slug.json
+    C->>C: listen, write the run file
+    S-->>H: HubInfo (running)
+    U->>H: Open
+    H->>S: POST /api/dashboards/slug/open
+    S-->>H: address and token of the child
+    H->>C: new browser tab on the dashboard
+```
+
+A dashboard is running when `GET /api/app` at the address of its run file
+answers with the token of that file; the process id is not consulted. Quitting
+the hub leaves dashboards running. A new hub keeps the run files that answer
+and deletes the others.
+
+Hub routes, under `/api`, behind the same Host and Origin checks and session
+token as a dashboard. The only handle they accept is the slug of an installed
+dashboard: no route takes a path, a command or arguments.
+
+| Method and path | Answer |
+| --- | --- |
+| `GET /api/app` | `AppResponse` with `"kind": "hub"`: `HubInfo`, the installed dashboards with their state (starting, running, stopped, failed with log lines) |
+| `POST /api/dashboards/{slug}/start` | `HubInfo` |
+| `POST /api/dashboards/{slug}/stop` | `HubInfo` |
+| `POST /api/dashboards/{slug}/open` | `HubOpen`: the address with its token, to open in a new tab |
+| `POST /api/dashboards/{slug}/uninstall` | `HubInfo`; refused while it runs |
+| `POST /api/stop-all` | `HubInfo` |
+| `GET /api/alive` | 204; lets a second hub find the first |
+| `POST /api/shutdown` | 204; quits the hub only |
+
+Installing is not an API route: it is the dashboard's own `--eario-install`.
+There is no tray yet (ADR 0011, amendment). The security consequences are in
+[security.md](security.md).
+
 ## Frontend
 
 `frontend/` is a Svelte 5 and TypeScript application built by Vite into
@@ -289,7 +372,9 @@ frontend/src
     └── components/             one component per kind, plus Header, Notifications, ...
 ```
 
-A component receives its `ComponentSpec`, calls `componentData(id)` and
+`App.svelte` shows `HubView.svelte` instead of the pages when `/api/app`
+reports a hub; it renders `HubInfo` and calls the hub routes through
+`api.ts`. A dashboard component receives its `ComponentSpec`, calls `componentData(id)` and
 renders what comes back. The registry is typed by `ComponentKind['type']`, so
 a kind without a renderer is a compile error.
 

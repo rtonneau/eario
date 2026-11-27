@@ -26,7 +26,8 @@ Commands:
   test         Run the Rust and frontend tests
   check        Run the CI checks: format, lints, tests, docs, type check
                (not the browser tests, cargo deny or the minimum Rust version)
-  dist         Build the frontend, then the data-explorer example in release mode
+  dist         Build the frontend, then the data-explorer example and the hub in
+               release mode, and print the paths of the executables
   e2e          Build the frontend, the examples and the hub, then run the browser tests
                (Playwright, Chromium). --prebuilt-frontend: keep the frontend
                already in crates/eario-runtime/frontend-dist
@@ -189,8 +190,18 @@ fn e2e(prebuilt_frontend: bool) -> TaskResult {
 
 fn dist() -> TaskResult {
     frontend()?;
-    cargo(&["build", "--release", "--package", "data-explorer"])?;
+    cargo(&["build", "--release", "--package", "data-explorer", "--package", "eario-hub"])?;
+    // Same location rule as in `e2e`: the target directory can be redirected.
+    let target = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || repository_root().join("target"),
+        |directory| repository_root().join(directory),
+    );
+    let release = target.join("release");
     let extension = if cfg!(windows) { ".exe" } else { "" };
-    println!("Standalone executable: target/release/data-explorer{extension}");
+    println!(
+        "Standalone executable: {}",
+        release.join(format!("data-explorer{extension}")).display()
+    );
+    println!("Hub executable: {}", release.join(format!("eario-hub{extension}")).display());
     Ok(())
 }
