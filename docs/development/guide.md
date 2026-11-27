@@ -5,7 +5,10 @@
 - A stable Rust toolchain installed with [rustup](https://rustup.rs). The
   repository's `rust-toolchain.toml` selects `stable` with rustfmt and clippy.
 - [Node.js](https://nodejs.org) with npm, to build the frontend. The project
-  is developed with Node.js 25.
+  is developed with Node.js 25; CI uses Node.js 24. The frontend tests
+  (Vitest) need Node.js 22.19 or later (undici 8.13.1). On a machine with
+  an older Node.js, run the commands through a newer one without
+  installing it: `npx -y -p node@24 -- cargo xtask check`.
 
 No other tool is needed. The commands below work the same on Windows and
 Linux and do not require a POSIX shell.
@@ -59,8 +62,8 @@ backtraces, and your own crates keep full debug information.
 | `cargo xtask large-csv` | Writes `fixtures/generated/large.csv`, one million rows, not tracked by git. |
 | `cargo xtask test` | Runs Rust and frontend tests. |
 | `cargo xtask check` | Runs every CI check except the browser tests, `cargo deny` and the minimum-version build. |
-| `cargo xtask dist` | Builds the frontend, then `data-explorer` in release mode. |
-| `cargo xtask e2e` | Builds the frontend and the examples, then runs the browser tests in Chromium. |
+| `cargo xtask dist` | Builds the frontend, then `data-explorer` and `eario-hub` in release mode, and prints the path of each executable. |
+| `cargo xtask e2e` | Builds the frontend, the examples and the hub, then runs the browser tests in Chromium. |
 | `cargo xtask bench` | Runs the benchmarks and records the results in `docs/benchmarks/<date>.md`. |
 
 Environment variables read by an Eario application:
@@ -71,6 +74,7 @@ Environment variables read by an Eario application:
 | `EARIO_NO_BROWSER` | When set to anything but `0`, do not open a browser. |
 | `EARIO_LOG` | Log filter, for example `debug` or `eario_runtime=debug`. Default `warn`. |
 | `EARIO_DEV_ORIGIN` | Extra allowed origin. Debug builds only. |
+| `EARIO_HUB_DIR` | Hub directory, for `--eario-install`, `--eario-uninstall`, `--eario-child` and `eario-hub`. Default: `hub` in Eario's configuration directory (`%APPDATA%\eario\config\hub` on Windows, `~/.config/eario/hub` on Linux). Use a temporary one when trying the hub, so your own installation stays untouched. |
 
 ## Working on the frontend
 
@@ -208,7 +212,8 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
 | Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
-| Browser tests | `frontend/e2e/*.spec.ts` | The real examples in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, and inputs that recompute a derived dataset in Rust. |
+| Hub tests | `crates/eario-hub/tests/hub.rs`, `examples/*/tests/launch.rs`, `crates/eario-runtime/src/hub_dir.rs` | The launch contract and the hub with the real example executables in a temporary hub directory: install, start, open, stop, re-attach, changed executable, slug-only routes. |
+| Browser tests | `frontend/e2e/*.spec.ts` | The real examples and the real hub in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, inputs that recompute a derived dataset in Rust, and the hub view (list, start, open, stop, stop all, uninstall). |
 
 ### Browser tests
 
@@ -216,14 +221,22 @@ Do not edit the generated files. Change the Rust type and regenerate.
 cargo xtask e2e
 ```
 
-builds the frontend, then `data-explorer` and `signal-lab` in debug mode,
-installs Playwright's Chromium if it is missing, and runs the tests in
-`frontend/e2e` (`npm run e2e`). Each test starts its own example process with
+builds the frontend, then `data-explorer`, `signal-lab` and `eario-hub` in
+debug mode, installs Playwright's Chromium if it is missing, and runs the
+tests in `frontend/e2e` (`npm run e2e`). Each test starts its own example process with
 `EARIO_NO_BROWSER=1` on a port chosen by the system. It reads the address
 (with the session token) that the process prints, so the tests go through the
 same host, origin and token checks as a user. `--prebuilt-frontend` keeps the
 frontend already in `crates/eario-runtime/frontend-dist`; CI uses it.
 `EARIO_E2E_BIN_DIR` points the tests at other executables.
+
+The hub tests never touch your hub directory. `cargo xtask e2e` empties and
+recreates `<target>/e2e-hub` and passes it as `EARIO_E2E_HUB_ROOT`; each hub
+test makes its own directory in it, sets `EARIO_HUB_DIR` to it for the hub
+and for the `--eario-install --yes` runs of the examples, and removes it
+afterwards. If a run was interrupted and a hub or dashboard process still
+holds the directory, the next `cargo xtask e2e` fails with a message asking
+you to stop it.
 
 Wait on what the user sees (roles, labels, `role="status"` text), never on
 a fixed delay. `cargo xtask check` does not run these tests, because they
@@ -319,7 +332,8 @@ Close other heavy programs while it runs.
 cargo xtask dist
 ```
 
-produces `target/release/data-explorer` with the frontend embedded. To build
+produces `target/release/data-explorer` and `target/release/eario-hub` (`.exe`
+on Windows) with the frontend embedded, and prints their paths. To build
 your own application the same way, build the frontend once, then
 `cargo build --release` your crate.
 

@@ -3,8 +3,10 @@
 // from the Rust contract types.
 
 import type { ApiError } from './generated/ApiError';
-import type { AppInfo } from './generated/AppInfo';
+import type { AppResponse } from './generated/AppResponse';
 import type { ComponentData } from './generated/ComponentData';
+import type { HubInfo } from './generated/HubInfo';
+import type { HubOpen } from './generated/HubOpen';
 import type { Preferences } from './generated/Preferences';
 import type { StateUpdate } from './generated/StateUpdate';
 import type { JsonValue } from './generated/serde_json/JsonValue';
@@ -101,7 +103,7 @@ async function request<T>(method: string, path: string, body?: BodyInit, json = 
 const segment = encodeURIComponent;
 
 export const api = {
-  app: () => request<AppInfo>('GET', '/app'),
+  app: () => request<AppResponse>('GET', '/app'),
 
   setState: (key: string, value: JsonValue) =>
     request<StateUpdate>('PUT', `/state/${segment(key)}`, JSON.stringify(value), true),
@@ -128,6 +130,18 @@ export const api = {
     request<Preferences>('PUT', '/preferences', JSON.stringify(preferences), true),
 
   shutdown: () => request<void>('POST', '/shutdown'),
+
+  // The hub's routes. The slug is the only parameter any of them takes.
+  hubStart: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/start`),
+
+  hubStop: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/stop`),
+
+  hubOpen: (slug: string) => request<HubOpen>('POST', `/dashboards/${segment(slug)}/open`),
+
+  hubUninstall: (slug: string) =>
+    request<HubInfo>('POST', `/dashboards/${segment(slug)}/uninstall`),
+
+  hubStopAll: () => request<HubInfo>('POST', '/stop-all'),
 };
 
 /** Message to show for any thrown value. */

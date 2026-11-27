@@ -720,6 +720,8 @@ name = "data-explorer"
 version = "0.0.0"
 dependencies = [
  "eario",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -816,6 +818,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -840,6 +843,23 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "eario-hub"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "eario-core",
+ "eario-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "webbrowser",
 ]
 
 [[package]]
@@ -872,6 +892,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -3392,6 +3413,7 @@ version = "0.0.0"
 dependencies = [
  "eario",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

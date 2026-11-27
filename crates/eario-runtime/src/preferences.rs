@@ -32,21 +32,7 @@ struct StoredPreferences {
 /// platform. Returns `None` when the platform reports no home directory.
 pub fn default_path(app_name: &str) -> Option<PathBuf> {
     let directories = ProjectDirs::from("", "", "eario")?;
-    Some(directories.config_dir().join(slug(app_name)).join("preferences.json"))
-}
-
-/// Reduces an application name to lower-case letters, digits and dashes.
-fn slug(name: &str) -> String {
-    let mut slug = String::with_capacity(name.len());
-    for character in name.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() { "app".to_owned() } else { slug.to_owned() }
+    Some(directories.config_dir().join(eario_core::slug(app_name)).join("preferences.json"))
 }
 
 /// Holds the current preferences and writes them through to disk.
@@ -122,13 +108,6 @@ mod tests {
     use eario_core::Theme;
 
     use super::*;
-
-    #[test]
-    fn slug_keeps_letters_and_digits_and_collapses_the_rest() {
-        assert_eq!(slug("Data Explorer"), "data-explorer");
-        assert_eq!(slug("  RBS / PIXE (v2) "), "rbs-pixe-v2");
-        assert_eq!(slug("../.."), "app");
-    }
 
     #[test]
     fn preferences_survive_a_restart() -> Result<(), Box<dyn std::error::Error>> {

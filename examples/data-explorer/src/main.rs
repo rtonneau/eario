@@ -18,6 +18,7 @@ fn dashboard() -> (Dashboard, DatasetId) {
     let rows = filtered(&data, &filter);
 
     let dashboard = Dashboard::new("Data Explorer")
+        .version(env!("CARGO_PKG_VERSION"))
         .page("Explore", |page| {
             page.row([file_import(&data).span(4), dataset_info(&data)])
                 .row([

@@ -8,6 +8,7 @@ mod fixtures;
 
 use std::env;
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -25,8 +26,9 @@ Commands:
   test         Run the Rust and frontend tests
   check        Run the CI checks: format, lints, tests, docs, type check
                (not the browser tests, cargo deny or the minimum Rust version)
-  dist         Build the frontend, then the data-explorer example in release mode
-  e2e          Build the frontend and the examples, then run the browser tests
+  dist         Build the frontend, then the data-explorer example and the hub in
+               release mode, and print the paths of the executables
+  e2e          Build the frontend, the examples and the hub, then run the browser tests
                (Playwright, Chromium). --prebuilt-frontend: keep the frontend
                already in crates/eario-runtime/frontend-dist
   bench        Run the benchmarks and write docs/benchmarks/<date>.md with the
@@ -137,7 +139,8 @@ fn check() -> TaskResult {
     npm(&["run", "test"])
 }
 
-/// Builds the examples the browser tests start, installs Chromium for
+/// Builds the examples and the hub the browser tests start, prepares an empty
+/// directory for their temporary hub directories, installs Chromium for
 /// Playwright if it is missing, and runs the tests in `frontend/e2e`.
 fn e2e(prebuilt_frontend: bool) -> TaskResult {
     if prebuilt_frontend {
@@ -148,7 +151,15 @@ fn e2e(prebuilt_frontend: bool) -> TaskResult {
     } else {
         frontend()?;
     }
-    cargo(&["build", "--package", "data-explorer", "--package", "signal-lab"])?;
+    cargo(&[
+        "build",
+        "--package",
+        "data-explorer",
+        "--package",
+        "signal-lab",
+        "--package",
+        "eario-hub",
+    ])?;
     npm(&["exec", "--", "playwright", "install", "chromium"])?;
     // Executables land in <target>/debug. A relative CARGO_TARGET_DIR is
     // relative to the repository root, where cargo ran; `join` keeps an
@@ -158,18 +169,39 @@ fn e2e(prebuilt_frontend: bool) -> TaskResult {
         |directory| repository_root().join(directory),
     );
     let bin_dir = target.join("debug");
+    // Each hub test makes its own hub directory in here, installs the examples
+    // into it and removes it again. Starting from an empty directory also
+    // clears what an interrupted run left behind.
+    let hub_root = target.join("e2e-hub");
+    if hub_root.exists() {
+        fs::remove_dir_all(&hub_root).map_err(|error| {
+            format!("could not clear {}: {error}. Stop any hub it holds.", hub_root.display())
+        })?;
+    }
+    fs::create_dir_all(&hub_root)
+        .map_err(|error| format!("could not create {}: {error}", hub_root.display()))?;
     run_with_env(
         NPM,
         &["run", "e2e"],
         &repository_root().join("frontend"),
-        &[("EARIO_E2E_BIN_DIR", &bin_dir)],
+        &[("EARIO_E2E_BIN_DIR", &bin_dir), ("EARIO_E2E_HUB_ROOT", &hub_root)],
     )
 }
 
 fn dist() -> TaskResult {
     frontend()?;
-    cargo(&["build", "--release", "--package", "data-explorer"])?;
+    cargo(&["build", "--release", "--package", "data-explorer", "--package", "eario-hub"])?;
+    // Same location rule as in `e2e`: the target directory can be redirected.
+    let target = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || repository_root().join("target"),
+        |directory| repository_root().join(directory),
+    );
+    let release = target.join("release");
     let extension = if cfg!(windows) { ".exe" } else { "" };
-    println!("Standalone executable: target/release/data-explorer{extension}");
+    println!(
+        "Standalone executable: {}",
+        release.join(format!("data-explorer{extension}")).display()
+    );
+    println!("Hub executable: {}", release.join(format!("eario-hub{extension}")).display());
     Ok(())
 }

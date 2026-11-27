@@ -1,0 +1,292 @@
+{
+  "session_id": "2026-11-26__standalone-and-hub",
+  "feature_name": "standalone-and-hub",
+  "scratch_dir": ".scratch/tests/2026-11-26__standalone-and-hub",
+  "created_at": "2026-11-26T21:32:08.215Z",
+  "template_version": 2,
+  "history": [
+    {
+      "at": "2026-11-26T21:32:08.215Z",
+      "event": "session_started",
+      "phase": "grill",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T21:53:47.548Z",
+      "event": "auto_started",
+      "phase": "grill",
+      "detail": {
+        "target": "finish",
+        "steps": "write:grill → plan → write:plan → ship → finish"
+      }
+    },
+    {
+      "at": "2026-11-26T21:54:21.618Z",
+      "event": "grill_written",
+      "phase": "plan-not-started",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T21:54:21.824Z",
+      "event": "plan_started",
+      "phase": "plan",
+      "files": [
+        "02-plan/plan.md"
+      ]
+    },
+    {
+      "at": "2026-11-26T21:57:12.706Z",
+      "event": "branch_created",
+      "phase": "plan",
+      "detail": {
+        "branch": "feat/standalone-and-hub",
+        "base": "main"
+      }
+    },
+    {
+      "at": "2026-11-26T21:57:12.734Z",
+      "event": "plan_written",
+      "phase": "ship",
+      "files": [
+        "02-plan/plan.md",
+        "02-plan/tickets/01-contract-and-hub-dir.md",
+        "02-plan/tickets/02-launch-contract.md",
+        "02-plan/tickets/03-server-route-sets.md",
+        "02-plan/tickets/04-hub-crate.md",
+        "02-plan/tickets/05-hub-view.md",
+        "02-plan/tickets/06-windows-tray.md",
+        "02-plan/tickets/07-docs-and-dist.md"
+      ],
+      "detail": {
+        "tickets": 7
+      }
+    },
+    {
+      "at": "2026-11-26T21:57:20.230Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/01-contract-and-hub-dir.md",
+        "03-implement/01-contract-and-hub-dir/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-hub-dir"
+      }
+    },
+    {
+      "at": "2026-11-26T22:06:33.732Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/01-contract-and-hub-dir/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-hub-dir",
+        "commit": "d1f35fb"
+      }
+    },
+    {
+      "at": "2026-11-26T22:06:41.841Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-launch-contract.md",
+        "03-implement/02-launch-contract/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-launch-contract"
+      }
+    },
+    {
+      "at": "2026-11-26T22:51:16.717Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-launch-contract/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-launch-contract",
+        "commit": "dcda85c"
+      }
+    },
+    {
+      "at": "2026-11-26T22:51:27.846Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/03-server-route-sets.md",
+        "03-implement/03-server-route-sets/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-server-route-sets"
+      }
+    },
+    {
+      "at": "2026-11-26T23:06:28.240Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-server-route-sets/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-server-route-sets",
+        "commit": "8703711"
+      }
+    },
+    {
+      "at": "2026-11-26T23:06:38.952Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-hub-crate.md",
+        "03-implement/04-hub-crate/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-hub-crate"
+      }
+    },
+    {
+      "at": "2026-11-27T00:30:07.301Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-hub-crate/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-hub-crate",
+        "commit": "53fa14f"
+      }
+    },
+    {
+      "at": "2026-11-27T00:30:18.431Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/05-hub-view.md",
+        "03-implement/05-hub-view/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-view"
+      }
+    },
+    {
+      "at": "2026-11-27T00:52:19.529Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/05-hub-view/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-view",
+        "commit": "e6576cd"
+      }
+    },
+    {
+      "at": "2026-11-27T00:52:31.269Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-windows-tray.md",
+        "03-implement/06-windows-tray/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-windows-tray"
+      }
+    },
+    {
+      "at": "2026-11-27T06:33:21.290Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/06-windows-tray/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-windows-tray",
+        "commit": "36578e5"
+      }
+    },
+    {
+      "at": "2026-11-27T06:33:38.628Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/07-docs-and-dist.md",
+        "03-implement/07-docs-and-dist/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-docs-and-dist"
+      }
+    },
+    {
+      "at": "2026-11-27T06:50:18.206Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/07-docs-and-dist/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-docs-and-dist",
+        "commit": "4b6ec26"
+      }
+    },
+    {
+      "at": "2026-11-27T06:50:51.412Z",
+      "event": "changelog_written",
+      "phase": "finish-pending",
+      "detail": {
+        "bump": "minor"
+      }
+    },
+    {
+      "at": "2026-11-27T06:50:58.681Z",
+      "event": "pr_opened",
+      "phase": "finish-pending",
+      "detail": {
+        "url": "https://github.com/rtonneau/eario/pull/3"
+      }
+    },
+    {
+      "at": "2026-11-27T06:50:52.255Z",
+      "event": "session_finished",
+      "phase": "finished",
+      "files": [
+        "INDEX.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T06:51:02.751Z",
+      "event": "scratch_cleaned",
+      "phase": "finished",
+      "detail": {
+        "policy": "build-artifacts",
+        "removed": [
+          ".scratch/tests/2026-11-26__standalone-and-hub/target-android/debug/build",
+          ".scratch/tests/2026-11-26__standalone-and-hub/target-android/debug/incremental/build_script_build-2vfyxdd8abrck",
+          ".scratch/tests/2026-11-26__standalone-and-hub/target-android/x86_64-linux-android/debug/build"
+        ],
+        "freedBytes": 701977322
+      }
+    }
+  ],
+  "current_phase": "finished",
+  "git": {
+    "branch": "feat/standalone-and-hub",
+    "base_branch": "main",
+    "branch_created_at": "2026-11-26T21:57:12.706Z",
+    "pr_url": "https://github.com/rtonneau/eario/pull/3"
+  },
+  "ship_mode": "delegate",
+  "changelog": {
+    "bump": "minor",
+    "floor": "minor",
+    "reason": null,
+    "bullets": 6,
+    "path": ".work/changelog/2026-11-26__standalone-and-hub.md",
+    "written_at": "2026-11-27T06:50:51.403Z"
+  },
+  "finished_at": "2026-11-27T06:50:52.255Z"
+}

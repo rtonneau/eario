@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::id::{ComponentId, DatasetId, StateKey};
+use crate::launch::HubInfo;
 use crate::spec::{ChartMark, DashboardSpec};
 
 /// The application state: one JSON value per state entry.
@@ -35,6 +36,20 @@ pub struct AppInfo {
     pub revision: u64,
     /// Stored user preferences.
     pub preferences: Preferences,
+}
+
+/// The answer of `GET /api/app`: a dashboard's description, or a hub's.
+///
+/// The `kind` field tells the frontend which interface to show. A dashboard's
+/// answer is its [`AppInfo`] with that one field added.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AppResponse {
+    /// A dashboard executable serving its own dashboard.
+    Dashboard(AppInfo),
+    /// A hub listing the dashboards it manages.
+    Hub(HubInfo),
 }
 
 /// Result of a change: the new state and the components it made stale.
@@ -295,6 +310,33 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&select)?,
             serde_json::json!({ "type": "select", "options": ["Si"], "truncated": true })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn app_response_is_tagged_by_kind_and_keeps_the_info_fields() -> Result<(), serde_json::Error> {
+        let info = AppInfo {
+            eario_version: "0.2.0".to_owned(),
+            spec: DashboardSpec {
+                spec_version: crate::spec::SPEC_VERSION,
+                title: "T".to_owned(),
+                datasets: Vec::new(),
+                pages: Vec::new(),
+            },
+            state: StateMap::new(),
+            revision: 3,
+            preferences: Preferences::default(),
+        };
+        let mut expected = serde_json::to_value(&info)?;
+        expected["kind"] = serde_json::json!("dashboard");
+        assert_eq!(serde_json::to_value(AppResponse::Dashboard(info.clone()))?, expected);
+        assert_eq!(serde_json::from_value::<AppResponse>(expected)?, AppResponse::Dashboard(info));
+
+        let hub = HubInfo { eario_version: "0.2.0".to_owned(), dashboards: Vec::new() };
+        assert_eq!(
+            serde_json::to_value(AppResponse::Hub(hub))?,
+            serde_json::json!({ "kind": "hub", "eario_version": "0.2.0", "dashboards": [] })
         );
         Ok(())
     }

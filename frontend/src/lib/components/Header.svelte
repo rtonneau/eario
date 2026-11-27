@@ -9,11 +9,18 @@
     pages,
     currentPageId,
     onSelectPage,
+    themeChoice = true,
+    quitLabel = 'Quit',
+    quitQuestion = 'Stop the application? The data loaded in this session will be closed.',
   }: {
     title: string;
     pages: PageSpec[];
     currentPageId: string | null;
     onSelectPage: (id: string) => void;
+    /** False where the backend keeps no preferences, as in the hub. */
+    themeChoice?: boolean;
+    quitLabel?: string;
+    quitQuestion?: string;
   } = $props();
 
   const themes: { value: Theme; label: string }[] = [
@@ -23,7 +30,7 @@
   ];
 
   function quit() {
-    if (window.confirm('Stop the application? The data loaded in this session will be closed.')) {
+    if (window.confirm(quitQuestion)) {
       void session.quit();
     }
   }
@@ -50,17 +57,19 @@
   {/if}
 
   <div class="actions">
-    <label class="visually-hidden" for="theme">Theme</label>
-    <select
-      id="theme"
-      value={session.theme}
-      onchange={(event) => void session.setTheme(event.currentTarget.value as Theme)}
-    >
-      {#each themes as theme (theme.value)}
-        <option value={theme.value}>{theme.label}</option>
-      {/each}
-    </select>
-    <button onclick={quit}>Quit</button>
+    {#if themeChoice}
+      <label class="visually-hidden" for="theme">Theme</label>
+      <select
+        id="theme"
+        value={session.theme}
+        onchange={(event) => void session.setTheme(event.currentTarget.value as Theme)}
+      >
+        {#each themes as theme (theme.value)}
+          <option value={theme.value}>{theme.label}</option>
+        {/each}
+      </select>
+    {/if}
+    <button onclick={quit}>{quitLabel}</button>
   </div>
 </header>
 

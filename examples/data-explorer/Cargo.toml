@@ -9,3 +9,7 @@ publish = false
 
 [dependencies]
 eario = { workspace = true, features = ["mcp"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

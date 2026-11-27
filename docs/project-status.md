@@ -1,7 +1,7 @@
 # Project status
 
-Last updated: 26 November 2026, at the end of milestone M2 (trust and continuous verification).
-Version: 0.1.0, unreleased. Not published on crates.io. The source is public
+Last updated: 27 November 2026, at the end of milestone M3 (standalone and hub), except the tray, which was deferred.
+Version: 0.2.0 (tagged), M3 work unreleased. Not published on crates.io. The source is public
 at https://github.com/rtonneau/eario.
 
 This document, with [architecture/overview.md](architecture/overview.md) and
@@ -43,9 +43,48 @@ Verified by automated tests unless noted.
 | Accessibility check (axe-core, WCAG 2.1 A and AA) of every state the browser tests visit, in both themes; zero violations | Works |
 | Dependency policy with `cargo deny`: licence allow-list, RustSec advisories, crates.io only | Works; CI job |
 | Minimum supported Rust version 1.95, built and tested in CI | Works; tested locally with 1.95 |
+| Launch contract in every dashboard executable: `--eario-manifest` (JSON manifest), `--eario-install` and `--eario-uninstall` (with confirmation, or `--yes`), `--eario-child <run-file>` (no browser, no signal handler, log file, run file); no argument still runs standalone | Works; real example executables run in each mode by the tests |
+| `Dashboard::version`, declared in the manifest | Works |
+| Hub directory (`EARIO_HUB_DIR`, otherwise `hub` in Eario's configuration directory): registry with size and SHA-256 of the installed copy, run files, logs; install copies the executable into `bin/<slug>/` | Works; unit tests, and tests that run the example executables |
+| Liveness of a dashboard decided by its token: `GET /api/app` answers with the token of its run file | Works |
+| `eario-hub` executable: lists installed dashboards, starts, opens, stops, stops all, uninstalls; one hub per user (`hub.json`); quitting the hub leaves dashboards running and the next hub re-attaches to those that answer, removing stale run files | Works; `eario-hub` integration tests with real executables, browser tests |
+| Hub API by slug only (no route takes a path or arguments), behind the same Host, Origin and token checks as a dashboard; `GET /api/alive` for another hub | Works; HTTP tests |
+| Hub view in the generic frontend, chosen by what `/api/app` reports: states starting, running, stopped, failed, last log lines | Works; Vitest, and Chromium with axe-core in both themes for the main flows (`hub.spec.ts`) |
 | Dated benchmark results (`cargo xtask bench`, `docs/benchmarks/`) | Works; first result 2026-11-26 on the development machine |
 
 ## Verification performed
+
+M3 (standalone and hub), Windows 11. Details per ticket are in the session
+commit logs; summary:
+
+- Covered by automated tests: the launch contract and the contract types
+  (`eario-core`, `eario`); the hub directory, registry, run files and
+  liveness (`eario-runtime`); the supervisor and the hub HTTP API with its
+  security checks, driving the real `data-explorer`, `signal-lab` and
+  `eario-hub` executables in a temporary hub directory (`eario-hub`, 4 unit
+  and 8 integration tests): install, list, start, open, stop, stop all,
+  uninstall, re-attach after a hub restart, stale run files, changed or
+  missing executable, slug-only routes, start failure, stop timeout, second
+  hub; the hub view (Vitest); and in Chromium with axe-core, in both themes,
+  listing, start and open and stop, stop all, and uninstall after
+  confirmation (`frontend/e2e/hub.spec.ts`, run by `cargo xtask e2e`).
+- Run at the end of M3 (Windows 11, Node.js 24 through `npx -y -p node@24`):
+  `cargo xtask check` passes (eario-core 76, eario-runtime 72, eario 25 plus
+  5 end-to-end tests, eario-hub 4 plus 8, eario-data 30 plus 12, signal-lab
+  and data-explorer launch tests, 65 Vitest tests, svelte-check clean);
+  `cargo xtask e2e` passes, 10 browser tests in Chromium with no
+  accessibility violation (4 data-explorer, 2 signal-lab, 4 hub);
+  `cargo xtask dist` builds `target/release/data-explorer.exe` (32.2 MB) and
+  `target/release/eario-hub.exe` (5.8 MB) and prints both paths.
+- Checked by hand only: one smoke run of `eario-hub.exe` (ticket 04): start,
+  address printed, stop. The tray (ticket 06) was researched, not shipped; see
+  ADR 0011.
+- Not run locally for M3: `cargo deny check` (not installed on the development
+  machine) and the tests with Rust 1.95 (toolchain not installed there). CI
+  runs both.
+- Never run on Linux or macOS: the Unix-only code (file modes `0700`/`0600`,
+  process group of a child) is compiled and tested for the first time by CI on
+  ubuntu.
 
 On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
@@ -91,6 +130,7 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
 ## Not verified
 
+- **The hub on Linux and macOS.** Not built or run by hand; Linux is covered by CI only.
 - **macOS.** Never built or run. Linux is covered by CI only (build, tests,
   browser tests), not by manual use.
 - **The release workflow.** It was written, not run.
@@ -157,10 +197,29 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 - The port and token change at each start, which is awkward for a
   permanently configured MCP client.
 - The interface is in English only.
-- Each dashboard runs only standalone. There is no hub to install several
-  dashboards and start them from one place, and executables have no launch
-  contract for one yet. The design is accepted (ADR 0011); the work is
-  roadmap M3.
+- **No tray.** The hub is a terminal process that prints its address and
+  opens the browser, on every platform. On Windows its console window stays
+  open (children have none). The tray was deferred (ADR 0011, "Amendment: the
+  tray is deferred"); it moves to roadmap M11, next to the desktop shell.
+- No install from the hub interface: a dashboard enters the hub only through
+  its own `--eario-install`.
+- No side-by-side versions: one registry entry per slug; reinstalling replaces
+  it and is refused while the dashboard runs.
+- No update action in the hub: updating means running `--eario-install` from
+  the newer executable.
+- Two hubs launched at nearly the same instant can both run; the single
+  instance check reads `hub.json` and is not a lock.
+- Concurrent `--eario-install` runs into one hub directory, or an install
+  racing a hub uninstall, can lose one registry update (the registry is
+  written atomically but read-modify-write is not locked). Seen in a test
+  fixture of the hub view.
+- A dashboard that misses one 2-second liveness probe while the hub lists
+  dashboards loses its run file and shows as stopped, though it may still run.
+- The hub has no theme preference (no `/api/preferences`).
+- The failed-start state of the hub view is covered by Vitest only, not by a
+  browser test.
+- Hub directory: `%APPDATA%\eario\config\hub` on Windows, `~/.config/eario/hub`
+  on Linux (from `directories::ProjectDirs`), unless `EARIO_HUB_DIR` is set.
 
 ## Naming
 
@@ -178,8 +237,8 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
 ## Where to start next
 
-Milestones M1 (custom Rust computations) and M2 (trust and continuous
-verification) are done; the next ones are in the
+Milestones M1 (custom Rust computations), M2 (trust and continuous
+verification) and M3 (standalone and hub, without the tray) are done; the next ones are in the
 [roadmap](roadmap.md). Entry points for what exists:
 
 - `eario_data::compute` (`Computation`, `ComputeContext`, `ComputeError`) and
@@ -187,6 +246,8 @@ verification) are done; the next ones are in the
 - `eario_runtime::App`: `derived_table`, the cache, `reconcile_derived` and
   the cached-only reads used by MCP.
 - `eario_core::DatasetSource` and `ComponentKind` for the contract.
+- `eario_runtime::hub_dir` (launch contract, hub
+  directory) and the `eario-hub` crate (`Supervisor`, hub API).
 - `examples/signal-lab` as the model of a dashboard with computations.
 
 The limits above, and ADR 0012, say what M1 did not do.

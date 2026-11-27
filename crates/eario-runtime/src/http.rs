@@ -14,7 +14,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use eario_core::{
-    ApiError, AppInfo, ComponentData, ComponentId, DatasetId, Preferences, StateKey, StateUpdate,
+    ApiError, AppResponse, ComponentData, ComponentId, DatasetId, Preferences, StateKey,
+    StateUpdate,
 };
 use eario_data::DataError;
 use serde::Deserialize;
@@ -51,26 +52,20 @@ impl Security {
     }
 }
 
+/// What the protection middleware and the shutdown route need. It carries no
+/// application: each route set brings its own state.
 #[derive(Clone)]
 struct HttpState {
-    app: App,
     security: Arc<Security>,
     shutdown: watch::Sender<bool>,
 }
 
-/// Builds the complete router: API, optional extra routes and frontend.
+/// The API of a dashboard: the routes served under `/api` for an [`App`], with
+/// the application as their state.
 ///
-/// `extra_routes` are mounted beside the API and get the same protection.
-pub(crate) fn router(
-    app: App,
-    security: Arc<Security>,
-    shutdown: watch::Sender<bool>,
-    max_upload_bytes: usize,
-    extra_routes: Option<Router>,
-) -> Router {
-    let state = HttpState { app, security, shutdown };
-
-    let api = Router::new()
+/// Paths are relative to `/api`; pass the result to [`router`].
+pub(crate) fn dashboard_api(app: App, max_upload_bytes: usize) -> Router {
+    Router::new()
         .route("/app", get(app_info))
         .route("/state/{key}", put(set_state))
         .route("/components/{id}/data", get(component_data))
@@ -80,10 +75,30 @@ pub(crate) fn router(
         )
         .route("/datasets/{id}/sheet", put(select_sheet))
         .route("/preferences", put(set_preferences))
-        .route("/shutdown", post(request_shutdown))
-        .fallback(unknown_endpoint);
+        .with_state(app)
+}
 
-    let mut protected = Router::new().nest("/api", api).with_state(state.clone());
+/// Builds the complete router around a set of API routes: the routes
+/// themselves, `POST /api/shutdown`, optional extra routes and the frontend.
+///
+/// `api_routes` are mounted under `/api` and have their state applied already
+/// (see [`dashboard_api`]). A route set must not define `/shutdown`, which
+/// every server answers the same way. `extra_routes` are mounted at the top
+/// level. Both get the same protection: the Host and Origin check, and the
+/// session token. The frontend is served without a token.
+pub(crate) fn router(
+    api_routes: Router,
+    security: Arc<Security>,
+    shutdown: watch::Sender<bool>,
+    extra_routes: Option<Router>,
+) -> Router {
+    let state = HttpState { security, shutdown };
+
+    let shutdown_route =
+        Router::new().route("/shutdown", post(request_shutdown)).with_state(state.shutdown.clone());
+    let api = api_routes.merge(shutdown_route).fallback(unknown_endpoint);
+
+    let mut protected = Router::new().nest("/api", api);
     if let Some(extra_routes) = extra_routes {
         protected = protected.merge(extra_routes);
     }
@@ -233,16 +248,16 @@ async fn unknown_endpoint() -> Failure {
     Failure::new(StatusCode::NOT_FOUND, "unknown_endpoint", "This API endpoint does not exist.")
 }
 
-async fn app_info(State(state): State<HttpState>) -> Json<AppInfo> {
-    Json(state.app.info())
+async fn app_info(State(app): State<App>) -> Json<AppResponse> {
+    Json(AppResponse::Dashboard(app.info()))
 }
 
 async fn set_state(
-    State(state): State<HttpState>,
+    State(app): State<App>,
     Path(key): Path<StateKey>,
     Json(value): Json<Value>,
 ) -> Result<Json<StateUpdate>, Failure> {
-    blocking(move || state.app.set_state(&key, value)).await
+    blocking(move || app.set_state(&key, value)).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,11 +268,11 @@ struct DataQuery {
 }
 
 async fn component_data(
-    State(state): State<HttpState>,
+    State(app): State<App>,
     Path(id): Path<ComponentId>,
     Query(query): Query<DataQuery>,
 ) -> Result<Json<ComponentData>, Failure> {
-    blocking(move || state.app.component_data(&id, query.offset)).await
+    blocking(move || app.component_data(&id, query.offset)).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,14 +283,14 @@ struct UploadQuery {
 }
 
 async fn upload_dataset(
-    State(state): State<HttpState>,
+    State(app): State<App>,
     Path(id): Path<DatasetId>,
     Query(query): Query<UploadQuery>,
     body: Bytes,
 ) -> Result<Json<StateUpdate>, Failure> {
     // Keep the last path segment in case a client sends a full path.
     let name = query.filename.rsplit(['/', '\\']).next().unwrap_or_default().to_owned();
-    blocking(move || state.app.import_dataset(&id, &name, &body)).await
+    blocking(move || app.import_dataset(&id, &name, &body)).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,23 +299,23 @@ struct SheetSelection {
 }
 
 async fn select_sheet(
-    State(state): State<HttpState>,
+    State(app): State<App>,
     Path(id): Path<DatasetId>,
     Json(selection): Json<SheetSelection>,
 ) -> Result<Json<StateUpdate>, Failure> {
-    blocking(move || state.app.select_sheet(&id, &selection.sheet)).await
+    blocking(move || app.select_sheet(&id, &selection.sheet)).await
 }
 
 async fn set_preferences(
-    State(state): State<HttpState>,
+    State(app): State<App>,
     Json(preferences): Json<Preferences>,
 ) -> Result<Json<Preferences>, Failure> {
-    blocking(move || state.app.set_preferences(preferences).map(|()| preferences)).await
+    blocking(move || app.set_preferences(preferences).map(|()| preferences)).await
 }
 
-async fn request_shutdown(State(state): State<HttpState>) -> StatusCode {
+async fn request_shutdown(State(shutdown): State<watch::Sender<bool>>) -> StatusCode {
     tracing::info!("shutdown requested from the user interface");
     // Sending only fails when the server is already stopping.
-    let _ = state.shutdown.send(true);
+    let _ = shutdown.send(true);
     StatusCode::NO_CONTENT
 }

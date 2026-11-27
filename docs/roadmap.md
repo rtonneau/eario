@@ -61,40 +61,49 @@ are listed in [project-status.md](project-status.md).
 Left for later: browser tests in Firefox and WebKit, and a benchmark
 regression gate.
 
-## M3. Standalone and hub
+## M3. Standalone and hub (done, except the tray)
 
-Comes early so that every dashboard built from now on can be installed in a
-hub without being rebuilt. Design in ADR 0011 (accepted).
+Design in ADR 0011. The hub's interface is a dedicated view of the generic
+frontend, chosen by what `/api/app` reports. What landed:
 
-First, decide the open question of ADR 0011: the hub's interface as a
-dedicated frontend view or as a `DashboardSpec` of Eario components.
-
-Launch contract, in every dashboard executable:
+Launch contract, in every dashboard executable, with no code from its author:
 
 - `--eario-manifest`: prints the manifest (name, slug, version, Eario and
-  launch protocol versions) as JSON.
-- `--eario-child <run-file>`: starts without a browser or console, logs to a
-  file, writes the run file (process id, address, token) once listening,
-  removes it when it stops. Does not depend on the hub staying alive.
-- `--eario-install` and `--eario-uninstall`: register the executable in the
-  user's hub registry, after confirmation; reinstalling a newer file of the
-  same slug replaces the entry, refused while it runs.
-- Manifest and run file as `eario-core` contract types, with tests that run
-  a real example executable in each mode.
+  launch protocol versions, description) as JSON. `Dashboard::version`
+  declares the version.
+- `--eario-child <run-file>`: starts without a browser, signal handler or
+  console, logs to a file, writes the run file (process id, address, token)
+  once listening, removes it when it stops. Does not depend on the hub
+  staying alive.
+- `--eario-install` and `--eario-uninstall` (`--yes` skips the
+  confirmation): copy the executable into the hub directory and register it,
+  or remove both. Reinstalling the same slug replaces the entry, refused
+  while it runs.
+- Manifest and run file as `eario-core` contract types, tested with real
+  example executables in each mode.
 
 The hub (`eario-hub` crate and executable):
 
-- Registry of installed dashboards, with the executable's hash checked
-  before each start.
-- Interface: list, start, open, stop, stop all, uninstall; state of each
-  child (starting, running, stopped, failed with its last log lines).
-- Quitting the hub leaves dashboards running; at start the hub re-attaches
-  to live run files and removes stale ones.
-- System tray on Windows, no console window for the hub or its children;
-  tray where supported on Linux and macOS, terminal otherwise.
-- Children started by registry identifier only; no route takes a path or
-  arguments. Security document and AGENTS.md updated for this exception.
-- Both examples installable and runnable from the hub, verified end to end.
+- Registry of installed dashboards, with size and SHA-256 of the installed
+  copy checked before each start.
+- Hub view: list, start, open, stop, stop all, uninstall; state of each child
+  (starting, running, stopped, failed with its last log lines).
+- Quitting the hub leaves dashboards running; the next hub re-attaches to
+  those whose run file answers with its token and removes the others. One hub
+  per user.
+- Children started by slug only; no route takes a path or arguments
+  (security document and AGENTS.md updated for this exception).
+- Both examples installed and run from the hub, in tests and in Chromium.
+
+Left out:
+
+- **The system tray, and a hub with no console window.** Deferred by decision
+  (ADR 0011, "Amendment: the tray is deferred"): it needs a safe event loop
+  that the workspace's no-`unsafe` rule and the available crates do not give
+  yet. It moves to M11, with the desktop shell. Today the hub is a terminal
+  process on every platform.
+- Install from the hub interface, side-by-side versions and a hub update
+  action. Remaining limits are in [project-status.md](project-status.md).
 
 ## M4. Data: import settings and transformations
 
@@ -157,7 +166,8 @@ The hub (`eario-hub` crate and executable):
 - Project scaffolding (`eario-cli`), generating a dashboard that is
   hub-ready.
 - A desktop shell (ADR 0010), hosting the hub as its main window
-  next to its tray icon.
+  next to its tray icon. The tray, deferred from M3, is built here, with a
+  console-free hub on Windows.
 - Signing and installers, for the hub and for standalone dashboards.
 - Updating an installed dashboard from the hub.
 

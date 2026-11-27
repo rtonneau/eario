@@ -32,9 +32,14 @@
 //! [`Dashboard::derived`] holds its table, and components read it like an
 //! imported one. The crates behind this facade are re-exported as [`core`],
 //! [`data`] and [`runtime`].
+//!
+//! Every executable built with [`Dashboard::run`] can also be installed in
+//! and started by an Eario hub, through its `--eario-*` command-line
+//! arguments; see [`Dashboard::run`].
 
 mod dashboard;
 mod error;
+mod launch;
 mod state;
 pub mod widgets;
 
@@ -57,7 +62,7 @@ pub use eario_data as data;
 /// ```
 pub use eario_data::polars;
 pub use eario_runtime as runtime;
-pub use error::{Error, Result};
+pub use error::{Error, LaunchError, Result};
 pub use state::{State, filtered};
 pub use widgets::{NumberType, Widget};
 

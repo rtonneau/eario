@@ -5,7 +5,9 @@ convenient and also a known source of vulnerabilities: any web page the user
 visits can try to send requests to `127.0.0.1`. This document states what
 Eario defends against and how. The code is in
 `crates/eario-runtime/src/http.rs`, `server.rs` and `assets.rs`; the tests
-are in `http_tests.rs`.
+are in `http_tests.rs`. The hub, which starts dashboards, is in
+`crates/eario-hub/src/supervisor.rs` and `http.rs`, tested in
+`crates/eario-hub/tests/hub.rs`.
 
 ## Threat model
 
@@ -20,7 +22,11 @@ Protected asset: the data the user loaded, and control of the application.
 | Injected content loads remote code or exfiltrates data | A Content Security Policy restricts scripts, styles, images and connections to the application's own origin. Nothing is loaded from a remote host. |
 | A crafted path reads files from disk | Static files are looked up by key in the embedded file table; the file system is never consulted. Uploaded file names are reduced to their last segment and are only used for display and format detection. |
 | A huge upload exhausts memory | Uploads are limited (256 MiB by default, configurable); JSON bodies to 2 MiB. |
-| A request runs a program or script | No endpoint or MCP tool executes commands or code supplied at run time. |
+| A request runs a program or script | No endpoint or MCP tool executes commands or code supplied at run time. The hub starting an installed dashboard is the one bounded exception, below. |
+| A request makes the hub start a program of its choice | Hub routes take a slug only, never a path, an executable or arguments, and read no body or query. The hub starts only its own copy in `bin/<slug>/`, with `--eario-child <run file>` and nothing else. |
+| The hub's copy of a dashboard is replaced on disk | Size and SHA-256 are checked against the registry before every start; a mismatch is refused and the user is told to reinstall. |
+| A stale run file, left by a dashboard that crashed, misleads the hub | A run file counts only while the server at its loopback address answers `GET /api/app` with its token. Stale ones are deleted when the hub starts and whenever it lists, starts, stops or uninstalls that dashboard, and only while they still hold the token that failed to answer. |
+| A page obtains a dashboard's token through the hub | The open route is behind the hub's own token and Origin check, and returns only loopback addresses. |
 | An AI agent reads or changes more than intended | The MCP endpoint is off unless the developer enables it, requires the session token, and offers only read-only, bounded tools. |
 
 Not defended against: a program already running as the same user. It can
@@ -60,6 +66,54 @@ non-goals for now.
 shutdown: the server stops accepting connections and lets requests in flight
 finish, for at most five seconds.
 
+## The hub's process-start exception
+
+The hub (`eario-hub`, ADR 0011) starts processes, which no other endpoint
+may do. The exception is bounded:
+
+- Registry entries are added or changed only outside the HTTP API: by
+  `--eario-install`, run by the user from the dashboard's own executable in
+  a terminal (or with `--yes`), which copies the executable into
+  `bin/<slug>/` of the hub directory and records the copy's size and
+  SHA-256. Entries are removed by `--eario-uninstall` or by the hub's
+  uninstall route, which can only remove an entry and the hub's own
+  `bin/<slug>/` directory, never a path read from the registry. Besides
+  these, the API deletes only run files in `run/` whose dashboard no longer
+  answers with their token.
+- Every hub route that acts on a dashboard takes one path segment, the slug,
+  and refuses with 400 anything that `eario_core::is_slug` rejects, so a
+  slug cannot name a file. No hub route reads a request body or a query
+  string. The registry is read again on each request.
+- Before each start the hub checks that the registry entry names a file
+  directly in its own `bin/<slug>/` directory, that its size and SHA-256 are
+  those recorded, and that its manifest's launch protocol version is the
+  hub's. Otherwise it refuses, and the message says how to reinstall.
+- The process gets exactly `--eario-child <hub>/run/<slug>.json`, the hub
+  directory in `EARIO_HUB_DIR`, no standard input or output, and no console
+  window on Windows (`CREATE_NO_WINDOW`, own process group) or its own
+  process group on Unix. A slug that answers already is not started again.
+- Stopping a dashboard that answers sends `POST /api/shutdown` with its
+  token. The hub kills only processes it started itself: at once when a
+  process cannot be asked (its start is in progress and a stop cancels it,
+  it did not answer within the start timeout, or it no longer answers when
+  stopped, started again or uninstalled), and otherwise when it has not exited once the
+  stop timeout has passed. The hub never signals a process by its id.
+- The hub binds `127.0.0.1`, sits behind the same Host/Origin check and
+  session token as a dashboard, and records its address and token in
+  `hub.json` so one hub runs per user; a second start asks the recorded
+  hub's `GET /api/alive`, which answers at once. The open route returns a dashboard's
+  address with its token in the fragment, only to a caller holding the
+  hub's token.
+
+Run files, `hub.json` and the registry are in the user's configuration
+directory and hold session tokens. On Unix the hub directory and its
+subdirectories are created `0700`, and these files and the logs `0600`;
+directories that exist already keep their mode. A program running as the same user can
+read or change them, as it can read the application's memory; that is
+outside this threat model. The SHA-256 check detects a copy changed after
+install; it does not protect against such a program, which could also
+rewrite the registry.
+
 ## Development mode
 
 When the frontend is served by the Vite development server, requests come
@@ -70,7 +124,9 @@ from another origin. Debug builds accept one additional origin given in
 
 - New API routes go through `http::router`, inside the token layer.
 - Never derive a file-system path from request data.
-- Never add an endpoint that runs a command or evaluates code.
+- Never add an endpoint that runs a command or evaluates code. The hub's
+  start route is the one exception: keep it to a slug, and do not add a
+  path, an executable, arguments or an install route without an ADR.
 - A new MCP tool that mutates state or is expensive needs the permission
   design of [ADR 0009](../adr/0009-mcp-integration.md) first.
 - Loading any remote resource from the frontend requires an ADR; the default
