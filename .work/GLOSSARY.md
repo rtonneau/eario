@@ -70,3 +70,29 @@ _Avoid_: catalogue, index, library
 **Run file**:
 The file a child writes once it is listening, holding its process id, address, token and start time, and removes when it stops. The hub trusts it only after the child answers with that token.
 _Avoid_: lock file, pid file, state file
+
+### Remote install and update
+
+**Source**:
+Where a registry entry's executable came from: `local` (installed with `--eario-install`) or a GitHub repository (`owner/repo`) whose releases the hub reads.
+_Avoid_: origin (clashes with the HTTP Origin header), remote, provider
+
+**Catalog**:
+A `catalog.json` file in a GitHub repository listing dashboards the hub can install: repository, name, description and, optionally, the author's public key. The hub knows a default one and any the user adds.
+_Avoid_: registry (that is what is installed), store, marketplace, index
+
+**Release asset**:
+One executable attached to a GitHub release of a dashboard, named `<slug>-<target triple>[.exe]`, listed with its SHA-256 in the release's signed `SHA256SUMS.txt`.
+_Avoid_: artifact, package, binary
+
+**Pinned key**:
+The ed25519 (minisign) public key the hub accepts for a source: taken from the catalog entry, or from the release at first install after the user confirms its fingerprint. A release signed by another key is refused until the user accepts the change.
+_Avoid_: trusted key, certificate
+
+**Previous version**:
+The one older copy of a dashboard the hub keeps in `bin/<slug>/` after an update, so the user can roll back once.
+_Avoid_: backup, old version, side-by-side install
+
+**Self-update**:
+The hub replacing its own executable with a verified newer release of `rtonneau/eario`, then restarting; the running children are left alone.
+_Avoid_: auto-update (nothing is applied without the user's click)

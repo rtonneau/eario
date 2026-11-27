@@ -1,0 +1,78 @@
+{
+  "session_id": "2026-11-27__dashboard-launcher",
+  "feature_name": "dashboard-launcher",
+  "scratch_dir": ".scratch/tests/2026-11-27__dashboard-launcher",
+  "created_at": "2026-11-27T07:20:41.277Z",
+  "template_version": 2,
+  "history": [
+    {
+      "at": "2026-11-27T07:20:41.277Z",
+      "event": "session_started",
+      "phase": "grill",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T07:33:26.080Z",
+      "event": "auto_started",
+      "phase": "grill",
+      "detail": {
+        "target": "finish",
+        "steps": "write:grill → plan → write:plan → ship → finish"
+      }
+    },
+    {
+      "at": "2026-11-27T07:33:58.201Z",
+      "event": "grill_written",
+      "phase": "plan-not-started",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T07:34:06.370Z",
+      "event": "plan_started",
+      "phase": "plan",
+      "files": [
+        "02-plan/plan.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T07:37:18.577Z",
+      "event": "branch_created",
+      "phase": "plan",
+      "detail": {
+        "branch": "feat/hub-github-install",
+        "base": "main"
+      }
+    },
+    {
+      "at": "2026-11-27T07:37:18.610Z",
+      "event": "plan_written",
+      "phase": "ship",
+      "files": [
+        "02-plan/plan.md",
+        "02-plan/tickets/01-contract-and-registry-v2.md",
+        "02-plan/tickets/02-release-verification.md",
+        "02-plan/tickets/03-github-client.md",
+        "02-plan/tickets/04-supervisor-install-update.md",
+        "02-plan/tickets/05-hub-routes-and-security-docs.md",
+        "02-plan/tickets/06-hub-self-update.md",
+        "02-plan/tickets/07-hub-view-remote.md",
+        "02-plan/tickets/08-release-workflow.md",
+        "02-plan/tickets/09-author-and-catalog-docs.md"
+      ],
+      "detail": {
+        "tickets": 9
+      }
+    }
+  ],
+  "current_phase": "ship",
+  "git": {
+    "branch": "feat/hub-github-install",
+    "base_branch": "main",
+    "branch_created_at": "2026-11-27T07:37:18.577Z",
+    "pr_url": null
+  }
+}
