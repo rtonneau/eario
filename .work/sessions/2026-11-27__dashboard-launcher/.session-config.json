@@ -162,6 +162,30 @@
         "ticket": "04-supervisor-install-update",
         "commit": "76e6ad2"
       }
+    },
+    {
+      "at": "2026-11-27T10:45:36.948Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/05-hub-routes-and-security-docs.md",
+        "03-implement/05-hub-routes-and-security-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-routes-and-security-docs"
+      }
+    },
+    {
+      "at": "2026-11-27T11:28:19.988Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/05-hub-routes-and-security-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-routes-and-security-docs",
+        "commit": "caaa002"
+      }
     }
   ],
   "current_phase": "ship",

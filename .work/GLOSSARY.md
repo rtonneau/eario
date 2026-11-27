@@ -86,7 +86,7 @@ One executable attached to a GitHub release of a dashboard, named `<slug>-<targe
 _Avoid_: artifact, package, binary
 
 **Pinned key**:
-The ed25519 (minisign) public key the hub accepts for a source: taken from the catalog entry, or from the release at first install after the user confirms its fingerprint. A release signed by another key is refused until the user accepts the change.
+The ed25519 (minisign) public key the hub accepts for a source: taken from the catalog entry, or from the release's `minisign.pub` at first install after the user confirms the full key and its SHA-256 (never the minisign key id, which can be forged). A release signed by another key is refused until the user accepts the change.
 _Avoid_: trusted key, certificate
 
 **Previous version**:
