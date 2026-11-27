@@ -208,9 +208,33 @@
         "ticket": "06-windows-tray",
         "commit": "36578e5"
       }
+    },
+    {
+      "at": "2026-11-27T06:33:38.628Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/07-docs-and-dist.md",
+        "03-implement/07-docs-and-dist/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-docs-and-dist"
+      }
+    },
+    {
+      "at": "2026-11-27T06:50:18.206Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/07-docs-and-dist/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-docs-and-dist",
+        "commit": "4b6ec26"
+      }
     }
   ],
-  "current_phase": "ship",
+  "current_phase": "finish-pending",
   "git": {
     "branch": "feat/standalone-and-hub",
     "base_branch": "main",
