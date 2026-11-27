@@ -101,6 +101,12 @@ todo = "warn"
 
 # Full debug symbols for every dependency cost about 1 GB per test binary
 # once Polars `lazy` is enabled. Line tables keep backtraces readable.
+# Debug information beside the executable, not inside it, as on Windows
+# (`.pdb`). Embedded, it makes a Linux debug dashboard larger than the
+# 512 MiB asset limit of the hub, which its tests serve and install.
+[profile.dev]
+split-debuginfo = "unpacked"
+
 [profile.dev.package."*"]
 debug = "line-tables-only"
 
