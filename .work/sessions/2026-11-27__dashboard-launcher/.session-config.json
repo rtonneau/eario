@@ -66,6 +66,30 @@
       "detail": {
         "tickets": 9
       }
+    },
+    {
+      "at": "2026-11-27T07:37:30.301Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/01-contract-and-registry-v2.md",
+        "03-implement/01-contract-and-registry-v2/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-registry-v2"
+      }
+    },
+    {
+      "at": "2026-11-27T07:47:45.412Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/01-contract-and-registry-v2/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-registry-v2",
+        "commit": "5464f1e"
+      }
     }
   ],
   "current_phase": "ship",
@@ -74,5 +98,6 @@
     "base_branch": "main",
     "branch_created_at": "2026-11-27T07:37:18.577Z",
     "pr_url": null
-  }
+  },
+  "ship_mode": "delegate"
 }
