@@ -290,9 +290,33 @@
         "ticket": "10-several-dashboards-per-repo",
         "commit": "97c295c"
       }
+    },
+    {
+      "at": "2026-11-27T17:02:29.112Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/09-author-and-catalog-docs.md",
+        "03-implement/09-author-and-catalog-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "09-author-and-catalog-docs"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:01.886Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/09-author-and-catalog-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "09-author-and-catalog-docs",
+        "commit": "f658844"
+      }
     }
   ],
-  "current_phase": "ship",
+  "current_phase": "finish-pending",
   "git": {
     "branch": "feat/hub-github-install",
     "base_branch": "main",
