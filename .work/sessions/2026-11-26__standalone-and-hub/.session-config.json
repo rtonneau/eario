@@ -160,6 +160,30 @@
         "ticket": "04-hub-crate",
         "commit": "53fa14f"
       }
+    },
+    {
+      "at": "2026-11-27T00:30:18.431Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/05-hub-view.md",
+        "03-implement/05-hub-view/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-view"
+      }
+    },
+    {
+      "at": "2026-11-27T00:52:19.529Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/05-hub-view/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-view",
+        "commit": "e6576cd"
+      }
     }
   ],
   "current_phase": "ship",
