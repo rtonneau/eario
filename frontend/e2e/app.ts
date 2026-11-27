@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { test as base, expect } from '@playwright/test';
+import { type Page, test as base, expect } from '@playwright/test';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -168,17 +168,142 @@ async function installExample(name: string, hubDir: string): Promise<void> {
 /** Examples every hub test installs, so each test can start and stop either. */
 const INSTALLED_EXAMPLES = ['data-explorer', 'signal-lab'];
 
+/** The fake GitHub process: its address for the hub, and its control address. */
+interface FakeGitHub {
+  api: string;
+  control: string;
+  process: ChildProcess;
+}
+
 /**
- * Tests get `launch`, which starts an example and opens it in the page, and
+ * Starts the fake GitHub built by `cargo xtask e2e` (see
+ * `crates/eario-hub/src/bin/fake-github.rs`). With `releases`, it publishes
+ * the examples as signed releases; without, it serves only the catalogs, so
+ * a hub never reaches the real GitHub during a test.
+ */
+function startFakeGitHub(releases: boolean): Promise<FakeGitHub> {
+  const executable = executablePath('fake-github');
+  // Its standard input stays open: the fake exits once it closes.
+  const child = spawn(executable, releases ? [binDir] : [], {
+    cwd: repositoryRoot,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  return new Promise((resolve, reject) => {
+    let output = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`fake-github printed no address within ${START_TIMEOUT_MS} ms:\n${output}`));
+    }, START_TIMEOUT_MS);
+    const onData = (chunk: Buffer) => {
+      output += chunk.toString();
+      const match =
+        /running at (http:\/\/127\.0\.0\.1:\d+), control at (http:\/\/127\.0\.0\.1:\d+)/.exec(
+          output,
+        );
+      if (match?.[1] !== undefined && match[2] !== undefined) {
+        clearTimeout(timer);
+        resolve({ api: match[1], control: match[2], process: child });
+      }
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(new Error(`cannot start ${executable}: ${error.message}. Run \`cargo xtask e2e\`.`));
+    });
+    child.on('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`fake-github exited with code ${code} before listening:\n${output}`));
+    });
+  });
+}
+
+/** Closes the fake's standard input, which ends it; kills it if it does not end. */
+async function stopFakeGitHub(fake: FakeGitHub): Promise<void> {
+  fake.process.stdin?.end();
+  if (!(await exited(fake.process, 5_000))) {
+    fake.process.kill();
+    await exited(fake.process, 5_000);
+  }
+}
+
+/** What a test of the hub against the fake GitHub can change. */
+export interface RemoteHub {
+  /**
+   * Changes the scenario of the fake GitHub, never the hub:
+   * `data-explorer/newer`, `data-explorer/new-key` or `data-explorer/offline`.
+   */
+  control: (change: string) => Promise<void>;
+  /**
+   * Sets the version the hub's registry records for `slug`, as the hub's
+   * integration tests do. Every example's manifest says 0.0.0, so a release
+   * is only newer than an installed version set back this way.
+   */
+  setInstalledVersion: (slug: string, version: string) => Promise<void>;
+}
+
+/** Replaces `file` with `text` in one rename, retried while Windows holds it open. */
+async function replaceFile(file: string, text: string): Promise<void> {
+  const temporary = `${file}.e2e-tmp`;
+  await fs.writeFile(temporary, text);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(temporary, file);
+      return;
+    } catch (error) {
+      if (attempt >= 40) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
+/** Starts a hub on `hubDir` that reaches `fake` for GitHub, and opens it in the page. */
+async function openHub(page: Page, hubDir: string, fake: FakeGitHub): Promise<RunningApp> {
+  const app = await startApp('eario-hub', [], {
+    EARIO_HUB_DIR: hubDir,
+    // Read by debug builds of the hub only; see crates/eario-hub/src/github.rs.
+    EARIO_HUB_GITHUB_API: fake.api,
+  });
+  await page.goto(app.url);
+  await expect(page.getByRole('heading', { level: 1, name: 'Eario hub' })).toBeVisible();
+  return app;
+}
+
+/** What a hub test started. */
+interface Made {
+  hubDir?: string;
+  app?: RunningApp;
+  fake?: FakeGitHub;
+}
+
+/** Stops what a hub test started, pass or fail. */
+async function cleanUp(made: Made): Promise<void> {
+  if (made.app !== undefined && made.hubDir !== undefined) {
+    await stopHub(made.app, made.hubDir);
+  } else if (made.hubDir !== undefined) {
+    await fs.rm(made.hubDir, { recursive: true, force: true });
+  }
+  if (made.fake !== undefined) {
+    await stopFakeGitHub(made.fake);
+  }
+}
+
+/**
+ * Tests get `launch`, which starts an example and opens it in the page;
  * `launchHub`, which installs both examples into a temporary hub directory,
- * starts a hub on it and opens it in the page.
+ * starts a hub on it and opens it in the page; and `launchRemoteHub`, which
+ * starts a hub on an empty hub directory against a fake GitHub that
+ * publishes the examples, and opens it in the page.
  */
 export const test = base.extend<{
   launch: (name: string, args?: string[]) => Promise<void>;
   launchHub: () => Promise<void>;
+  launchRemoteHub: () => Promise<RemoteHub>;
 }>({
   launchHub: async ({ page }, use) => {
-    const made: { hubDir?: string; app?: RunningApp } = {};
+    const made: Made = {};
     try {
       await use(async () => {
         const hubDir = await fs.mkdtemp(path.join(hubRoot, 'hub-'));
@@ -187,16 +312,46 @@ export const test = base.extend<{
         for (const name of INSTALLED_EXAMPLES) {
           await installExample(name, hubDir);
         }
-        made.app = await startApp('eario-hub', [], { EARIO_HUB_DIR: hubDir });
-        await page.goto(made.app.url);
-        await expect(page.getByRole('heading', { level: 1, name: 'Eario hub' })).toBeVisible();
+        made.fake = await startFakeGitHub(false);
+        made.app = await openHub(page, hubDir, made.fake);
       });
     } finally {
-      if (made.app !== undefined && made.hubDir !== undefined) {
-        await stopHub(made.app, made.hubDir);
-      } else if (made.hubDir !== undefined) {
-        await fs.rm(made.hubDir, { recursive: true, force: true });
-      }
+      await cleanUp(made);
+    }
+  },
+
+  launchRemoteHub: async ({ page }, use) => {
+    const made: Made = {};
+    try {
+      await use(async () => {
+        const hubDir = await fs.mkdtemp(path.join(hubRoot, 'remote-hub-'));
+        made.hubDir = hubDir;
+        const fake = await startFakeGitHub(true);
+        made.fake = fake;
+        made.app = await openHub(page, hubDir, fake);
+        return {
+          control: async (change) => {
+            const response = await fetch(`${fake.control}/${change}`, { method: 'POST' });
+            if (!response.ok) {
+              throw new Error(`fake-github ${change}: ${response.status} ${await response.text()}`);
+            }
+          },
+          setInstalledVersion: async (slug, version) => {
+            const file = path.join(hubDir, 'registry.json');
+            const registry = JSON.parse(await fs.readFile(file, 'utf8')) as {
+              dashboards: { slug: string; manifest: { version: string | null } }[];
+            };
+            const entry = registry.dashboards.find((dashboard) => dashboard.slug === slug);
+            if (entry === undefined) {
+              throw new Error(`${slug} is not in ${file}`);
+            }
+            entry.manifest.version = version;
+            await replaceFile(file, JSON.stringify(registry, null, 2));
+          },
+        };
+      });
+    } finally {
+      await cleanUp(made);
     }
   },
 

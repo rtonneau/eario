@@ -1279,32 +1279,31 @@ pub(crate) fn fetch_catalog(github: &dyn GitHub, repo: &str) -> Result<Catalog, 
 
 /// The catalog of `repo` as the hub lists it: its entries that name a
 /// repository, each with the slug installed from it; or why it could not be
-/// read.
+/// read. A repository listed twice keeps its first entry, the one
+/// [`catalog_key`] takes the key from.
 pub(crate) fn list_catalog(github: &dyn GitHub, repo: &str, registry: &Registry) -> HubCatalog {
     match fetch_catalog(github, repo) {
-        Ok(catalog) => HubCatalog {
-            repo: repo.to_owned(),
-            name: Some(catalog.name),
-            dashboards: catalog
-                .dashboards
-                .into_iter()
-                .filter(|entry| {
-                    let valid = is_repo(&entry.repo);
-                    if !valid {
-                        tracing::warn!(catalog = repo, entry = %entry.repo, "skipped a catalog entry that names no repository");
-                    }
-                    valid
-                })
-                .map(|entry| HubCatalogEntry {
+        Ok(catalog) => {
+            let mut dashboards: Vec<HubCatalogEntry> = Vec::new();
+            for entry in catalog.dashboards {
+                if !is_repo(&entry.repo) {
+                    tracing::warn!(catalog = repo, entry = %entry.repo, "skipped a catalog entry that names no repository");
+                    continue;
+                }
+                if dashboards.iter().any(|listed| same_repo(&listed.repo, &entry.repo)) {
+                    tracing::warn!(catalog = repo, entry = %entry.repo, "skipped a catalog entry that repeats a repository listed before");
+                    continue;
+                }
+                dashboards.push(HubCatalogEntry {
                     installed_slug: installed_from(registry, &entry.repo)
                         .map(|installed| installed.slug.clone()),
                     repo: entry.repo,
                     name: entry.name,
                     description: entry.description,
-                })
-                .collect(),
-            error: None,
-        },
+                });
+            }
+            HubCatalog { repo: repo.to_owned(), name: Some(catalog.name), dashboards, error: None }
+        }
         Err(error) => unreadable_catalog(repo, &error),
     }
 }
@@ -1690,5 +1689,69 @@ mod tests {
         names.sort();
         assert_eq!(names, ["a-directory", "current", "previous"]);
         Ok(())
+    }
+
+    /// A GitHub that has one catalog and no release.
+    struct OneCatalog(Catalog);
+
+    impl GitHub for OneCatalog {
+        fn latest_release(&self, repo: &str) -> Result<Release, GitHubError> {
+            Err(GitHubError::NoRelease { repo: repo.to_owned() })
+        }
+
+        fn catalog(&self, _repo: &str) -> Result<Catalog, GitHubError> {
+            Ok(self.0.clone())
+        }
+
+        fn release_file(
+            &self,
+            _repo: &str,
+            _release: &Release,
+            _name: &str,
+            _limit: u64,
+        ) -> Result<Option<Vec<u8>>, GitHubError> {
+            Ok(None)
+        }
+
+        fn download(
+            &self,
+            repo: &str,
+            _asset: &ReleaseAsset,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<Download, GitHubError> {
+            Err(GitHubError::NoRelease { repo: repo.to_owned() })
+        }
+    }
+
+    #[test]
+    fn a_catalog_lists_each_repository_once_keeping_its_first_entry() {
+        let entry = |repo: &str, name: &str| eario_core::CatalogEntry {
+            repo: repo.to_owned(),
+            name: name.to_owned(),
+            description: String::new(),
+            public_key: String::new(),
+        };
+        let github = OneCatalog(Catalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            name: "Lab".to_owned(),
+            dashboards: vec![
+                entry("lab/signal-lab", "Signal lab"),
+                entry("lab/data-explorer", "Data explorer"),
+                entry("Lab/Signal-Lab", "Signal lab, again"),
+                entry("lab/signal-lab", "Signal lab, a third time"),
+                entry("not a repository", "Nothing"),
+            ],
+        });
+        let listed = list_catalog(&github, "lab/catalog", &Registry::default());
+        assert_eq!(listed.error, None);
+        let entries: Vec<(&str, &str)> = listed
+            .dashboards
+            .iter()
+            .map(|entry| (entry.repo.as_str(), entry.name.as_str()))
+            .collect();
+        assert_eq!(
+            entries,
+            [("lab/signal-lab", "Signal lab"), ("lab/data-explorer", "Data explorer")]
+        );
     }
 }

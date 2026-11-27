@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiFailure, api, initToken } from './api';
+import { ApiFailure, api, errorWithCode, initToken } from './api';
 
 function respond(status: number, body?: unknown): Response {
   return new Response(body === undefined ? null : JSON.stringify(body), {
@@ -117,5 +117,111 @@ describe('api', () => {
     fetchMock.mockResolvedValue(respond(200, {}));
     await api.hubStart('../stop-all');
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/dashboards/..%2Fstop-all/start');
+  });
+
+  it('calls the remote hub routes by repository, slug and SHA-256, without a body', async () => {
+    fetchMock.mockImplementation(async () => respond(200, {}));
+    const sha = 'a'.repeat(64);
+    const key = 'b'.repeat(64);
+    await api.hubCatalogs();
+    await api.hubAddCatalog('lab/catalog');
+    await api.hubRemoveCatalog('lab/catalog');
+    await api.hubPreview('lab/signal-lab');
+    await api.hubAcceptKey('lab/signal-lab', key);
+    await api.hubInstall('lab/signal-lab', sha);
+    await api.hubCheck();
+    await api.hubUpdatePreview('signal-lab');
+    await api.hubUpdate('signal-lab', sha);
+    await api.hubRollback('signal-lab');
+    await api.hubSettings();
+    await api.hubSetCheckAtStart(false);
+    await api.hubSetCheckAtStart(true);
+    await api.hubSelfUpdate();
+    const calls = fetchMock.mock.calls.map(([url, init]) => [init?.method, url]);
+    expect(calls).toEqual([
+      ['GET', '/api/catalogs'],
+      ['POST', '/api/catalogs/lab/catalog/add'],
+      ['POST', '/api/catalogs/lab/catalog/remove'],
+      ['POST', '/api/sources/lab/signal-lab/preview'],
+      ['POST', `/api/sources/lab/signal-lab/accept-key/${key}`],
+      ['POST', `/api/sources/lab/signal-lab/install/${sha}`],
+      ['POST', '/api/check'],
+      ['POST', '/api/dashboards/signal-lab/update-preview'],
+      ['POST', `/api/dashboards/signal-lab/update/${sha}`],
+      ['POST', '/api/dashboards/signal-lab/rollback'],
+      ['GET', '/api/settings'],
+      ['POST', '/api/settings/check-at-start/off'],
+      ['POST', '/api/settings/check-at-start/on'],
+      ['POST', '/api/self-update'],
+    ]);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect((init?.headers as Record<string, string>)['x-eario-token']).toBe('abc123');
+      expect(init?.body).toBeUndefined();
+    }
+  });
+
+  it('keeps a repository to two path segments', async () => {
+    fetchMock.mockImplementation(async () => respond(200, {}));
+    await api.hubPreview('lab/../../stop-all');
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/sources/lab/..%2F..%2Fstop-all/preview',
+    ]);
+  });
+
+  // The URL parser drops a `.` segment and climbs on a `..` one, encoded or
+  // not, so such a name would reach another route.
+  it('refuses a repository with an empty, `.` or `..` part, before any request', () => {
+    fetchMock.mockImplementation(async () => respond(200, {}));
+    for (const repo of ['nothing', 'lab/', '/repo', '', 'lab/..', '../repo', 'lab/.', './repo']) {
+      expect(() => api.hubPreview(repo), repo).toThrow(ApiFailure);
+      expect(() => api.hubAddCatalog(repo), repo).toThrow(
+        `"${repo}" is not a repository of the form owner/repo.`,
+      );
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an empty, `.` or `..` name in any route, before any request', () => {
+    fetchMock.mockImplementation(async () => respond(200, {}));
+    for (const name of ['', '.', '..']) {
+      expect(() => api.hubStart(name), name).toThrow(ApiFailure);
+      expect(() => api.componentData(name), name).toThrow(ApiFailure);
+      expect(() => api.setState(name, 1), name).toThrow(ApiFailure);
+      expect(() => api.hubUpdate('alpha', name), name).toThrow(ApiFailure);
+      expect(() => api.hubAcceptKey('lab/alpha', name), name).toThrow(ApiFailure);
+    }
+    let failure: unknown;
+    try {
+      void api.hubUninstall('..');
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ code: 'invalid_path_segment', status: 0 });
+    expect(errorWithCode(failure)).toBe(
+      'The name ".." cannot be sent to the application: a name must not be empty, "." or "..". (invalid_path_segment)',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('accepts names that only contain dots among other characters', async () => {
+    fetchMock.mockImplementation(async () => respond(200, {}));
+    await api.hubStart('...');
+    await api.hubPreview('lab/signal.lab');
+    await api.upload('data', new File(['x'], '.'));
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/dashboards/.../start',
+      '/api/sources/lab/signal.lab/preview',
+      '/api/datasets/data/upload?filename=.',
+    ]);
+  });
+});
+
+describe('errorWithCode', () => {
+  it('adds the code of a refusal to its message', () => {
+    expect(errorWithCode(new ApiFailure('Key changed.', 'hub_key_changed', 409))).toBe(
+      'Key changed. (hub_key_changed)',
+    );
+    expect(errorWithCode(new Error('boom'))).toBe('boom');
+    expect(errorWithCode('plain')).toBe('plain');
   });
 });

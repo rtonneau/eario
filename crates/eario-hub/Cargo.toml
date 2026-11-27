@@ -10,10 +10,20 @@ homepage.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+default-run = "eario-hub"
 
 [[bin]]
 name = "eario-hub"
 path = "src/main.rs"
+
+# A fake GitHub as a process, serving a scripted scenario to the browser
+# tests (`cargo xtask e2e`). Built only with `fake-github`.
+[[bin]]
+name = "fake-github"
+path = "src/bin/fake-github.rs"
+required-features = ["fake-github"]
+test = false
+doc = false
 
 [features]
 # `fake_github`: a fake GitHub on the loopback interface, a key to sign its

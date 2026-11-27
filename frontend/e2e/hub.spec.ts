@@ -1,6 +1,6 @@
 import type { Locator, Page } from '@playwright/test';
 
-import { expect, test } from './app';
+import { type RemoteHub, expect, test } from './app';
 import { expectAccessible } from './axe';
 
 /** Longest wait for a dashboard to reach a state: its process has to start. */
@@ -106,5 +106,211 @@ test.describe('hub', () => {
     await expect(page.getByRole('status')).toHaveText('Signal Lab uninstalled.');
     await expect(card(page, 'Data Explorer')).toBeVisible();
     await expectAccessible(page, 'hub after uninstalling a dashboard');
+  });
+});
+
+/**
+ * Longest wait for a preview, an install or an update: a debug build of the
+ * hub downloads, hashes and runs an executable of 50 to 110 MB.
+ */
+const REMOTE_TIMEOUT_MS = 90_000;
+
+/** The confirmation dialog of an install or an update. */
+function dialog(page: Page): Locator {
+  return page.getByRole('dialog');
+}
+
+/** The page's own status region, outside the dialog. */
+function pageStatus(page: Page): Locator {
+  return page.getByRole('main').getByRole('status');
+}
+
+/** Installs data-explorer from the default catalog, whose key signs it. */
+async function installFromCatalog(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Install Data Explorer from lab/data-explorer' }).click();
+  await expect(dialog(page).getByRole('heading', { name: 'Install Data Explorer?' })).toBeVisible({
+    timeout: REMOTE_TIMEOUT_MS,
+  });
+  await expect(dialog(page).getByRole('heading', { name: 'Trusted key' })).toBeVisible();
+  await expectAccessible(page, 'install dialog, key listed by the catalog');
+  await dialog(page).getByRole('button', { name: 'Install', exact: true }).click();
+  await expect(dialog(page)).toHaveCount(0, { timeout: REMOTE_TIMEOUT_MS });
+  await expect(pageStatus(page)).toHaveText('Data Explorer installed.');
+}
+
+/** Sets the installed data-explorer back, changes the release, and checks. */
+async function offerUpdate(page: Page, hub: RemoteHub, change: string): Promise<void> {
+  await hub.setInstalledVersion('data-explorer', '0.0.0-e2e.1');
+  await hub.control(change);
+  await page.getByRole('button', { name: 'Check now' }).click();
+  await expect(card(page, 'Data Explorer').getByText('v0.0.0 available')).toBeVisible({
+    timeout: REMOTE_TIMEOUT_MS,
+  });
+  await expect(pageStatus(page)).toContainText('Data Explorer v0.0.0 is available.');
+}
+
+test.describe('hub with GitHub', () => {
+  // Each test downloads and verifies executables of 50 to 110 MB with a
+  // debug build of the hub.
+  test.describe.configure({ timeout: 240_000 });
+
+  test('installs from a catalog, then updates and rolls back', async ({
+    page,
+    launchRemoteHub,
+  }) => {
+    const hub = await launchRemoteHub();
+    await expect(page.getByRole('list', { name: 'Dashboards of Example catalog' })).toBeVisible();
+    await expect(page.getByText(/No dashboard is installed/)).toBeVisible();
+    await expectAccessible(page, 'empty hub with a catalog');
+
+    await installFromCatalog(page);
+    const explorer = card(page, 'Data Explorer');
+    await expect(explorer.getByText('From GitHub: lab/data-explorer')).toBeVisible();
+    await expect(explorer.getByText('Version 0.0.0')).toBeVisible();
+    await expect(
+      page.getByRole('list', { name: 'Dashboards of Example catalog' }).getByText('Installed'),
+    ).toBeVisible();
+    await expectAccessible(page, 'hub with a dashboard installed from GitHub');
+
+    await offerUpdate(page, hub, 'data-explorer/newer');
+    await expectAccessible(page, 'hub with an update available');
+
+    await explorer.getByRole('button', { name: 'Update Data Explorer' }).click();
+    await expect(dialog(page).getByRole('heading', { name: 'Update Data Explorer?' })).toBeVisible({
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(
+      dialog(page).getByText('The same key signed the version you have installed.'),
+    ).toBeVisible();
+    await expectAccessible(page, 'update dialog, pinned key');
+    await dialog(page).getByRole('button', { name: 'Update', exact: true }).click();
+    await expect(dialog(page)).toHaveCount(0, { timeout: REMOTE_TIMEOUT_MS });
+    await expect(pageStatus(page)).toHaveText('Data Explorer updated to version 0.0.0.');
+    await expect(explorer.getByText('v0.0.0 available')).toHaveCount(0);
+    await expectAccessible(page, 'hub after an update');
+
+    page.once('dialog', (confirmation) => void confirmation.accept());
+    await explorer.getByRole('button', { name: 'Roll back Data Explorer' }).click();
+    await expect(pageStatus(page)).toHaveText('Data Explorer rolled back to version 0.0.0-e2e.1.', {
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(explorer.getByRole('button', { name: 'Roll back Data Explorer' })).toHaveCount(0);
+    await expectAccessible(page, 'hub after a rollback');
+  });
+
+  test('refuses an update signed with a changed key, and says what could not be checked', async ({
+    page,
+    launchRemoteHub,
+  }) => {
+    const hub = await launchRemoteHub();
+    await installFromCatalog(page);
+    await offerUpdate(page, hub, 'data-explorer/new-key');
+
+    const explorer = card(page, 'Data Explorer');
+    const update = explorer.getByRole('button', { name: 'Update Data Explorer' });
+    await update.click();
+    const alarm = dialog(page).getByRole('alert');
+    await expect(alarm).toContainText('Warning: the signing key has changed', {
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(alarm).toContainText('Someone else may be publishing in its name.');
+    await expect(dialog(page).getByRole('button', { name: 'Update', exact: true })).toHaveCount(0);
+    await expect(dialog(page).getByRole('button', { name: 'Trust this key' })).toBeVisible();
+    await expectAccessible(page, 'update dialog, changed key');
+
+    await page.keyboard.press('Escape');
+    await expect(dialog(page)).toHaveCount(0);
+    await expect(pageStatus(page)).toHaveText('Nothing was updated.');
+    await expect(explorer.getByText('Version 0.0.0-e2e.1')).toBeVisible();
+    await expect(update).toBeFocused();
+    await expectAccessible(page, 'hub after a refused key change');
+
+    await hub.control('data-explorer/offline');
+    await page.getByRole('button', { name: 'Check now' }).click();
+    await expect(pageStatus(page)).toContainText('Data Explorer could not be checked.', {
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    const problems = page.getByRole('list', { name: 'Could not check' });
+    await expect(problems).toContainText('Data Explorer could not be checked:');
+    await expect(problems).toContainText('(github_rate_limited)');
+    await expectAccessible(page, 'hub after a check that could not reach GitHub');
+  });
+
+  test('installs from a repository with an unknown key once the user trusts it', async ({
+    page,
+    launchRemoteHub,
+  }) => {
+    await launchRemoteHub();
+    await page.getByLabel('Repository (owner/repo)', { exact: true }).fill('lab/signal-lab');
+    await page.getByRole('button', { name: 'Add repository' }).click();
+
+    await expect(dialog(page).getByRole('heading', { name: 'Unknown key' })).toBeVisible({
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(
+      dialog(page).getByRole('heading', { name: 'Install lab/signal-lab?' }),
+    ).toBeVisible();
+    await expect(
+      dialog(page).getByText('Read from the executable once you trust its key'),
+    ).toBeVisible();
+    await expect(dialog(page).getByRole('button', { name: 'Install', exact: true })).toHaveCount(0);
+    await expectAccessible(page, 'install dialog, unknown key');
+
+    await dialog(page).getByRole('button', { name: 'Trust this key' }).click();
+    await expect(dialog(page).getByRole('heading', { name: 'Key trusted by you' })).toBeVisible({
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(dialog(page).getByRole('heading', { name: 'Install Signal Lab?' })).toBeVisible();
+    await expect(dialog(page).getByText('Signal Lab, version 0.0.0', { exact: true })).toBeVisible();
+    await expect(dialog(page).getByRole('status')).toHaveText(
+      'Key trusted. Signal Lab, version 0.0.0.',
+    );
+    // Not lost with the button it was on, and not on the one that installs.
+    await expect(dialog(page).getByRole('button', { name: 'Cancel' })).toBeFocused();
+    await expectAccessible(page, 'install dialog, key trusted by the user');
+
+    await dialog(page).getByRole('button', { name: 'Install', exact: true }).click();
+    await expect(dialog(page)).toHaveCount(0, { timeout: REMOTE_TIMEOUT_MS });
+    await expect(pageStatus(page)).toHaveText('Signal Lab installed.');
+    await expect(card(page, 'Signal Lab').getByText('From GitHub: lab/signal-lab')).toBeVisible();
+    await expectAccessible(page, 'hub after an install from a repository');
+  });
+
+  test('adds and removes catalogs, and turns the check at start off', async ({
+    page,
+    launchRemoteHub,
+  }) => {
+    await launchRemoteHub();
+    const input = page.getByLabel('Catalog repository (owner/repo)');
+    await input.fill('not a repository');
+    await page.getByRole('button', { name: 'Add catalog' }).click();
+    await expect(page.getByRole('alert')).toContainText('Enter a repository as owner/repo');
+    await expect(input).toHaveAttribute('aria-invalid', 'true');
+    await expectAccessible(page, 'catalog repository refused before any request');
+
+    await input.fill('lab/catalog');
+    await page.getByRole('button', { name: 'Add catalog' }).click();
+    await expect(pageStatus(page)).toHaveText('Catalog lab/catalog added.');
+    await expect(
+      page.getByRole('button', { name: 'Install Signal Lab from lab/signal-lab' }),
+    ).toBeVisible();
+    await expectAccessible(page, 'hub with two catalogs');
+
+    page.once('dialog', (confirmation) => void confirmation.accept());
+    await page.getByRole('button', { name: 'Remove catalog rtonneau/eario-catalog' }).click();
+    await expect(pageStatus(page)).toHaveText('Catalog rtonneau/eario-catalog removed.');
+    await expect(page.getByRole('list', { name: 'Dashboards of Example catalog' })).toHaveCount(0);
+
+    const toggle = page.getByLabel('Check for updates at start');
+    await expect(toggle).toBeChecked();
+    await toggle.uncheck();
+    await expect(pageStatus(page)).toHaveText('The hub will not check for updates when it starts.');
+    await expectAccessible(page, 'hub with the check at start off');
+
+    // Both are stored by the hub, not by the page.
+    await page.reload();
+    await expect(page.getByLabel('Check for updates at start')).not.toBeChecked();
+    await expect(page.getByRole('list', { name: 'Dashboards of Lab catalog' })).toBeVisible();
+    await expect(page.getByRole('list', { name: 'Dashboards of Example catalog' })).toHaveCount(0);
   });
 });

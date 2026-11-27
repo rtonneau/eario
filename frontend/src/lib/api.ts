@@ -5,8 +5,12 @@
 import type { ApiError } from './generated/ApiError';
 import type { AppResponse } from './generated/AppResponse';
 import type { ComponentData } from './generated/ComponentData';
+import type { HubCatalog } from './generated/HubCatalog';
 import type { HubInfo } from './generated/HubInfo';
 import type { HubOpen } from './generated/HubOpen';
+import type { HubSelfUpdate } from './generated/HubSelfUpdate';
+import type { HubSettings } from './generated/HubSettings';
+import type { InstallPreview } from './generated/InstallPreview';
 import type { Preferences } from './generated/Preferences';
 import type { StateUpdate } from './generated/StateUpdate';
 import type { JsonValue } from './generated/serde_json/JsonValue';
@@ -100,8 +104,53 @@ async function request<T>(method: string, path: string, body?: BodyInit, json = 
   return (await response.json()) as T;
 }
 
-const segment = encodeURIComponent;
+/** Whether `name` would not stay a path segment of its own. */
+function isDotOrEmpty(name: string): boolean {
+  return name === '' || name === '.' || name === '..';
+}
 
+/**
+ * `name` as one path segment of a route, percent-encoded (`/` included).
+ *
+ * Throws, before any request, for an empty name, `.` or `..`: encoding
+ * leaves those as they are, and the URL parser drops or climbs on them, so
+ * the request would reach another route.
+ */
+function segment(name: string): string {
+  if (isDotOrEmpty(name)) {
+    throw new ApiFailure(
+      `The name "${name}" cannot be sent to the application: a name must not be empty, "." or "..".`,
+      'invalid_path_segment',
+      0,
+    );
+  }
+  return encodeURIComponent(name);
+}
+
+/**
+ * A GitHub repository `owner/repo` as the two path segments the hub's routes
+ * take. Throws, before any request, when the owner or the repository name is
+ * empty, `.` or `..`. A further `/` is encoded into the repository name,
+ * which the hub then refuses.
+ */
+function repository(repo: string): string {
+  const slash = repo.indexOf('/');
+  const owner = slash === -1 ? repo : repo.slice(0, slash);
+  const name = slash === -1 ? '' : repo.slice(slash + 1);
+  if (isDotOrEmpty(owner) || isDotOrEmpty(name)) {
+    throw new ApiFailure(
+      `"${repo}" is not a repository of the form owner/repo.`,
+      'invalid_path_segment',
+      0,
+    );
+  }
+  return `${segment(owner)}/${segment(name)}`;
+}
+
+/**
+ * The backend's routes. A name that cannot be a path segment (see
+ * `segment`) throws an `ApiFailure` before any request is sent.
+ */
 export const api = {
   app: () => request<AppResponse>('GET', '/app'),
 
@@ -114,7 +163,8 @@ export const api = {
   upload: (dataset: string, file: File) =>
     request<StateUpdate>(
       'POST',
-      `/datasets/${segment(dataset)}/upload?filename=${segment(file.name)}`,
+      // A query value, not a path segment: any file name is sent.
+      `/datasets/${segment(dataset)}/upload?filename=${encodeURIComponent(file.name)}`,
       file,
     ),
 
@@ -131,7 +181,8 @@ export const api = {
 
   shutdown: () => request<void>('POST', '/shutdown'),
 
-  // The hub's routes. The slug is the only parameter any of them takes.
+  // The hub's routes. Every parameter is a path segment the hub checks: a
+  // slug, a repository, a SHA-256, or on/off.
   hubStart: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/start`),
 
   hubStop: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/stop`),
@@ -142,9 +193,53 @@ export const api = {
     request<HubInfo>('POST', `/dashboards/${segment(slug)}/uninstall`),
 
   hubStopAll: () => request<HubInfo>('POST', '/stop-all'),
+
+  hubCatalogs: () => request<HubCatalog[]>('GET', '/catalogs'),
+
+  hubAddCatalog: (repo: string) =>
+    request<HubCatalog[]>('POST', `/catalogs/${repository(repo)}/add`),
+
+  hubRemoveCatalog: (repo: string) =>
+    request<HubCatalog[]>('POST', `/catalogs/${repository(repo)}/remove`),
+
+  hubPreview: (repo: string) =>
+    request<InstallPreview>('POST', `/sources/${repository(repo)}/preview`),
+
+  hubAcceptKey: (repo: string, keySha256: string) =>
+    request<InstallPreview>(
+      'POST',
+      `/sources/${repository(repo)}/accept-key/${segment(keySha256)}`,
+    ),
+
+  hubInstall: (repo: string, sha256: string) =>
+    request<HubInfo>('POST', `/sources/${repository(repo)}/install/${segment(sha256)}`),
+
+  hubCheck: () => request<HubInfo>('POST', '/check'),
+
+  hubUpdatePreview: (slug: string) =>
+    request<InstallPreview>('POST', `/dashboards/${segment(slug)}/update-preview`),
+
+  hubUpdate: (slug: string, sha256: string) =>
+    request<HubInfo>('POST', `/dashboards/${segment(slug)}/update/${segment(sha256)}`),
+
+  hubRollback: (slug: string) => request<HubInfo>('POST', `/dashboards/${segment(slug)}/rollback`),
+
+  hubSettings: () => request<HubSettings>('GET', '/settings'),
+
+  hubSetCheckAtStart: (on: boolean) =>
+    request<HubSettings>('POST', `/settings/check-at-start/${on ? 'on' : 'off'}`),
+
+  hubSelfUpdate: () => request<HubSelfUpdate>('POST', '/self-update'),
 };
 
 /** Message to show for any thrown value. */
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Message to show for any thrown value, followed by its code when it has one. */
+export function errorWithCode(error: unknown): string {
+  return error instanceof ApiFailure
+    ? `${error.message} (${error.code})`
+    : errorMessage(error);
 }

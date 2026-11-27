@@ -63,7 +63,7 @@ backtraces, and your own crates keep full debug information.
 | `cargo xtask test` | Runs Rust and frontend tests. |
 | `cargo xtask check` | Runs every CI check except the browser tests, `cargo deny` and the minimum-version build. |
 | `cargo xtask dist` | Builds the frontend, then `data-explorer` and `eario-hub` in release mode, and prints the path of each executable. |
-| `cargo xtask e2e` | Builds the frontend, the examples and the hub, then runs the browser tests in Chromium. |
+| `cargo xtask e2e` | Builds the frontend, the examples, the hub and the fake GitHub, then runs the browser tests in Chromium. |
 | `cargo xtask bench` | Runs the benchmarks and records the results in `docs/benchmarks/<date>.md`. |
 
 Environment variables read by an Eario application:
@@ -210,10 +210,10 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | Import tests | `crates/eario-data/tests/import.rs` | Every file in `fixtures/`, including malformed ones. |
 | HTTP tests | `crates/eario-runtime/src/http_tests.rs` | Every endpoint, invalidation, errors, and the security layer, through the router. |
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
-| Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting. |
+| Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting, the hub's texts for keys and update checks. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
 | Hub tests | `crates/eario-hub/tests/hub.rs`, `examples/*/tests/launch.rs`, `crates/eario-runtime/src/hub_dir.rs` | The launch contract and the hub with the real example executables in a temporary hub directory: install, start, open, stop, re-attach, changed executable, slug-only routes. |
-| Browser tests | `frontend/e2e/*.spec.ts` | The real examples and the real hub in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, inputs that recompute a derived dataset in Rust, and the hub view (list, start, open, stop, stop all, uninstall). |
+| Browser tests | `frontend/e2e/*.spec.ts` | The real examples and the real hub in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, inputs that recompute a derived dataset in Rust, and the hub view (list, start, open, stop, stop all, uninstall; against a fake GitHub: install from a catalog and from a repository with an unknown key, update, rollback, a changed key, a check that could not reach GitHub, catalogs and the check-at-start setting). |
 
 ### Browser tests
 
@@ -237,6 +237,19 @@ and for the `--eario-install --yes` runs of the examples, and removes it
 afterwards. If a run was interrupted and a hub or dashboard process still
 holds the directory, the next `cargo xtask e2e` fails with a message asking
 you to stop it.
+
+The hub tests never reach GitHub either. `cargo xtask e2e` also builds
+`fake-github` (`crates/eario-hub/src/bin/fake-github.rs`, feature
+`fake-github`, built apart so the hub under test is built as it ships).
+Each hub test starts one and points the debug hub at it with
+`EARIO_HUB_GITHUB_API`. It serves the default catalog and, for the tests
+that install, signed releases of `data-explorer` and `signal-lab` made from
+the executables in `EARIO_E2E_BIN_DIR`, with test keys from fixed seeds. A
+test changes what it serves through its control address (a newer build, a
+build signed with another key, a refused release), never through the hub.
+Every example's manifest says version 0.0.0, so a test that updates first
+sets the installed version back in the hub directory's `registry.json`, as
+`crates/eario-hub/tests/hub.rs` does.
 
 Wait on what the user sees (roles, labels, `role="status"` text), never on
 a fixed delay. `cargo xtask check` does not run these tests, because they
