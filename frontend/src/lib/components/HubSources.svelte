@@ -8,10 +8,11 @@
 
   import { onMount } from 'svelte';
 
-  import { api, errorWithCode } from '../api';
+  import { ApiFailure, api, errorWithCode } from '../api';
   import type { HubCatalog } from '../generated/HubCatalog';
+  import type { HubCatalogEntry } from '../generated/HubCatalogEntry';
   import type { HubDashboard } from '../generated/HubDashboard';
-  import { installedFrom, looksLikeRepo } from '../hub';
+  import { installedFromEntry, looksLikeRepo, looksLikeSlug } from '../hub';
 
   let {
     dashboards,
@@ -26,10 +27,13 @@
      * at a time, so every control that asks for one waits.
      */
     previewing: boolean;
-    /** The repository whose release is being previewed for an install, or null. */
-    installing: string | null;
-    /** Previews the latest release of a repository; rejects when the hub refuses. */
-    onInstall: (repo: string) => Promise<void>;
+    /** The repository (and slug) whose release is being previewed for an install, or null. */
+    installing: { repo: string; slug: string | null } | null;
+    /**
+     * Previews the latest release of a repository: of its dashboard `slug`,
+     * or, with null, of its only one. Rejects when the hub refuses.
+     */
+    onInstall: (repo: string, slug: string | null) => Promise<void>;
     /** Puts a sentence in the page's status region. */
     announce: (text: string) => void;
   } = $props();
@@ -47,6 +51,9 @@
 
   let repository = $state('');
   let repositoryInvalid = $state(false);
+  let slug = $state('');
+  let slugInvalid = $state(false);
+  let slugInput = $state<HTMLInputElement | null>(null);
   let catalogRepository = $state('');
   let catalogInvalid = $state(false);
 
@@ -72,22 +79,39 @@
     void catalogRequest(() => api.hubCatalogs());
   });
 
-  async function install(repo: string) {
+  async function install(repo: string, dashboard: string | null) {
     installError = null;
     try {
-      await onInstall(repo);
+      await onInstall(repo, dashboard);
     } catch (error) {
       installError = errorWithCode(error);
+      // The repository publishes several dashboards: the message names
+      // them, and the slug field is where the user picks one.
+      if (error instanceof ApiFailure && error.code === 'hub_ambiguous_asset') {
+        // From a catalog entry too: the form must name that repository, or
+        // the slug typed next would go with another one.
+        repository = repo;
+        repositoryInvalid = false;
+        slugInput?.focus();
+      }
     }
   }
 
   function previewRepository(event: SubmitEvent) {
     event.preventDefault();
+    // A new attempt: the refusal of the last one no longer applies.
+    installError = null;
     const repo = repository.trim();
+    const dashboard = slug.trim();
     repositoryInvalid = !looksLikeRepo(repo);
-    if (!repositoryInvalid) {
-      void install(repo);
+    slugInvalid = dashboard !== '' && !looksLikeSlug(dashboard);
+    if (!repositoryInvalid && !slugInvalid) {
+      void install(repo, dashboard === '' ? null : dashboard);
     }
+  }
+
+  function isInstalling(entry: HubCatalogEntry): boolean {
+    return installing?.repo === entry.repo && installing.slug === entry.slug;
   }
 
   function addCatalog(event: SubmitEvent) {
@@ -116,23 +140,48 @@
   <h2 id="{id}-heading">Install from GitHub</h2>
 
   <form class="field" onsubmit={previewRepository} novalidate>
-    <label for="{id}-repository">Repository (owner/repo)</label>
-    <div class="row">
-      <input
-        id="{id}-repository"
-        type="text"
-        autocomplete="off"
-        spellcheck="false"
-        bind:value={repository}
-        aria-invalid={repositoryInvalid}
-        aria-describedby={repositoryInvalid ? `${id}-repository-hint` : undefined}
-        oninput={() => (repositoryInvalid = false)}
-      />
+    <div class="row fields">
+      <div class="field repository">
+        <label for="{id}-repository">Repository (owner/repo)</label>
+        <input
+          id="{id}-repository"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          bind:value={repository}
+          aria-invalid={repositoryInvalid}
+          aria-describedby={repositoryInvalid ? `${id}-repository-hint` : undefined}
+          oninput={() => (repositoryInvalid = false)}
+        />
+      </div>
+      <div class="field slug">
+        <label for="{id}-slug">Dashboard slug (optional)</label>
+        <input
+          id="{id}-slug"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          bind:this={slugInput}
+          bind:value={slug}
+          aria-invalid={slugInvalid}
+          aria-describedby={slugInvalid ? `${id}-slug-help ${id}-slug-hint` : `${id}-slug-help`}
+          oninput={() => (slugInvalid = false)}
+        />
+      </div>
       <button type="submit" disabled={previewing}>Add repository</button>
     </div>
+    <p id="{id}-slug-help" class="muted">
+      Give the slug only when the repository publishes several dashboards, for example
+      signal-lab.
+    </p>
     {#if repositoryInvalid}
       <p id="{id}-repository-hint" class="hint" role="alert">
         Enter a repository as owner/repo, for example lab/signal-lab.
+      </p>
+    {/if}
+    {#if slugInvalid}
+      <p id="{id}-slug-hint" class="hint" role="alert">
+        Enter a slug of lower-case letters, digits and single dashes, for example signal-lab.
       </p>
     {/if}
   </form>
@@ -183,12 +232,15 @@
             <p class="muted">This catalog lists no dashboard.</p>
           {:else}
             <ul class="entries" aria-label="Dashboards of {catalog.name ?? catalog.repo}">
-              {#each catalog.dashboards as entry, index (`${index}:${entry.repo}`)}
-                {@const installed = installedFrom(entry.repo, dashboards)}
+              <!-- A repository may be listed once per slug. -->
+              {#each catalog.dashboards as entry, index (`${index}:${entry.repo}:${entry.slug ?? ''}`)}
+                {@const installed = installedFromEntry(entry, dashboards)}
                 <li class="entry">
                   <div class="identity">
                     <p class="name">{entry.name}</p>
-                    <p class="muted">{entry.repo}</p>
+                    <p class="muted">
+                      {entry.repo}{#if entry.slug !== null}, dashboard {entry.slug}{/if}
+                    </p>
                     {#if entry.description !== ''}
                       <p class="muted">{entry.description}</p>
                     {/if}
@@ -200,9 +252,9 @@
                       class="primary"
                       aria-label="Install {entry.name} from {entry.repo}"
                       disabled={previewing}
-                      onclick={() => void install(entry.repo)}
+                      onclick={() => void install(entry.repo, entry.slug)}
                     >
-                      {installing === entry.repo ? 'Verifying…' : 'Install'}
+                      {isInstalling(entry) ? 'Verifying…' : 'Install'}
                     </button>
                   {/if}
                 </li>
@@ -269,10 +321,26 @@
     gap: var(--space-2);
   }
 
-  .row input {
+  .row > input {
     flex: 1 1 16rem;
     min-width: 0;
     max-width: 28rem;
+  }
+
+  .fields {
+    align-items: flex-end;
+  }
+
+  .fields .repository {
+    flex: 1 1 16rem;
+    min-width: 0;
+    max-width: 28rem;
+  }
+
+  .fields .slug {
+    flex: 1 1 12rem;
+    min-width: 0;
+    max-width: 16rem;
   }
 
   .hint {

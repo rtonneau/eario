@@ -156,8 +156,8 @@ class Session {
   }
 
   /** Installs the previewed release of `repo` by its SHA-256. Throws when the hub refuses. */
-  installFromGitHub(repo: string, sha256: string): Promise<void> {
-    return this.hubAction(() => api.hubInstall(repo, sha256));
+  installFromGitHub(repo: string, slug: string, sha256: string): Promise<void> {
+    return this.hubAction(() => api.hubInstall(repo, slug, sha256));
   }
 
   /** Installs the previewed update of `slug` by its SHA-256. Throws when the hub refuses. */

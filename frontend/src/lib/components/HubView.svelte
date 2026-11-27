@@ -55,8 +55,8 @@
    * one that answered later.
    */
   let previewing = $state(false);
-  /** The repository whose release is being previewed for an install, or null. */
-  let installing = $state<string | null>(null);
+  /** The repository (and slug) whose release is being previewed for an install, or null. */
+  let installing = $state<{ repo: string; slug: string | null } | null>(null);
   /** Number of the latest preview asked for; not reactive. */
   let latestPreview = 0;
 
@@ -235,15 +235,19 @@
     }
   }
 
-  /** Previews the latest release of `repo` for an install. */
-  async function install(repo: string): Promise<void> {
+  /**
+   * Previews the latest release of `repo` for an install: of its dashboard
+   * `slug`, or, with null, of its only one.
+   */
+  async function install(repo: string, slug: string | null): Promise<void> {
     if (previewing || confirmation !== null) {
       return;
     }
-    installing = repo;
+    installing = { repo, slug };
+    const what = slug === null ? repo : `${slug} from ${repo}`;
     try {
-      await preview(null, `Downloading and verifying the latest release of ${repo}…`, () =>
-        api.hubPreview(repo),
+      await preview(null, `Downloading and verifying the latest release of ${what}…`, () =>
+        api.hubPreview(repo, slug),
       );
     } finally {
       installing = null;
@@ -288,7 +292,8 @@
     current.busy = true;
     current.error = null;
     try {
-      current.preview = await api.hubAcceptKey(current.preview.repo, current.preview.key_sha256);
+      const { repo, slug, key_sha256 } = current.preview;
+      current.preview = await api.hubAcceptKey(repo, slug, key_sha256);
     } catch (error) {
       current.error = errorWithCode(error);
     } finally {
@@ -308,7 +313,7 @@
     current.error = null;
     try {
       if (slug === null) {
-        await session.installFromGitHub(preview.repo, preview.sha256);
+        await session.installFromGitHub(preview.repo, preview.slug, preview.sha256);
         announcement = `${name} installed.`;
       } else {
         await session.updateDashboard(slug, preview.sha256);

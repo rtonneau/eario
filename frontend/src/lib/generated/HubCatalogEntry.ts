@@ -9,6 +9,12 @@ export type HubCatalogEntry = {
  */
 repo: string, 
 /**
+ * Slug of the dashboard among those the repository publishes, which an
+ * install from this entry asks for; `None` when the catalog names none
+ * (the repository publishes one dashboard).
+ */
+slug: string | null, 
+/**
  * Name of the dashboard.
  */
 name: string, 
@@ -17,7 +23,8 @@ name: string,
  */
 description: string, 
 /**
- * Slug of the dashboard installed from this repository, when there is
- * one.
+ * Slug of the dashboard installed from this entry, when there is one:
+ * `slug` installed from this repository, or, for an entry without a
+ * slug, the first dashboard installed from it.
  */
 installed_slug: string | null, };

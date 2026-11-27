@@ -41,9 +41,10 @@ name: Release dashboard
 # give the slug and the tag's version, or `--version` must print
 # `<slug> <version>`.
 #
-# A hub installs from a repository whose release has one executable per
-# target. A release with several (as Eario's own: two examples and the hub)
-# is for downloading by hand; the hub updates itself from it by name.
+# A hub installs each executable of a release by its slug; a release with
+# one executable per target needs no slug. Eario's own carries two
+# examples, installed by slug, and the hub, which updates itself from it by
+# name.
 #
 # Runners: windows-latest, ubuntu-latest, and macos-latest (Apple silicon)
 # for both macOS targets; GitHub no longer offers an Intel macOS runner that

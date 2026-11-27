@@ -10,8 +10,10 @@ import {
   formatCheckedAt,
   hubUpdatesItself,
   installedFrom,
+  installedFromEntry,
   keyExplanation,
   looksLikeRepo,
+  looksLikeSlug,
   sourceText,
   versionLabel,
 } from './hub';
@@ -86,6 +88,45 @@ describe('installedFrom', () => {
 
   it('never takes a local dashboard of the same slug for the repository', () => {
     expect(installedFrom('lab/local', [dashboard('local')])).toBeUndefined();
+  });
+});
+
+describe('installedFromEntry', () => {
+  const fromSuite = (slug: string) =>
+    dashboard(slug, { source: { kind: 'github', repo: 'Lab/Suite' } });
+
+  it('finds the dashboard of a catalog entry by its slug and its repository', () => {
+    const signalLab = fromSuite('signal-lab');
+    const dashboards = [dashboard('data-explorer'), signalLab];
+    expect(installedFromEntry({ repo: 'lab/suite', slug: 'signal-lab' }, dashboards)).toBe(
+      signalLab,
+    );
+    // Another dashboard of the repository is not this one.
+    expect(installedFromEntry({ repo: 'lab/suite', slug: 'data-explorer' }, dashboards)).toBe(
+      undefined,
+    );
+    // The same slug from another repository is not this one either.
+    expect(installedFromEntry({ repo: 'lab/other', slug: 'signal-lab' }, dashboards)).toBe(
+      undefined,
+    );
+  });
+
+  it('takes the first dashboard of the repository for an entry without a slug', () => {
+    const first = fromSuite('signal-lab');
+    const dashboards = [first, fromSuite('data-explorer')];
+    expect(installedFromEntry({ repo: 'lab/suite', slug: null }, dashboards)).toBe(first);
+    expect(installedFromEntry({ repo: 'lab/none', slug: null }, dashboards)).toBeUndefined();
+  });
+});
+
+describe('looksLikeSlug', () => {
+  it('accepts lower-case words joined by single dashes, and nothing else', () => {
+    for (const slug of ['signal-lab', 'a', 'rbs-pixe-v2', '0']) {
+      expect(looksLikeSlug(slug), slug).toBe(true);
+    }
+    for (const text of ['', 'Signal-Lab', 'signal lab', '-a', 'a-', 'a--b', '../a', 'a.exe', 'é']) {
+      expect(looksLikeSlug(text), text).toBe(false);
+    }
   });
 });
 

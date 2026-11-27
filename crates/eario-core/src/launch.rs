@@ -168,6 +168,12 @@ pub struct CatalogEntry {
     /// Repository that publishes the dashboard, as `owner/repo`; see
     /// [`is_repo`].
     pub repo: String,
+    /// Slug of the dashboard among those the repository's releases carry,
+    /// see [`is_slug`]: the hub installs the asset `<slug>-<target
+    /// triple>[.exe]`. `None` for a repository whose releases carry one
+    /// dashboard. A repository may be listed once per slug.
+    #[serde(default)]
+    pub slug: Option<String>,
     /// Name of the dashboard, shown to the user.
     pub name: String,
     /// One-line description, empty when the catalog gives none.
@@ -175,7 +181,8 @@ pub struct CatalogEntry {
     pub description: String,
     /// Minisign public key (the base64 text of a `.pub` file's key line) the
     /// repository's releases are signed with. The catalog's author vouches for
-    /// it.
+    /// it. The key belongs to the repository: when a catalog lists it under
+    /// several slugs, the first entry's key is the one used.
     pub public_key: String,
 }
 
@@ -333,12 +340,17 @@ pub struct HubCatalog {
 pub struct HubCatalogEntry {
     /// Repository that publishes the dashboard, as `owner/repo`.
     pub repo: String,
+    /// Slug of the dashboard among those the repository publishes, which an
+    /// install from this entry asks for; `None` when the catalog names none
+    /// (the repository publishes one dashboard).
+    pub slug: Option<String>,
     /// Name of the dashboard.
     pub name: String,
     /// One-line description.
     pub description: String,
-    /// Slug of the dashboard installed from this repository, when there is
-    /// one.
+    /// Slug of the dashboard installed from this entry, when there is one:
+    /// `slug` installed from this repository, or, for an entry without a
+    /// slug, the first dashboard installed from it.
     pub installed_slug: Option<String>,
 }
 
@@ -513,6 +525,13 @@ mod tests {
             {"repo":"o/r","name":"Signal Lab","public_key":"RWQabc"}]}"#;
         let catalog: Catalog = serde_json::from_str(text)?;
         assert_eq!(catalog.dashboards[0].description, "");
+        assert_eq!(catalog.dashboards[0].slug, None, "a catalog of format 1 without slugs");
+        assert_eq!(serde_json::from_str::<Catalog>(&serde_json::to_string(&catalog)?)?, catalog);
+        let text = r#"{"format_version":1,"name":"Lab","dashboards":[
+            {"repo":"o/suite","slug":"signal-lab","name":"Signal Lab","public_key":"RWQabc"},
+            {"repo":"o/suite","slug":"data-explorer","name":"Data Explorer","public_key":"RWQabc"}]}"#;
+        let catalog: Catalog = serde_json::from_str(text)?;
+        assert_eq!(catalog.dashboards[1].slug.as_deref(), Some("data-explorer"));
         assert_eq!(serde_json::from_str::<Catalog>(&serde_json::to_string(&catalog)?)?, catalog);
 
         let pending = InstallPreview {

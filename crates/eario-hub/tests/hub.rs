@@ -937,7 +937,7 @@ fn a_release_listed_by_a_catalog_installs_and_runs() -> TestResult {
     assert_eq!(catalogs[0].dashboards[0].repo, REPO);
     assert_eq!(catalogs[0].dashboards[0].installed_slug, None);
 
-    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    let preview = hub.run(hub.supervisor.preview(REPO, None))?;
     assert_eq!(preview.key_status, KeyStatus::Catalog);
     assert_eq!(preview.slug, DATA_EXPLORER);
     // A trusted key: the verified file was run for its manifest.
@@ -957,15 +957,15 @@ fn a_release_listed_by_a_catalog_installs_and_runs() -> TestResult {
     // The confirmation must repeat the previewed SHA-256.
     let wrong = "0".repeat(64);
     assert_eq!(
-        refusal(hub.run(hub.supervisor.install(REPO, &wrong))),
+        refusal(hub.run(hub.supervisor.install(REPO, None, &wrong))),
         Some("hub_preview_mismatch")
     );
-    let not_a_hash = hub.run(hub.supervisor.install(REPO, "../../bin"));
+    let not_a_hash = hub.run(hub.supervisor.install(REPO, None, "../../bin"));
     assert_eq!(refusal(not_a_hash), Some("hub_invalid_sha256"));
-    let other_repo = hub.run(hub.supervisor.install("lab/other", &preview.sha256));
+    let other_repo = hub.run(hub.supervisor.install("lab/other", None, &preview.sha256));
     assert_eq!(refusal(other_repo), Some("hub_no_preview"));
 
-    let slug = hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    let slug = hub.run(hub.supervisor.install(REPO, None, &preview.sha256))?;
     assert_eq!(slug, DATA_EXPLORER);
     let entry =
         HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
@@ -980,12 +980,12 @@ fn a_release_listed_by_a_catalog_installs_and_runs() -> TestResult {
     assert_eq!(fs::read(&entry.path)?, executable);
     assert_eq!(staged_files(root.path())?, 0, "the staging directory is emptied");
     // The preview was used up.
-    let again = hub.run(hub.supervisor.install(REPO, &preview.sha256));
+    let again = hub.run(hub.supervisor.install(REPO, None, &preview.sha256));
     assert_eq!(refusal(again), Some("hub_no_preview"));
 
     let catalogs = hub.run(hub.supervisor.catalog_listing())?;
     assert_eq!(catalogs[0].dashboards[0].installed_slug.as_deref(), Some(DATA_EXPLORER));
-    assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO))), Some("hub_already_installed"));
+    assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO, None))), Some("hub_already_installed"));
 
     // It starts like a local install.
     hub.run(hub.supervisor.start(DATA_EXPLORER))?;
@@ -1008,12 +1008,12 @@ fn a_repository_no_catalog_lists_is_trusted_once_its_key_is_accepted() -> TestRe
     // The default catalog does not exist: its key vouches for nothing.
     let hub = RemoteHub::new(root.path(), &fake)?;
 
-    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    let preview = hub.run(hub.supervisor.preview(REPO, None))?;
     assert_eq!(preview.key_status, KeyStatus::Unknown);
     assert_eq!(preview.manifest, None, "not run before its key is trusted");
     assert_eq!(preview.slug, DATA_EXPLORER, "from the asset's name");
     assert_eq!(staged_files(root.path())?, 1, "the verified file waits in staging");
-    let refused = hub.run(hub.supervisor.install(REPO, &preview.sha256));
+    let refused = hub.run(hub.supervisor.install(REPO, None, &preview.sha256));
     let error = refused.err().ok_or("an unknown key must be refused")?;
     assert_eq!(error.code(), "hub_key_not_accepted");
     assert!(error.to_string().contains(&preview.key_sha256), "{error}");
@@ -1021,21 +1021,21 @@ fn a_repository_no_catalog_lists_is_trusted_once_its_key_is_accepted() -> TestRe
 
     // Only the previewed key's SHA-256 accepts it; the minisign key id is not
     // enough.
-    let wrong = hub.run(hub.supervisor.accept_key(REPO, &"ab".repeat(32)));
+    let wrong = hub.run(hub.supervisor.accept_key(REPO, None, &"ab".repeat(32)));
     assert_eq!(refusal(wrong), Some("hub_key_mismatch"));
     let key_id = verify::PublicKey::from_base64(REPO, &key.public_key())?.fingerprint().to_owned();
-    let id_only = hub.run(hub.supervisor.accept_key(REPO, &key_id));
+    let id_only = hub.run(hub.supervisor.accept_key(REPO, None, &key_id));
     assert_eq!(refusal(id_only), Some("hub_invalid_sha256"));
-    let accepted = hub.run(hub.supervisor.accept_key(REPO, &preview.key_sha256))?;
+    let accepted = hub.run(hub.supervisor.accept_key(REPO, None, &preview.key_sha256))?;
     assert_eq!(accepted.key_status, KeyStatus::Accepted);
     assert_eq!(accepted.sha256, preview.sha256);
     // Accepted: only now was it run, for the full preview.
     let manifest = accepted.manifest.clone().ok_or("the full preview")?;
     assert_eq!((manifest.slug.as_str(), manifest.name.as_str()), (DATA_EXPLORER, "Data Explorer"));
-    let again = hub.run(hub.supervisor.accept_key(REPO, &preview.key_sha256))?;
+    let again = hub.run(hub.supervisor.accept_key(REPO, None, &preview.key_sha256))?;
     assert_eq!(again, accepted, "accepting again changes nothing");
 
-    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    hub.run(hub.supervisor.install(REPO, None, &preview.sha256))?;
     let entry =
         HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
     assert_eq!(entry.pinned_key, Some(key.public_key()), "the key seen at install is pinned");
@@ -1053,9 +1053,9 @@ fn a_changed_key_is_refused_until_accepted() -> TestResult {
     publish(&fake, REPO, TAG, &first, vec![FakeAsset::new(&asset, data_explorer_build("")?)], true);
     serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, first.public_key())]);
     let hub = RemoteHub::new(root.path(), &fake)?;
-    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    let preview = hub.run(hub.supervisor.preview(REPO, None))?;
     assert_eq!(preview.key_status, KeyStatus::Catalog);
-    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    hub.run(hub.supervisor.install(REPO, None, &preview.sha256))?;
     set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
     let installed = fs::read(
         &HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).ok_or("entry")?.path,
@@ -1090,7 +1090,7 @@ fn a_changed_key_is_refused_until_accepted() -> TestResult {
     publish(&fake, REPO, TAG, &second, vec![newer], true);
     let changed = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
     assert_eq!(changed.manifest, None);
-    let accepted = hub.run(hub.supervisor.accept_key(REPO, &changed.key_sha256))?;
+    let accepted = hub.run(hub.supervisor.accept_key(REPO, None, &changed.key_sha256))?;
     assert_eq!(accepted.key_status, KeyStatus::Accepted);
     let manifest = accepted.manifest.ok_or("the full preview once the key is accepted")?;
     assert_eq!(manifest.version.as_deref(), Some(EXAMPLE_VERSION), "newer than its pre-release");
@@ -1117,7 +1117,7 @@ fn a_slug_installed_from_elsewhere_is_refused() -> TestResult {
     // Installed locally.
     install(root.path(), DATA_EXPLORER)?;
     let local = HubDir::at(root.path()).read_registry()?;
-    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("slug clash")?;
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("slug clash")?;
     assert_eq!(error.code(), "hub_slug_taken");
     assert!(error.to_string().contains("--eario-install"), "{error}");
     assert_eq!(HubDir::at(root.path()).read_registry()?, local, "the local install is untouched");
@@ -1125,15 +1125,31 @@ fn a_slug_installed_from_elsewhere_is_refused() -> TestResult {
 
     // Installed from another repository.
     hub.run(hub.supervisor.uninstall(DATA_EXPLORER))?;
-    let preview = hub.run(hub.supervisor.preview(REPO))?;
-    hub.run(hub.supervisor.accept_key(REPO, &preview.key_sha256))?;
-    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
-    let error = hub.run(hub.supervisor.preview("elsewhere/data-explorer")).err().ok_or("clash")?;
+    let preview = hub.run(hub.supervisor.preview(REPO, None))?;
+    hub.run(hub.supervisor.accept_key(REPO, None, &preview.key_sha256))?;
+    hub.run(hub.supervisor.install(REPO, None, &preview.sha256))?;
+    let error =
+        hub.run(hub.supervisor.preview("elsewhere/data-explorer", None)).err().ok_or("clash")?;
     assert_eq!(error.code(), "hub_slug_taken");
     assert!(error.to_string().contains(REPO), "{error}");
-    // The same repository, in another case, is the one installed.
-    let error = hub.run(hub.supervisor.preview("Lab/Data-Explorer")).err().ok_or("installed")?;
+    // The same repository, in another case, is the one installed: named by
+    // its slug, refused before any request.
+    let requests = fake.requests().len();
+    let named = hub.run(hub.supervisor.preview("Lab/Data-Explorer", Some(DATA_EXPLORER)));
+    let error = named.err().ok_or("installed")?;
     assert_eq!(error.code(), "hub_already_installed");
+    assert!(error.to_string().contains("update it instead"), "{error}");
+    assert_eq!(fake.requests().len(), requests, "refused before any request");
+    // Without a slug, once the release shows it is the dashboard installed.
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("installed")?;
+    assert_eq!(error.code(), "hub_already_installed");
+    // Named by its slug, a dashboard installed from another repository.
+    let error = hub
+        .run(hub.supervisor.preview("elsewhere/data-explorer", Some(DATA_EXPLORER)))
+        .err()
+        .ok_or("clash")?;
+    assert_eq!(error.code(), "hub_slug_taken");
+    assert_eq!(fake.requests().len(), requests + 1, "only the release listing of `{REPO}`");
     // A local install is never updated from GitHub.
     hub.run(hub.supervisor.uninstall(DATA_EXPLORER))?;
     install(root.path(), DATA_EXPLORER)?;
@@ -1159,7 +1175,7 @@ fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
     let mut files = vec![tampered];
     files.extend(key.release_files(std::slice::from_ref(&genuine)));
     fake.release(REPO, TAG, &files);
-    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("a tampered asset")?;
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("a tampered asset")?;
     assert_eq!(error.code(), "release_hash_mismatch");
     assert!(error.to_string().contains(&asset), "{error}");
     assert_nothing_installed(root.path(), DATA_EXPLORER)?;
@@ -1170,7 +1186,7 @@ fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
     unsigned.extend([sums, pub_file]);
     let downloads = asset_downloads(&fake, &asset);
     fake.release(REPO, TAG, &unsigned);
-    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("an unsigned release")?;
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("an unsigned release")?;
     assert_eq!(error.code(), "release_missing_signature");
     assert!(error.to_string().contains(REPO), "{error}");
     assert_eq!(asset_downloads(&fake, &asset), downloads);
@@ -1183,7 +1199,7 @@ fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
     changed.extend_from_slice(format!("{}  evil.exe\n", "ab".repeat(32)).as_bytes());
     files.extend([signature, FakeAsset::new(verify::SUMS_FILE, changed), pub_file]);
     fake.release(REPO, TAG, &files);
-    assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO))), Some("release_bad_signature"));
+    assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO, None))), Some("release_bad_signature"));
     assert_nothing_installed(root.path(), DATA_EXPLORER)?;
     Ok(())
 }
@@ -1202,7 +1218,7 @@ fn an_asset_that_is_another_dashboard_or_not_one_is_refused() -> TestResult {
     // data-explorer published as signal-lab: its manifest tells.
     let disguised = FakeAsset::new(&asset_of(SIGNAL_LAB, target)?, data_explorer_build("")?);
     publish(&fake, "lab/signal-lab", "v1.0.0", &key, vec![disguised], false);
-    let error = hub.run(hub.supervisor.preview("lab/signal-lab")).err().ok_or("disguised")?;
+    let error = hub.run(hub.supervisor.preview("lab/signal-lab", None)).err().ok_or("disguised")?;
     assert_eq!(error.code(), "hub_manifest_mismatch");
     let message = error.to_string();
     assert!(message.contains(SIGNAL_LAB) && message.contains(DATA_EXPLORER), "{message}");
@@ -1212,7 +1228,7 @@ fn an_asset_that_is_another_dashboard_or_not_one_is_refused() -> TestResult {
     // Signed, but not an executable at all.
     let text = FakeAsset::new(&asset_of(DATA_EXPLORER, target)?, "not an executable");
     publish(&fake, REPO, "v1.0.0", &key, vec![text], false);
-    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("not an executable")?;
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("not an executable")?;
     assert_eq!(error.code(), "hub_manifest_failed");
     assert_nothing_installed(root.path(), DATA_EXPLORER)?;
     Ok(())
@@ -1232,20 +1248,20 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
     let hub = RemoteHub::new(root.path(), &fake)?;
 
     // An unknown key: verified, staged, not run.
-    let pending = hub.run(hub.supervisor.preview(REPO))?;
+    let pending = hub.run(hub.supervisor.preview(REPO, None))?;
     assert_eq!(pending.key_status, KeyStatus::Unknown);
     assert_eq!(pending.manifest, None);
     assert_eq!(pending.slug, DATA_EXPLORER);
     assert_eq!(pending.size, not_executable.content.len() as u64);
     assert_eq!(pending.public_key, untrusted.public_key());
     assert_eq!(staged_files(root.path())?, 1);
-    let refused = hub.run(hub.supervisor.install(REPO, &pending.sha256));
+    let refused = hub.run(hub.supervisor.install(REPO, None, &pending.sha256));
     assert_eq!(refusal(refused), Some("hub_key_not_accepted"));
     // Accepted: only now is it run, and refused for what it is.
-    let error = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256)).err();
+    let error = hub.run(hub.supervisor.accept_key(REPO, None, &pending.key_sha256)).err();
     assert_eq!(error.map(|error| error.code()), Some("hub_manifest_failed"));
     assert_nothing_installed(root.path(), DATA_EXPLORER)?;
-    let dropped = hub.run(hub.supervisor.install(REPO, &pending.sha256));
+    let dropped = hub.run(hub.supervisor.install(REPO, None, &pending.sha256));
     assert_eq!(refusal(dropped), Some("hub_no_preview"), "the failed preview is dropped");
 
     // A changed key on an update: the same.
@@ -1260,7 +1276,7 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
     assert_eq!(pending.manifest, None);
     let refused = hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &pending.sha256));
     assert_eq!(refusal(refused), Some("hub_key_changed"));
-    let error = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256)).err();
+    let error = hub.run(hub.supervisor.accept_key(REPO, None, &pending.key_sha256)).err();
     assert_eq!(error.map(|error| error.code()), Some("hub_manifest_failed"));
     assert_eq!(HubDir::at(root.path()).read_registry()?, before, "nothing was changed");
     assert_eq!(bin_files(root.path(), DATA_EXPLORER)?, copies);
@@ -1273,14 +1289,14 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
     for path in staged_paths(root.path())? {
         fs::remove_file(path)?;
     }
-    let error = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256)).err();
+    let error = hub.run(hub.supervisor.accept_key(REPO, None, &pending.key_sha256)).err();
     let error = error.ok_or("a staged file that is gone")?;
     assert_eq!(error.code(), "hub_preview_gone");
     assert!(error.to_string().contains("preview it again"), "{error}");
 
     // Previewed again and accepted, it is run, then installed.
     let pending = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
-    let full = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256))?;
+    let full = hub.run(hub.supervisor.accept_key(REPO, None, &pending.key_sha256))?;
     let manifest = full.manifest.ok_or("the full preview")?;
     assert_eq!(manifest.slug, DATA_EXPLORER);
     hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &pending.sha256))?;
@@ -1299,12 +1315,12 @@ fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> 
         vec![FakeAsset::new(&asset, data_explorer_build("")?)],
         true,
     );
-    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    let preview = hub.run(hub.supervisor.preview(REPO, None))?;
     assert_eq!(preview.key_status, KeyStatus::Catalog);
     for path in staged_paths(root.path())? {
         fs::remove_file(path)?;
     }
-    let refused = hub.run(hub.supervisor.install(REPO, &preview.sha256));
+    let refused = hub.run(hub.supervisor.install(REPO, None, &preview.sha256));
     assert_eq!(refusal(refused), Some("hub_preview_gone"));
     assert!(HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).is_none());
     Ok(())
@@ -1336,7 +1352,7 @@ fn a_starting_hub_keeps_the_previews_of_running_processes() -> TestResult {
     // Another process's preview, waiting for its key to be accepted, as an
     // `eario-hub install` waits for its terminal.
     let command = RemoteHub::new(root.path(), &fake)?;
-    let preview = command.run(command.supervisor.preview(REPO))?;
+    let preview = command.run(command.supervisor.preview(REPO, None))?;
     assert_eq!(staged_files(root.path())?, 4);
 
     // The hub below reaches the real GitHub; it must not check for updates.
@@ -1344,8 +1360,8 @@ fn a_starting_hub_keeps_the_previews_of_running_processes() -> TestResult {
     let hub = TestHub::start(root.path())?;
     assert!(!unlocked.exists() && !lockless.exists() && !stray.exists(), "stale ones are removed");
     assert_eq!(staged_files(root.path())?, 1, "the running process's preview is kept");
-    command.run(command.supervisor.accept_key(REPO, &preview.key_sha256))?;
-    command.run(command.supervisor.install(REPO, &preview.sha256))?;
+    command.run(command.supervisor.accept_key(REPO, None, &preview.key_sha256))?;
+    command.run(command.supervisor.install(REPO, None, &preview.sha256))?;
     assert_eq!(hub.dashboard(DATA_EXPLORER)?.source, Source::Github { repo: REPO.to_owned() });
 
     // A process removes its own staging area when it ends.
@@ -1382,7 +1398,7 @@ fn a_command_waits_while_another_process_changes_the_hub_directory() -> TestResu
 }
 
 #[test]
-fn a_first_install_needs_exactly_one_asset_for_this_machine() -> TestResult {
+fn a_first_install_without_a_slug_needs_exactly_one_asset_for_this_machine() -> TestResult {
     let Some(target) = Target::CURRENT else { return Ok(()) };
     let root = tempfile::tempdir()?;
     let fake = FakeGitHub::start()?;
@@ -1392,7 +1408,7 @@ fn a_first_install_needs_exactly_one_asset_for_this_machine() -> TestResult {
 
     let elsewhere = FakeAsset::new(&asset_of(DATA_EXPLORER, other)?, "x");
     publish(&fake, REPO, "v1.0.0", &key, vec![elsewhere], true);
-    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("no asset")?;
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("no asset")?;
     assert_eq!(error.code(), "hub_no_asset");
     assert!(error.to_string().contains(target.triple()), "{error}");
 
@@ -1401,10 +1417,222 @@ fn a_first_install_needs_exactly_one_asset_for_this_machine() -> TestResult {
         FakeAsset::new(&asset_of(SIGNAL_LAB, target)?, "y"),
     ];
     publish(&fake, REPO, "v1.0.0", &key, two, true);
-    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("two assets")?;
+    let error = hub.run(hub.supervisor.preview(REPO, None)).err().ok_or("two assets")?;
     assert_eq!(error.code(), "hub_ambiguous_asset");
+    let message = error.to_string();
+    assert!(message.contains("data-explorer, signal-lab"), "names the slugs: {message}");
+    assert!(message.contains("choose the one to install by its slug"), "{message}");
+    // A slug the release does not have.
+    let error = hub.run(hub.supervisor.preview(REPO, Some("other"))).err().ok_or("no such slug")?;
+    assert_eq!(error.code(), "hub_no_asset");
+    assert!(error.to_string().contains(&asset_of("other", target)?), "{error}");
+    let invalid = hub.run(hub.supervisor.preview(REPO, Some("../x")));
+    assert_eq!(refusal(invalid), Some("hub_invalid_slug"));
     assert_eq!(fake.requests().iter().filter(|path| path.starts_with("/assets/")).count(), 0);
     assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+    Ok(())
+}
+
+/// Serves a release of `repo` with both examples, signed by `key` with its
+/// `minisign.pub`; data-explorer and signal-lab get `marker` appended.
+fn publish_suite(fake: &FakeGitHub, key: &TestKey, marker: &str) -> Result<(), Failure> {
+    let target = Target::CURRENT.ok_or("no target")?;
+    let mut signal_lab = fs::read(example(SIGNAL_LAB)?)?;
+    signal_lab.extend_from_slice(marker.as_bytes());
+    let assets = vec![
+        FakeAsset::new(&asset_of(DATA_EXPLORER, target)?, data_explorer_build(marker)?),
+        FakeAsset::new(&asset_of(SIGNAL_LAB, target)?, signal_lab),
+    ];
+    publish(fake, SUITE, TAG, key, assets, true);
+    Ok(())
+}
+
+/// A repository that publishes both examples in one release.
+const SUITE: &str = "lab/suite";
+
+#[test]
+fn two_dashboards_of_one_repository_install_side_by_side_and_update_on_their_own() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(20)?;
+    publish_suite(&fake, &key, "")?;
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let registry = || HubDir::at(root.path()).read_registry();
+
+    // Without a slug, the hub cannot tell which one: refused before any
+    // download, with the slugs to choose from.
+    let error = hub.run(hub.supervisor.preview(SUITE, None)).err().ok_or("ambiguous")?;
+    assert_eq!(error.code(), "hub_ambiguous_asset");
+    assert!(error.to_string().contains("data-explorer, signal-lab"), "{error}");
+    assert_eq!(fake.requests().iter().filter(|path| path.starts_with("/assets/")).count(), 0);
+
+    // The first, by its slug: trust on first use, for the repository.
+    let signal_lab = hub.run(hub.supervisor.preview(SUITE, Some(SIGNAL_LAB)))?;
+    assert_eq!((signal_lab.slug.as_str(), signal_lab.key_status), (SIGNAL_LAB, KeyStatus::Unknown));
+    assert_eq!(signal_lab.asset, asset_of(SIGNAL_LAB, target)?);
+    assert_eq!(signal_lab.manifest, None);
+    // Another dashboard of the repository, previewed meanwhile, waits beside
+    // it: one preview per dashboard.
+    let explorer = hub.run(hub.supervisor.preview(SUITE, Some(DATA_EXPLORER)))?;
+    assert_eq!(explorer.key_status, KeyStatus::Unknown);
+    assert_eq!(staged_files(root.path())?, 2);
+    let accepted =
+        hub.run(hub.supervisor.accept_key(SUITE, Some(SIGNAL_LAB), &signal_lab.key_sha256))?;
+    let manifest = accepted.manifest.clone().ok_or("the full preview")?;
+    assert_eq!(manifest.slug, SIGNAL_LAB, "the manifest gives the slug asked for");
+    // Accepting the key of one preview leaves the other as it was.
+    let wrong = hub.run(hub.supervisor.install(SUITE, Some(DATA_EXPLORER), &explorer.sha256));
+    assert_eq!(refusal(wrong), Some("hub_key_not_accepted"));
+    // The SHA-256 of one dashboard does not install another.
+    let crossed = hub.run(hub.supervisor.install(SUITE, Some(SIGNAL_LAB), &explorer.sha256));
+    assert_eq!(refusal(crossed), Some("hub_preview_mismatch"));
+    hub.run(hub.supervisor.install(SUITE, Some(SIGNAL_LAB), &signal_lab.sha256))?;
+    let entry = registry()?.get(SIGNAL_LAB).cloned().ok_or("signal-lab")?;
+    assert_eq!(entry.source, Source::Github { repo: SUITE.to_owned() });
+    assert_eq!(entry.pinned_key, Some(key.public_key()));
+
+    // The second: the repository's pinned key decides, so it is trusted and
+    // run at once. The key-pending preview made before is replaced.
+    let explorer = hub.run(hub.supervisor.preview(SUITE, Some(DATA_EXPLORER)))?;
+    assert_eq!(explorer.key_status, KeyStatus::Pinned);
+    let manifest = explorer.manifest.clone().ok_or("a pinned key: the full preview")?;
+    assert_eq!(manifest.slug, DATA_EXPLORER);
+    assert_eq!(staged_files(root.path())?, 1);
+    // The two-segment install takes the repository's preview of that SHA-256.
+    hub.run(hub.supervisor.install(SUITE, None, &explorer.sha256))?;
+    let installed = registry()?;
+    assert_eq!(installed.dashboards.len(), 2);
+    for slug in [SIGNAL_LAB, DATA_EXPLORER] {
+        let entry = installed.get(slug).ok_or("both installed")?;
+        assert_eq!(entry.source, Source::Github { repo: SUITE.to_owned() }, "{slug}");
+        assert_eq!(entry.pinned_key, Some(key.public_key()), "{slug}");
+    }
+    let again = hub.run(hub.supervisor.preview(SUITE, Some(DATA_EXPLORER)));
+    assert_eq!(refusal(again), Some("hub_already_installed"));
+    let ambiguous = hub.run(hub.supervisor.preview(SUITE, None));
+    assert_eq!(refusal(ambiguous), Some("hub_ambiguous_asset"));
+
+    // Both start, side by side.
+    hub.run(hub.supervisor.start(SIGNAL_LAB))?;
+    hub.run(hub.supervisor.start(DATA_EXPLORER))?;
+    hub.wait_for(SIGNAL_LAB, DashboardState::Running)?;
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    hub.run(hub.supervisor.stop_all())?;
+
+    // A check reads the repository's release once, for both.
+    set_installed_version(root.path(), DATA_EXPLORER, EARLIER_1)?;
+    let releases = |fake: &FakeGitHub| {
+        let path = format!("/repos/{SUITE}/releases/latest");
+        fake.requests().iter().filter(|requested| **requested == path).count()
+    };
+    let before = releases(&fake);
+    let check = hub.run(hub.supervisor.check())?;
+    assert_eq!(releases(&fake), before + 1, "one request for the repository");
+    let found: Vec<(&str, Option<&str>)> = check
+        .dashboards
+        .iter()
+        .map(|update| (update.slug.as_str(), update.available_version.as_deref()))
+        .collect();
+    assert_eq!(found, [(SIGNAL_LAB, None), (DATA_EXPLORER, Some(EXAMPLE_VERSION))]);
+
+    // An update of one takes its own asset and leaves the other alone.
+    publish_suite(&fake, &key, "v2")?;
+    let untouched = registry()?.get(SIGNAL_LAB).cloned().ok_or("signal-lab")?;
+    hub.run(hub.supervisor.update(DATA_EXPLORER))?;
+    let updated = registry()?;
+    let explorer = updated.get(DATA_EXPLORER).ok_or("data-explorer")?;
+    assert_eq!(explorer.manifest.slug, DATA_EXPLORER);
+    assert_eq!(fs::read(&explorer.path)?, data_explorer_build("v2")?);
+    assert!(explorer.previous.is_some());
+    assert_eq!(updated.get(SIGNAL_LAB), Some(&untouched), "the other is not updated");
+    hub.run(hub.supervisor.rollback(DATA_EXPLORER))?;
+    let rolled_back = registry()?;
+    assert_eq!(rolled_back.get(SIGNAL_LAB), Some(&untouched), "nor rolled back");
+    assert_eq!(
+        fs::read(&rolled_back.get(DATA_EXPLORER).ok_or("entry")?.path)?,
+        data_explorer_build("")?
+    );
+
+    // Uninstalling one keeps the repository's pin with the other.
+    hub.run(hub.supervisor.uninstall(DATA_EXPLORER))?;
+    let explorer = hub.run(hub.supervisor.preview(SUITE, Some(DATA_EXPLORER)))?;
+    assert_eq!(explorer.key_status, KeyStatus::Pinned);
+    Ok(())
+}
+
+#[test]
+fn a_key_change_seen_for_one_dashboard_of_a_repository_holds_for_the_others() -> TestResult {
+    let Some(_) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let (first, second) = (test_key(21)?, test_key(22)?);
+    publish_suite(&fake, &first, "")?;
+    serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(SUITE, first.public_key())]);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let registry = || HubDir::at(root.path()).read_registry();
+    for slug in [SIGNAL_LAB, DATA_EXPLORER] {
+        let preview = hub.run(hub.supervisor.preview(SUITE, Some(slug)))?;
+        let status = if slug == SIGNAL_LAB { KeyStatus::Catalog } else { KeyStatus::Pinned };
+        assert_eq!(preview.key_status, status, "{slug}");
+        hub.run(hub.supervisor.install(SUITE, Some(slug), &preview.sha256))?;
+        set_installed_version(root.path(), slug, EARLIER_1)?;
+    }
+
+    // A stale preview of signal-lab, signed with the first key.
+    publish_suite(&fake, &first, "v2")?;
+    let stale = hub.run(hub.supervisor.preview_update(SIGNAL_LAB))?;
+    assert_eq!(stale.key_status, KeyStatus::Pinned);
+
+    // The second key, for both: changed for each, whatever the catalog says.
+    publish_suite(&fake, &second, "v3")?;
+    let explorer = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    assert_eq!((explorer.key_status, explorer.manifest.as_ref()), (KeyStatus::Changed, None));
+    // Accepted for data-explorer, it is accepted for the repository.
+    hub.run(hub.supervisor.accept_key(SUITE, Some(DATA_EXPLORER), &explorer.key_sha256))?;
+    hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &explorer.sha256))?;
+    let pinned = registry()?;
+    for slug in [SIGNAL_LAB, DATA_EXPLORER] {
+        let entry = pinned.get(slug).ok_or("installed")?;
+        assert_eq!(
+            entry.pinned_key,
+            Some(second.public_key()),
+            "pinned for the repository: {slug}"
+        );
+    }
+    // The preview signed with the first key no longer installs: the
+    // repository moved to the second.
+    let refused = hub.run(hub.supervisor.apply_update(SIGNAL_LAB, &stale.sha256));
+    let error = refused.err().ok_or("a stale key must be refused")?;
+    assert_eq!(error.code(), "hub_key_changed_meanwhile");
+    assert_eq!(registry()?.get(SIGNAL_LAB), pinned.get(SIGNAL_LAB), "signal-lab unchanged");
+    // Previewed again, signal-lab's update is signed with the pinned key.
+    let signal_lab = hub.run(hub.supervisor.preview_update(SIGNAL_LAB))?;
+    assert_eq!(signal_lab.key_status, KeyStatus::Pinned);
+    hub.run(hub.supervisor.apply_update(SIGNAL_LAB, &signal_lab.sha256))?;
+
+    // A third key, seen for signal-lab and accepted there, is accepted for
+    // data-explorer too: its preview is `accepted`, and installs.
+    let third = test_key(23)?;
+    publish_suite(&fake, &third, "v4")?;
+    for slug in [SIGNAL_LAB, DATA_EXPLORER] {
+        set_installed_version(root.path(), slug, EARLIER_2)?;
+    }
+    let one = hub.run(hub.supervisor.preview_update(SIGNAL_LAB))?;
+    assert_eq!(one.key_status, KeyStatus::Changed);
+    let other = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    assert_eq!(other.key_status, KeyStatus::Changed, "a change for one is a change for both");
+    // Without a slug, accept-key takes the repository's latest preview.
+    let accepted = hub.run(hub.supervisor.accept_key(SUITE, None, &other.key_sha256))?;
+    assert_eq!((accepted.slug.as_str(), accepted.key_status), (DATA_EXPLORER, KeyStatus::Accepted));
+    let one = hub.run(hub.supervisor.preview_update(SIGNAL_LAB))?;
+    assert_eq!(one.key_status, KeyStatus::Accepted, "accepted for the repository");
+    assert!(one.manifest.is_some(), "so it is run at once");
+    hub.run(hub.supervisor.apply_update(SIGNAL_LAB, &one.sha256))?;
+    hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &accepted.sha256))?;
+    for (slug, entry) in registry()?.dashboards.iter().map(|entry| (&entry.slug, entry)) {
+        assert_eq!(entry.pinned_key, Some(third.public_key()), "{slug}");
+    }
     Ok(())
 }
 
@@ -1421,8 +1649,8 @@ fn install_from_github(
     let build = data_explorer_build(marker)?;
     publish(fake, REPO, TAG, key, vec![FakeAsset::new(&asset, build)], true);
     serve_catalog(fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, key.public_key())]);
-    let preview = hub.run(hub.supervisor.preview(REPO))?;
-    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    let preview = hub.run(hub.supervisor.preview(REPO, None))?;
+    hub.run(hub.supervisor.install(REPO, None, &preview.sha256))?;
     Ok(())
 }
 
@@ -1910,6 +2138,9 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
             format!("/api/sources/{owner}/{repo}/preview"),
             format!("/api/sources/{owner}/{repo}/accept-key/{hash}"),
             format!("/api/sources/{owner}/{repo}/install/{hash}"),
+            format!("/api/sources/{owner}/{repo}/dashboards/data-explorer/preview"),
+            format!("/api/sources/{owner}/{repo}/dashboards/data-explorer/accept-key/{hash}"),
+            format!("/api/sources/{owner}/{repo}/dashboards/data-explorer/install/{hash}"),
         ];
         for path in routes {
             let refusal =
@@ -1936,6 +2167,8 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
         let routes = [
             format!("/api/sources/lab/data-explorer/accept-key/{not_hash}"),
             format!("/api/sources/lab/data-explorer/install/{not_hash}"),
+            format!("/api/sources/lab/suite/dashboards/signal-lab/accept-key/{not_hash}"),
+            format!("/api/sources/lab/suite/dashboards/signal-lab/install/{not_hash}"),
             format!("/api/dashboards/data-explorer/update/{not_hash}"),
         ];
         for path in routes {
@@ -1952,6 +2185,9 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
             format!("/api/dashboards/{slug}/update"),
             format!("/api/dashboards/{slug}/update/{hash}"),
             format!("/api/dashboards/{slug}/rollback"),
+            format!("/api/sources/lab/suite/dashboards/{slug}/preview"),
+            format!("/api/sources/lab/suite/dashboards/{slug}/accept-key/{hash}"),
+            format!("/api/sources/lab/suite/dashboards/{slug}/install/{hash}"),
         ];
         for path in routes {
             let refusal =
@@ -1976,6 +2212,9 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
         "/api/sources/lab/preview",
         "/api/catalogs/lab/catalog/x/add",
         "/api/sources/lab/data-explorer/install/a/b",
+        "/api/sources/lab/suite/dashboards/preview",
+        "/api/sources/lab/suite/dashboards/a/b/preview",
+        "/api/sources/lab/suite/signal-lab/preview",
     ] {
         assert_eq!(hub.post(path)?.refusal(404)?.code, "unknown_endpoint", "{path}");
     }
@@ -2007,6 +2246,9 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
         ("POST", "/api/sources/lab/data-explorer/preview".to_owned()),
         ("POST", format!("/api/sources/lab/data-explorer/accept-key/{hash}")),
         ("POST", format!("/api/sources/lab/data-explorer/install/{hash}")),
+        ("POST", "/api/sources/lab/suite/dashboards/signal-lab/preview".to_owned()),
+        ("POST", format!("/api/sources/lab/suite/dashboards/signal-lab/accept-key/{hash}")),
+        ("POST", format!("/api/sources/lab/suite/dashboards/signal-lab/install/{hash}")),
         ("POST", "/api/check".to_owned()),
         ("POST", "/api/dashboards/data-explorer/update-preview".to_owned()),
         ("POST", format!("/api/dashboards/data-explorer/update/{hash}")),
@@ -2036,6 +2278,13 @@ fn remote_routes_take_strict_path_segments_and_nothing_else() -> TestResult {
     assert!(fake.requests().is_empty(), "requests to GitHub: {:?}", fake.requests());
     let settings: HubSettings = ok(&hub.get("/api/settings")?)?;
     assert!(settings.check_updates_at_start, "no refused request changed the setting");
+
+    // A dashboard may be called `install` or `accept-key`: `dashboards`
+    // keeps its slug apart from those routes, so this is a preview of it.
+    let answer = hub.post("/api/sources/lab/suite/dashboards/install/preview")?;
+    assert_eq!(answer.refusal(502)?.code, "github_no_release");
+    let asked = "/repos/lab/suite/releases/latest".to_owned();
+    assert!(fake.requests().contains(&asked), "requests to GitHub: {:?}", fake.requests());
     Ok(())
 }
 
@@ -2106,6 +2355,57 @@ fn an_install_over_http_needs_the_preview_its_hash_and_an_accepted_key() -> Test
     assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
     hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
     assert_eq!(hub.action(DATA_EXPLORER, "stop")?.status, 200);
+    Ok(())
+}
+
+#[test]
+fn a_dashboard_of_a_repository_that_publishes_several_installs_over_http_by_its_slug() -> TestResult
+{
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(24)?;
+    publish_suite(&fake, &key, "")?;
+    let hub = remote_test_hub(root.path(), &fake)?;
+    let route = |slug: &str, rest: &str| format!("/api/sources/{SUITE}/dashboards/{slug}/{rest}");
+
+    let ambiguous = hub.post(&format!("/api/sources/{SUITE}/preview"))?.refusal(502)?;
+    assert_eq!(ambiguous.code, "hub_ambiguous_asset");
+    assert!(ambiguous.message.contains("data-explorer, signal-lab"), "{}", ambiguous.message);
+    let missing = hub.post(&route("other", "preview"))?.refusal(502)?;
+    assert_eq!(missing.code, "hub_no_asset");
+    let none = hub.post(&route(SIGNAL_LAB, &format!("install/{}", "a".repeat(64))))?;
+    assert_eq!(none.refusal(404)?.code, "hub_no_preview");
+
+    let preview: InstallPreview = ok(&hub.post(&route(SIGNAL_LAB, "preview"))?)?;
+    assert_eq!((preview.slug.as_str(), preview.key_status), (SIGNAL_LAB, KeyStatus::Unknown));
+    assert_eq!(preview.asset, asset_of(SIGNAL_LAB, target)?);
+    // Another dashboard of the repository has no preview yet.
+    let other = hub.post(&route(DATA_EXPLORER, &format!("accept-key/{}", preview.key_sha256)))?;
+    assert_eq!(other.refusal(404)?.code, "hub_no_preview");
+    let accepted: InstallPreview =
+        ok(&hub.post(&route(SIGNAL_LAB, &format!("accept-key/{}", preview.key_sha256)))?)?;
+    assert_eq!(accepted.key_status, KeyStatus::Accepted);
+    let manifest = accepted.manifest.ok_or("the full preview")?;
+    assert_eq!(manifest.slug, SIGNAL_LAB);
+    let info =
+        TestHub::info(&hub.post(&route(SIGNAL_LAB, &format!("install/{}", preview.sha256)))?)?;
+    let listed: Vec<&str> =
+        info.dashboards.iter().map(|dashboard| dashboard.slug.as_str()).collect();
+    assert_eq!(listed, [SIGNAL_LAB]);
+
+    // The second dashboard: the repository's pinned key.
+    let preview: InstallPreview = ok(&hub.post(&route(DATA_EXPLORER, "preview"))?)?;
+    assert_eq!(preview.key_status, KeyStatus::Pinned);
+    let info =
+        TestHub::info(&hub.post(&route(DATA_EXPLORER, &format!("install/{}", preview.sha256)))?)?;
+    for slug in [SIGNAL_LAB, DATA_EXPLORER] {
+        let dashboard = info.dashboards.iter().find(|dashboard| dashboard.slug == slug);
+        let source = dashboard.map(|dashboard| dashboard.source.clone());
+        assert_eq!(source, Some(Source::Github { repo: SUITE.to_owned() }), "{slug}");
+    }
+    let again = hub.post(&route(DATA_EXPLORER, "preview"))?.refusal(409)?;
+    assert_eq!(again.code, "hub_already_installed");
     Ok(())
 }
 

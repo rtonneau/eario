@@ -6,9 +6,13 @@
 //! # A preview, then an install
 //!
 //! A *preview* reads the latest release of a repository and picks the asset
-//! for this machine: `<slug>-<target triple>[.exe]`, the only one with that
-//! ending for a first install, the one of the installed slug for an update.
-//! It verifies the minisign signature of the release's `SHA256SUMS.txt`
+//! for this machine: `<slug>-<target triple>[.exe]`. A repository may publish
+//! several dashboards in one release, one asset per slug. A first install
+//! that names a slug takes exactly that asset; one that names none takes the
+//! only asset with that ending, and refuses a release with several
+//! (`hub_ambiguous_asset`, which names their slugs). An update takes the
+//! asset of the installed slug: the registry entry's slug is the one it was
+//! installed with. It verifies the minisign signature of the release's `SHA256SUMS.txt`
 //! (a release without `SHA256SUMS.txt.minisig` is refused), downloads the
 //! asset into the staging area of this process under `staging/`, and
 //! compares its SHA-256 with the signed list.
@@ -51,6 +55,17 @@
 //! accepts it. The user accepts a key by the SHA-256 of its key line
 //! ([`PublicKey::sha256`]), never by its minisign key id, which anyone can
 //! copy. An install pins the key the release was verified with.
+//!
+//! A key belongs to a repository, not to one of its dashboards. The pin is
+//! recorded on every registry entry installed from the repository, and an
+//! install or an update writes it on all of them, so they agree
+//! (`repo_pin`). A second dashboard of an installed repository is
+//! previewed against that pin (`pinned`); a new key seen for one of its
+//! dashboards is `changed` for each; a key accepted for one is accepted for
+//! the repository. A preview remembers the pin it was judged against: if
+//! another dashboard of the repository pinned another key meanwhile, the
+//! install or update is refused (`hub_key_changed_meanwhile`) unless the
+//! release's own key is the one now pinned.
 //!
 //! # Versions
 //!
@@ -177,12 +192,56 @@ pub(crate) fn same_repo(first: &str, second: &str) -> bool {
     first.eq_ignore_ascii_case(second)
 }
 
-/// The entry installed from `repo`, if any.
-pub(crate) fn installed_from<'r>(registry: &'r Registry, repo: &str) -> Option<&'r RegistryEntry> {
-    registry.dashboards.iter().find(|entry| match &entry.source {
+/// Whether `entry` was installed from `repo`.
+pub(crate) fn is_from(entry: &RegistryEntry, repo: &str) -> bool {
+    match &entry.source {
         Source::Github { repo: installed } => same_repo(installed, repo),
         Source::Local => false,
-    })
+    }
+}
+
+/// The first entry installed from `repo`, if any.
+pub(crate) fn installed_from<'r>(registry: &'r Registry, repo: &str) -> Option<&'r RegistryEntry> {
+    registry.dashboards.iter().find(|entry| is_from(entry, repo))
+}
+
+/// The entry of `slug`, if it was installed from `repo`.
+pub(crate) fn installed_as<'r>(
+    registry: &'r Registry,
+    repo: &str,
+    slug: &str,
+) -> Option<&'r RegistryEntry> {
+    registry.get(slug).filter(|entry| is_from(entry, repo))
+}
+
+/// The key pinned for `repo`: the one its entries record. Installs and
+/// updates write it on every entry of the repository, so they agree; the
+/// first entry that records one gives it.
+pub(crate) fn repo_pin<'r>(registry: &'r Registry, repo: &str) -> Option<&'r str> {
+    registry
+        .dashboards
+        .iter()
+        .filter(|entry| is_from(entry, repo))
+        .find_map(|entry| entry.pinned_key.as_deref())
+}
+
+/// [`repo_pin`], read as a key; refused when the registry holds something
+/// that is not one.
+pub(crate) fn pinned_key(registry: &Registry, repo: &str) -> Result<Option<PublicKey>, HubError> {
+    Ok(repo_pin(registry, repo).map(|text| PublicKey::from_base64(repo, text)).transpose()?)
+}
+
+/// Pins `key` on every entry installed from `repo`.
+fn pin_for_repo(registry: &mut Registry, repo: &str, key: &str) {
+    for entry in registry.dashboards.iter_mut().filter(|entry| is_from(entry, repo)) {
+        entry.pinned_key = Some(key.to_owned());
+    }
+}
+
+/// The dashboard a preview, an install or a refusal is about, for a
+/// message: empty without a slug.
+pub(crate) fn dashboard_text(slug: Option<&str>) -> String {
+    slug.map(|slug| format!(" (dashboard `{slug}`)")).unwrap_or_default()
 }
 
 /// The error body of `error`, as the HTTP API would answer it.
@@ -309,7 +368,8 @@ pub(crate) fn version_text(version: Option<&str>) -> String {
 /// What the hub trusts for a repository when it previews a release.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Trust {
-    /// The key pinned in the registry: the repository is installed.
+    /// The key pinned in the registry for the repository: a dashboard of it
+    /// is installed.
     pub(crate) pinned: Option<PublicKey>,
     /// The key of the first catalog that lists the repository.
     pub(crate) catalog: Option<PublicKey>,
@@ -508,6 +568,9 @@ pub(crate) struct Staged {
     /// For an update, the registry entry it replaces, as it was when the
     /// preview was made.
     pub(crate) replaces: Option<RegistryEntry>,
+    /// The key pinned for the repository when the preview was made, which
+    /// its key status was judged against; `None` when there was none.
+    pub(crate) pinned: Option<String>,
     /// The verified file.
     file: PathBuf,
     /// Its directory, removed with the file when the release is dropped.
@@ -537,13 +600,16 @@ pub(crate) fn untrusted_key(preview: &InstallPreview) -> HubError {
 /// What a preview is for.
 #[derive(Debug)]
 pub(crate) enum Purpose {
-    /// A first install. The slug comes from the asset name; it, and the
-    /// repository, must not be installed.
+    /// A first install of `slug`, or, without one, of the only dashboard the
+    /// release has for this machine. The slug must not be installed.
     Install {
         /// The registry as read before the preview.
         registry: Registry,
-        /// The key of the first catalog that lists the repository.
+        /// The key of the first catalog that lists the repository; `None`
+        /// when the repository has a pinned key, which decides.
         catalog_key: Option<PublicKey>,
+        /// The dashboard asked for, which passed [`is_slug`].
+        slug: Option<String>,
     },
     /// An update of this entry, installed from the repository.
     Update {
@@ -559,6 +625,9 @@ pub(crate) struct StageRequest {
     pub(crate) repo: String,
     /// What the preview is for.
     pub(crate) purpose: Purpose,
+    /// The key pinned for the repository ([`pinned_key`]), read with the
+    /// registry.
+    pub(crate) pinned: Option<PublicKey>,
     /// A key the user accepted for the repository in this hub.
     pub(crate) accepted: Option<PublicKey>,
     /// This machine's target; `None` refuses the preview.
@@ -580,22 +649,23 @@ pub(crate) fn stage(
     github: &dyn GitHub,
     request: StageRequest,
 ) -> Result<Staged, HubError> {
-    let StageRequest { repo, purpose, accepted, target, manifest_timeout } = request;
+    let StageRequest { repo, purpose, pinned, accepted, target, manifest_timeout } = request;
     let repo = repo.as_str();
     let target = target.ok_or(HubError::UnsupportedPlatform)?;
     let release = github.latest_release(repo)?;
+    let pinned_text = pinned.as_ref().map(|key| key.as_base64().to_owned());
 
     let (asset, slug, trust) = match &purpose {
-        Purpose::Install { registry, catalog_key } => {
-            let (asset, slug) = find_asset(repo, &release, target)?;
+        Purpose::Install { registry, catalog_key, slug } => {
+            let (asset, slug) = match slug {
+                Some(slug) => (named_asset(repo, &release, slug, target)?, slug.clone()),
+                None => find_asset(repo, &release, target)?,
+            };
             refuse_installed(registry, repo, &slug)?;
-            (asset, slug, Trust { pinned: None, catalog: catalog_key.clone(), accepted })
+            (asset, slug, Trust { pinned, catalog: catalog_key.clone(), accepted })
         }
         Purpose::Update { entry } => {
-            let name = asset_name(&entry.slug, target)?;
-            let asset = release
-                .asset(&name)
-                .ok_or_else(|| HubError::NoAsset { repo: repo.to_owned(), asset: name.clone() })?;
+            let asset = named_asset(repo, &release, &entry.slug, target)?;
             // The tag is not signed, but an older one is refused before
             // anything is downloaded.
             let installed = entry.manifest.version.as_deref();
@@ -610,11 +680,6 @@ pub(crate) fn stage(
                     found: version_text(tagged.as_deref()),
                 });
             }
-            let pinned = entry
-                .pinned_key
-                .as_deref()
-                .map(|text| PublicKey::from_base64(repo, text))
-                .transpose()?;
             (asset, entry.slug.clone(), Trust { pinned, catalog: None, accepted })
         }
     };
@@ -649,6 +714,7 @@ pub(crate) fn stage(
         },
         key,
         replaces,
+        pinned: pinned_text,
         file: verified.file,
         directory: verified.directory,
     };
@@ -824,8 +890,21 @@ fn run_manifest(staged: &mut Staged, timeout: Duration) -> Result<(), HubError> 
     Ok(())
 }
 
-/// The asset of a first install: the only one whose name is a slug followed
-/// by `-<triple>[.exe]` of `target`. Returns it with that slug.
+/// The asset of `slug` for `target`: exactly `<slug>-<triple>[.exe]`
+/// ([`asset_name`]).
+fn named_asset<'r>(
+    repo: &str,
+    release: &'r Release,
+    slug: &str,
+    target: Target,
+) -> Result<&'r ReleaseAsset, HubError> {
+    let name = asset_name(slug, target)?;
+    release.asset(&name).ok_or_else(|| HubError::NoAsset { repo: repo.to_owned(), asset: name })
+}
+
+/// The asset of a first install that names no slug: the only one whose name
+/// is a slug followed by `-<triple>[.exe]` of `target`. Returns it with that
+/// slug. Several are refused, with their slugs, so the user can name one.
 fn find_asset<'r>(
     repo: &str,
     release: &'r Release,
@@ -842,25 +921,25 @@ fn find_asset<'r>(
             Err(HubError::NoAsset { repo: repo.to_owned(), asset: format!("<slug>{ending}") })
         }
         (Some(first), Some(second)) => {
-            let names: Vec<&str> = [first, second]
-                .into_iter()
-                .chain(matching)
-                .map(|(asset, _)| asset.name.as_str())
-                .collect();
-            Err(HubError::AmbiguousAsset {
-                repo: repo.to_owned(),
-                ending,
-                assets: names.join(", "),
-            })
+            let mut slugs: Vec<&str> =
+                [first, second].into_iter().chain(matching).map(|(_, slug)| slug).collect();
+            // In a stable order, whatever order the release lists them in.
+            slugs.sort_unstable();
+            Err(HubError::AmbiguousAsset { repo: repo.to_owned(), ending, slugs: slugs.join(", ") })
         }
     }
 }
 
-/// Refuses a first install of `repo` as `slug` when the repository, or
-/// another dashboard of that slug, is installed already.
-fn refuse_installed(registry: &Registry, repo: &str, slug: &str) -> Result<(), HubError> {
-    if let Some(entry) = installed_from(registry, repo) {
-        return Err(HubError::AlreadyInstalled { repo: repo.to_owned(), slug: entry.slug.clone() });
+/// Refuses a first install of `slug` from `repo` when a dashboard of that
+/// slug is installed already: from this repository (update it instead), or
+/// from anywhere else. Other dashboards of the repository may be installed.
+pub(crate) fn refuse_installed(
+    registry: &Registry,
+    repo: &str,
+    slug: &str,
+) -> Result<(), HubError> {
+    if installed_as(registry, repo, slug).is_some() {
+        return Err(HubError::AlreadyInstalled { repo: repo.to_owned(), slug: slug.to_owned() });
     }
     if let Some(entry) = registry.get(slug) {
         let installed_from = match &entry.source {
@@ -1139,10 +1218,26 @@ fn own_file_name(directory: &Path, entry: &RegistryEntry) -> Result<String, HubE
     }
 }
 
+/// Refuses a staged release when the key pinned for its repository is no
+/// longer the one its preview was judged against, unless it is the
+/// release's own key: another dashboard of the repository was installed or
+/// updated meanwhile and pinned another key, which this release must not
+/// undo, or the last dashboard pinning the judged key was uninstalled, so
+/// that key is no longer trusted.
+fn refuse_pin_changed(registry: &Registry, staged: &Staged) -> Result<(), HubError> {
+    let repo = &staged.preview.repo;
+    let now = repo_pin(registry, repo);
+    if now == staged.pinned.as_deref() || now == Some(staged.key.as_base64()) {
+        return Ok(());
+    }
+    Err(HubError::KeyPinnedMeanwhile { repo: repo.clone(), slug: staged.preview.slug.clone() })
+}
+
 /// Installs a staged first install: moves its file into `bin/<slug>/` and
-/// records it, with its key pinned, under the hub directory's lock. Refused
-/// unless the preview is complete (its key trusted, its manifest read), and
-/// if the repository or the slug was installed since the preview.
+/// records it, with its key pinned for the repository, under the hub
+/// directory's lock. Refused unless the preview is complete (its key
+/// trusted, its manifest read), if the slug was installed since the preview,
+/// and if another key was pinned for the repository since.
 pub(crate) fn install_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEntry, HubError> {
     let preview = &staged.preview;
     let manifest = staged.manifest()?;
@@ -1150,7 +1245,9 @@ pub(crate) fn install_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEn
     // Read again: anything may have changed since the preview.
     let mut registry = hub.read_registry()?;
     refuse_installed(&registry, &preview.repo, &preview.slug)?;
+    refuse_pin_changed(&registry, staged)?;
     let (path, name) = place(hub, staged)?;
+    let key = staged.key.as_base64();
     let entry = RegistryEntry {
         slug: preview.slug.clone(),
         path: path.clone(),
@@ -1158,10 +1255,11 @@ pub(crate) fn install_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEn
         sha256: preview.sha256.clone(),
         manifest: manifest.clone(),
         source: Source::Github { repo: preview.repo.clone() },
-        pinned_key: Some(staged.key.as_base64().to_owned()),
+        pinned_key: Some(key.to_owned()),
         previous: None,
     };
     registry.insert(entry.clone());
+    pin_for_repo(&mut registry, &preview.repo, key);
     if let Err(error) = hub.write_registry(&registry) {
         remove_file(&path);
         return Err(error.into());
@@ -1174,9 +1272,10 @@ pub(crate) fn install_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEn
 
 /// Installs a staged update: moves its file into `bin/<slug>/` beside the
 /// current one, records it with the current one as the previous version
-/// and the key it was verified with, then removes the older previous
-/// version, all under the hub directory's lock. Refused unless the preview
-/// is complete, and if the entry changed since the preview.
+/// and the key it was verified with (pinned for the whole repository), then
+/// removes the older previous version, all under the hub directory's lock.
+/// Refused unless the preview is complete, if the entry changed since the
+/// preview, and if another key was pinned for the repository since.
 pub(crate) fn update_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEntry, HubError> {
     let preview = &staged.preview;
     let manifest = staged.manifest()?;
@@ -1187,12 +1286,17 @@ pub(crate) fn update_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEnt
     let (Some(before), Some(current)) = (&staged.replaces, current) else {
         return Err(HubError::ChangedMeanwhile { slug: slug.clone() });
     };
-    if *before != current {
+    // The pin is the repository's, which another of its dashboards may have
+    // changed meanwhile: checked on its own, below.
+    let unpinned = |entry: &RegistryEntry| RegistryEntry { pinned_key: None, ..entry.clone() };
+    if unpinned(before) != unpinned(&current) {
         return Err(HubError::ChangedMeanwhile { slug: slug.clone() });
     }
+    refuse_pin_changed(&registry, staged)?;
     let directory = hub.bin_dir(slug)?;
     let current_name = own_file_name(&directory, &current)?;
     let (path, name) = place(hub, staged)?;
+    let key = staged.key.as_base64();
     let entry = RegistryEntry {
         slug: slug.clone(),
         path: path.clone(),
@@ -1200,7 +1304,7 @@ pub(crate) fn update_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEnt
         sha256: preview.sha256.clone(),
         manifest: manifest.clone(),
         source: current.source.clone(),
-        pinned_key: Some(staged.key.as_base64().to_owned()),
+        pinned_key: Some(key.to_owned()),
         previous: Some(PreviousVersion {
             file_name: current_name.clone(),
             size: current.size,
@@ -1209,6 +1313,7 @@ pub(crate) fn update_staged(hub: &HubDir, staged: &Staged) -> Result<RegistryEnt
         }),
     };
     registry.insert(entry.clone());
+    pin_for_repo(&mut registry, &preview.repo, key);
     if let Err(error) = hub.write_registry(&registry) {
         if name != current_name {
             remove_file(&path);
@@ -1278,9 +1383,11 @@ pub(crate) fn fetch_catalog(github: &dyn GitHub, repo: &str) -> Result<Catalog, 
 }
 
 /// The catalog of `repo` as the hub lists it: its entries that name a
-/// repository, each with the slug installed from it; or why it could not be
-/// read. A repository listed twice keeps its first entry, the one
-/// [`catalog_key`] takes the key from.
+/// repository (and, when they give one, a slug), each with the slug
+/// installed from it; or why it could not be read. A repository may be
+/// listed once per slug: an entry that repeats a repository and a slug
+/// listed before is skipped. The key of a repository is the one of its first
+/// entry, which [`catalog_key`] takes.
 pub(crate) fn list_catalog(github: &dyn GitHub, repo: &str, registry: &Registry) -> HubCatalog {
     match fetch_catalog(github, repo) {
         Ok(catalog) => {
@@ -1290,14 +1397,25 @@ pub(crate) fn list_catalog(github: &dyn GitHub, repo: &str, registry: &Registry)
                     tracing::warn!(catalog = repo, entry = %entry.repo, "skipped a catalog entry that names no repository");
                     continue;
                 }
-                if dashboards.iter().any(|listed| same_repo(&listed.repo, &entry.repo)) {
-                    tracing::warn!(catalog = repo, entry = %entry.repo, "skipped a catalog entry that repeats a repository listed before");
+                if entry.slug.as_deref().is_some_and(|slug| !is_slug(slug)) {
+                    tracing::warn!(catalog = repo, entry = %entry.repo, "skipped a catalog entry whose slug is not one");
                     continue;
                 }
+                let repeated = dashboards.iter().any(|listed| {
+                    same_repo(&listed.repo, &entry.repo) && listed.slug == entry.slug
+                });
+                if repeated {
+                    tracing::warn!(catalog = repo, entry = %entry.repo, slug = ?entry.slug, "skipped a catalog entry that repeats a dashboard listed before");
+                    continue;
+                }
+                let installed = match &entry.slug {
+                    Some(slug) => installed_as(registry, &entry.repo, slug),
+                    None => installed_from(registry, &entry.repo),
+                };
                 dashboards.push(HubCatalogEntry {
-                    installed_slug: installed_from(registry, &entry.repo)
-                        .map(|installed| installed.slug.clone()),
+                    installed_slug: installed.map(|installed| installed.slug.clone()),
                     repo: entry.repo,
+                    slug: entry.slug,
                     name: entry.name,
                     description: entry.description,
                 });
@@ -1345,16 +1463,34 @@ pub(crate) fn catalog_key(
     Ok(None)
 }
 
-/// What the latest release of `repo` means for `entry`, installed from it.
-pub(crate) fn check_entry(
+/// What the latest release of each repository means for the entries
+/// installed from it, in their order. A repository that several entries
+/// come from is read once.
+pub(crate) fn check_entries(
     github: &dyn GitHub,
-    entry: &RegistryEntry,
-    repo: &str,
-) -> DashboardUpdate {
-    let release = match github.latest_release(repo) {
-        Ok(release) => release,
-        Err(error) => return could_not_check(entry, repo, &error.into()),
-    };
+    installed: &[(&RegistryEntry, &str)],
+) -> Vec<DashboardUpdate> {
+    let mut releases: Vec<(&str, Result<Release, HubError>)> = Vec::new();
+    let mut found = Vec::with_capacity(installed.len());
+    for (entry, repo) in installed {
+        let index = match releases.iter().position(|(read, _)| same_repo(read, repo)) {
+            Some(index) => index,
+            None => {
+                releases.push((repo, github.latest_release(repo).map_err(HubError::from)));
+                releases.len() - 1
+            }
+        };
+        found.push(match &releases[index].1 {
+            Ok(release) => check_release(entry, repo, release),
+            Err(error) => could_not_check(entry, repo, error),
+        });
+    }
+    found
+}
+
+/// What `release`, the latest of `repo`, means for `entry`, installed from
+/// it.
+fn check_release(entry: &RegistryEntry, repo: &str, release: &Release) -> DashboardUpdate {
     let latest = tag_version(&release.tag);
     let installed = entry.manifest.version.as_deref();
     let available = latest
@@ -1510,11 +1646,21 @@ mod tests {
         assert_eq!(error.code(), "hub_no_asset");
         assert!(error.to_string().contains("x86_64-unknown-linux-gnu"), "{error}");
 
-        let two = release(&["a-x86_64-unknown-linux-gnu", "b-x86_64-unknown-linux-gnu"]);
+        // Listed out of order: the message sorts the slugs.
+        let two = release(&["b-x86_64-unknown-linux-gnu", "a-x86_64-unknown-linux-gnu"]);
         let error = find_asset("o/r", &two, target).err().ok_or("two assets")?;
         assert_eq!(error.code(), "hub_ambiguous_asset");
         let message = error.to_string();
-        assert!(message.contains("a-x86_64") && message.contains("b-x86_64"), "{message}");
+        assert!(message.contains("(a, b)") && message.contains("slug"), "{message}");
+
+        // Named by its slug, an asset is taken among several.
+        let asset = named_asset("o/r", &two, "b", target)?;
+        assert_eq!(asset.name, "b-x86_64-unknown-linux-gnu");
+        let error = named_asset("o/r", &two, "c", target).err().ok_or("no such slug")?;
+        assert_eq!(error.code(), "hub_no_asset");
+        assert!(error.to_string().contains("c-x86_64-unknown-linux-gnu"), "{error}");
+        let error = named_asset("o/r", &two, "../b", target).err().ok_or("not a slug")?;
+        assert_eq!(error.code(), "hub_invalid_slug");
         Ok(())
     }
 
@@ -1569,7 +1715,7 @@ mod tests {
             key_sha256: key.sha256(),
             key_status: KeyStatus::Unknown,
         };
-        Ok(Staged { preview, key, replaces: None, file, directory })
+        Ok(Staged { preview, key, replaces: None, pinned: None, file, directory })
     }
 
     #[test]
@@ -1602,6 +1748,188 @@ mod tests {
         fs::write(&staged.file, b"changed meanwhile")?;
         assert_eq!(code(accept_staged(staged, timeout)), Some("release_hash_mismatch"));
         Ok(())
+    }
+
+    const KEY_A: &str = "RWRA+IGA6EB9AuIbrrq9pGIpkX+AusRGz1XiVhgRrTfRER9SJa+jD9+x";
+    const KEY_B: &str = "RWQrHdp6bVYNJfouycVFGpYdTZQx74XTWGu6GVziED4qg9k3cewojLTb";
+
+    fn manifest_of(slug: &str, version: &str) -> Manifest {
+        Manifest {
+            name: slug.to_owned(),
+            slug: slug.to_owned(),
+            version: Some(version.to_owned()),
+            eario_version: "0.2.0".to_owned(),
+            protocol: LAUNCH_PROTOCOL_VERSION,
+            description: String::new(),
+        }
+    }
+
+    /// A registry entry of `slug` installed from `repo` with `key` pinned.
+    fn github_entry(slug: &str, repo: &str, key: Option<&str>) -> RegistryEntry {
+        RegistryEntry {
+            slug: slug.to_owned(),
+            path: PathBuf::from("bin").join(slug).join(slug),
+            size: 1,
+            sha256: "ab".repeat(32),
+            manifest: manifest_of(slug, "1.0.0"),
+            source: Source::Github { repo: repo.to_owned() },
+            pinned_key: key.map(str::to_owned),
+            previous: None,
+        }
+    }
+
+    /// A complete first-install preview of `slug` from `repo`, signed by
+    /// `key`, judged against the pin `pinned`.
+    fn trusted(
+        area: &Arc<StagingArea>,
+        repo: &str,
+        slug: &str,
+        key: &str,
+        pinned: Option<&str>,
+    ) -> Result<Staged, Box<dyn std::error::Error>> {
+        let directory = StagingDir::create(area)?;
+        let asset = format!("{slug}-x86_64-unknown-linux-gnu");
+        let file = directory.path.join(&asset);
+        fs::write(&file, slug)?;
+        let (size, sha256) = hub_dir::file_digest(&file)?;
+        let key = PublicKey::from_base64(repo, key)?;
+        let preview = InstallPreview {
+            repo: repo.to_owned(),
+            slug: slug.to_owned(),
+            manifest: Some(manifest_of(slug, "1.0.0")),
+            tag: "v1.0.0".to_owned(),
+            asset,
+            size,
+            sha256,
+            public_key: key.as_base64().to_owned(),
+            key_sha256: key.sha256(),
+            key_status: KeyStatus::Accepted,
+        };
+        let pinned = pinned.map(str::to_owned);
+        Ok(Staged { preview, key, replaces: None, pinned, file, directory })
+    }
+
+    #[test]
+    fn a_repository_installs_each_of_its_dashboards_once() {
+        let mut registry = Registry::default();
+        registry.insert(github_entry("signal-lab", "lab/suite", Some(KEY_A)));
+        registry.insert(RegistryEntry { source: Source::Local, ..github_entry("local", "", None) });
+        let code = |repo: &str, slug: &str| {
+            refuse_installed(&registry, repo, slug).err().map(|e| e.code())
+        };
+        assert_eq!(code("lab/suite", "data-explorer"), None, "another dashboard of the repository");
+        assert_eq!(code("Lab/Suite", "signal-lab"), Some("hub_already_installed"));
+        assert_eq!(code("lab/other", "signal-lab"), Some("hub_slug_taken"));
+        assert_eq!(code("lab/suite", "local"), Some("hub_slug_taken"));
+        assert_eq!(
+            installed_as(&registry, "LAB/suite", "signal-lab").map(|e| e.slug.as_str()),
+            Some("signal-lab")
+        );
+        assert!(installed_as(&registry, "lab/other", "signal-lab").is_none());
+        assert_eq!(repo_pin(&registry, "lab/SUITE"), Some(KEY_A));
+        assert_eq!(repo_pin(&registry, "lab/other"), None);
+    }
+
+    #[test]
+    fn a_key_is_pinned_for_every_dashboard_of_a_repository_and_never_undone() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path());
+        let area = Arc::new(StagingArea::create(&hub)?);
+        let mut registry = Registry::default();
+        // Installed with key A, then updated with key B, which is pinned now.
+        registry.insert(github_entry("signal-lab", "lab/suite", Some(KEY_B)));
+        registry.insert(github_entry("elsewhere", "lab/other", Some(KEY_A)));
+        hub.write_registry(&registry)?;
+
+        // Previewed while key A was pinned, signed by A: another key is
+        // pinned now, so it is refused, and nothing is placed.
+        let stale = trusted(&area, "lab/suite", "data-explorer", KEY_A, Some(KEY_A))?;
+        let error = install_staged(&hub, &stale).err().ok_or("a stale pin must be refused")?;
+        assert_eq!(error.code(), "hub_key_changed_meanwhile");
+        assert!(error.to_string().contains("data-explorer"), "{error}");
+        assert_eq!(hub.read_registry()?, registry, "nothing was recorded");
+        assert!(!hub.bin_dir("data-explorer")?.exists(), "nothing was placed");
+
+        // Previewed while A was pinned, but signed by B, the key pinned now.
+        let current = trusted(&area, "lab/suite", "data-explorer", KEY_B, Some(KEY_A))?;
+        install_staged(&hub, &current)?;
+        let read = hub.read_registry()?;
+        assert_eq!(read.get("data-explorer").and_then(|e| e.pinned_key.as_deref()), Some(KEY_B));
+
+        // A key accepted for a third dashboard is pinned for all of them,
+        // and for no other repository.
+        let changed = trusted(&area, "Lab/Suite", "third", KEY_A, Some(KEY_B))?;
+        install_staged(&hub, &changed)?;
+        let read = hub.read_registry()?;
+        for slug in ["signal-lab", "data-explorer", "third"] {
+            let pinned = read.get(slug).and_then(|entry| entry.pinned_key.as_deref());
+            assert_eq!(pinned, Some(KEY_A), "{slug}");
+        }
+        assert_eq!(read.get("elsewhere").and_then(|e| e.pinned_key.as_deref()), Some(KEY_A));
+        assert_eq!(repo_pin(&read, "lab/suite"), Some(KEY_A));
+        Ok(())
+    }
+
+    /// A GitHub whose latest release of every repository is `v2.0.0`, which
+    /// counts the requests for it.
+    struct CountingReleases(std::sync::atomic::AtomicUsize);
+
+    impl GitHub for CountingReleases {
+        fn latest_release(&self, repo: &str) -> Result<Release, GitHubError> {
+            self.0.fetch_add(1, AtomicOrdering::Relaxed);
+            if repo == "lab/gone" {
+                return Err(GitHubError::NoRelease { repo: repo.to_owned() });
+            }
+            Ok(Release { tag: "v2.0.0".to_owned(), ..release(&[]) })
+        }
+
+        fn catalog(&self, repo: &str) -> Result<Catalog, GitHubError> {
+            Err(GitHubError::NoRelease { repo: repo.to_owned() })
+        }
+
+        fn release_file(
+            &self,
+            _repo: &str,
+            _release: &Release,
+            _name: &str,
+            _limit: u64,
+        ) -> Result<Option<Vec<u8>>, GitHubError> {
+            Ok(None)
+        }
+
+        fn download(
+            &self,
+            repo: &str,
+            _asset: &ReleaseAsset,
+            _out: &mut dyn std::io::Write,
+        ) -> Result<Download, GitHubError> {
+            Err(GitHubError::NoRelease { repo: repo.to_owned() })
+        }
+    }
+
+    #[test]
+    fn a_check_reads_each_repository_once() {
+        let github = CountingReleases(std::sync::atomic::AtomicUsize::new(0));
+        let a = github_entry("signal-lab", "lab/suite", Some(KEY_A));
+        let b = RegistryEntry {
+            manifest: manifest_of("data-explorer", "3.0.0"),
+            ..github_entry("data-explorer", "lab/suite", Some(KEY_A))
+        };
+        let c = github_entry("other", "lab/gone", Some(KEY_A));
+        let d = github_entry("fourth", "LAB/SUITE", Some(KEY_A));
+        let installed = [(&a, "lab/suite"), (&b, "lab/suite"), (&c, "lab/gone"), (&d, "LAB/SUITE")];
+        let found = check_entries(&github, &installed);
+        assert_eq!(github.0.load(AtomicOrdering::Relaxed), 2, "one request per repository");
+        let slugs: Vec<&str> = found.iter().map(|update| update.slug.as_str()).collect();
+        assert_eq!(slugs, ["signal-lab", "data-explorer", "other", "fourth"], "in registry order");
+        assert_eq!(found[0].available_version.as_deref(), Some("2.0.0"));
+        assert_eq!(found[1].available_version, None, "3.0.0 is installed");
+        assert_eq!(found[1].latest_version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            found[2].error.as_ref().map(|error| error.code.as_str()),
+            Some("github_no_release")
+        );
+        assert_eq!(found[3].available_version.as_deref(), Some("2.0.0"));
     }
 
     #[test]
@@ -1727,6 +2055,7 @@ mod tests {
     fn a_catalog_lists_each_repository_once_keeping_its_first_entry() {
         let entry = |repo: &str, name: &str| eario_core::CatalogEntry {
             repo: repo.to_owned(),
+            slug: None,
             name: name.to_owned(),
             description: String::new(),
             public_key: String::new(),
@@ -1752,6 +2081,48 @@ mod tests {
         assert_eq!(
             entries,
             [("lab/signal-lab", "Signal lab"), ("lab/data-explorer", "Data explorer")]
+        );
+    }
+
+    #[test]
+    fn a_catalog_lists_a_repository_once_per_slug() {
+        let entry = |repo: &str, slug: Option<&str>, name: &str| eario_core::CatalogEntry {
+            repo: repo.to_owned(),
+            slug: slug.map(str::to_owned),
+            name: name.to_owned(),
+            description: String::new(),
+            public_key: String::new(),
+        };
+        let github = OneCatalog(Catalog {
+            format_version: CATALOG_FORMAT_VERSION,
+            name: "Suite".to_owned(),
+            dashboards: vec![
+                entry("lab/suite", Some("signal-lab"), "Signal Lab"),
+                entry("lab/suite", Some("data-explorer"), "Data Explorer"),
+                entry("Lab/Suite", Some("signal-lab"), "Signal Lab, again"),
+                entry("lab/suite", None, "The suite"),
+                entry("lab/suite", None, "The suite, again"),
+                entry("lab/suite", Some("Not A Slug"), "Nothing"),
+            ],
+        });
+        let mut registry = Registry::default();
+        registry.insert(github_entry("data-explorer", "lab/suite", Some(KEY_A)));
+        let listed = list_catalog(&github, "lab/catalog", &registry);
+        let entries: Vec<(Option<&str>, &str, Option<&str>)> = listed
+            .dashboards
+            .iter()
+            .map(|entry| {
+                (entry.slug.as_deref(), entry.name.as_str(), entry.installed_slug.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                (Some("signal-lab"), "Signal Lab", None),
+                (Some("data-explorer"), "Data Explorer", Some("data-explorer")),
+                // Without a slug: the dashboard installed from the repository.
+                (None, "The suite", Some("data-explorer")),
+            ]
         );
     }
 }

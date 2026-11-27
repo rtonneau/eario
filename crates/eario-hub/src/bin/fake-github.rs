@@ -10,10 +10,14 @@
 //! - the default catalog (`rtonneau/eario-catalog`), listing
 //!   `lab/data-explorer` with the key that signs its releases;
 //! - the catalog `lab/catalog`, listing `lab/signal-lab`, for a test to add;
+//! - the catalog `lab/suite-catalog`, listing `lab/suite` twice, once per
+//!   slug (`signal-lab`, `data-explorer`), for a test to add;
 //! - with `<directory>`, the directory of the example executables built by
 //!   `cargo xtask e2e`: the latest release `v<workspace version>` of
-//!   `lab/data-explorer` (data-explorer, signed with the catalog's key) and
-//!   of `lab/signal-lab` (signal-lab, signed with a key no catalog lists).
+//!   `lab/data-explorer` (data-explorer, signed with the catalog's key), of
+//!   `lab/signal-lab` (signal-lab, signed with a key no catalog lists), and of
+//!   `lab/suite`, a repository that publishes both in one release (signed
+//!   with a key of its own, which only `lab/suite-catalog` lists).
 //!   Each release carries its `minisign.pub`. Without it, only the catalogs
 //!   are served: enough for a hub that must not reach the real GitHub.
 //!
@@ -58,6 +62,11 @@ const DATA_EXPLORER_REPO: &str = "lab/data-explorer";
 const SIGNAL_LAB_REPO: &str = "lab/signal-lab";
 /// A catalog that is not in the hub's list until a test adds it.
 const LAB_CATALOG: &str = "lab/catalog";
+/// Repository that publishes both examples in one release.
+const SUITE_REPO: &str = "lab/suite";
+/// A catalog that lists [`SUITE_REPO`] once per slug; not in the hub's list
+/// until a test adds it.
+const SUITE_CATALOG: &str = "lab/suite-catalog";
 /// Tag of every release served: `v` and the version the examples declare,
 /// the workspace version, which this crate declares too.
 const TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
@@ -122,17 +131,39 @@ impl Scenario {
         let catalog_key = test_key(0x41)?;
         let signal_lab_key = test_key(0x42)?;
         let new_key = test_key(0x43)?;
+        let suite_key = test_key(0x44)?;
         serve_catalog(
             &fake,
             DEFAULT_CATALOG,
             "Example catalog",
-            &[(DATA_EXPLORER_REPO, "Data Explorer", "Explore a table", &catalog_key)],
+            &[(DATA_EXPLORER_REPO, None, "Data Explorer", "Explore a table", &catalog_key)],
         );
         serve_catalog(
             &fake,
             LAB_CATALOG,
             "Lab catalog",
-            &[(SIGNAL_LAB_REPO, "Signal Lab", "Signals and their spectra", &signal_lab_key)],
+            &[(SIGNAL_LAB_REPO, None, "Signal Lab", "Signals and their spectra", &signal_lab_key)],
+        );
+        serve_catalog(
+            &fake,
+            SUITE_CATALOG,
+            "Suite catalog",
+            &[
+                (
+                    SUITE_REPO,
+                    Some("signal-lab"),
+                    "Signal Lab",
+                    "Signals, from the suite",
+                    &suite_key,
+                ),
+                (
+                    SUITE_REPO,
+                    Some("data-explorer"),
+                    "Data Explorer",
+                    "Tables, from the suite",
+                    &suite_key,
+                ),
+            ],
         );
         let mut scenario = Self { fake, catalog_key, new_key, data_explorer: None };
         if let Some(directory) = directory {
@@ -144,12 +175,13 @@ impl Scenario {
             };
             let signal_lab =
                 FakeAsset::new(&verify::asset_name("signal-lab", target)?, read("signal-lab")?);
-            publish(&scenario.fake, SIGNAL_LAB_REPO, &signal_lab_key, signal_lab);
-            scenario.data_explorer = Some(DataExplorer {
-                executable: read("data-explorer")?,
-                asset: verify::asset_name("data-explorer", target)?,
-                builds: 0,
-            });
+            publish(&scenario.fake, SIGNAL_LAB_REPO, &signal_lab_key, vec![signal_lab.clone()]);
+            let data_explorer = read("data-explorer")?;
+            let asset = verify::asset_name("data-explorer", target)?;
+            let suite = vec![signal_lab, FakeAsset::new(&asset, data_explorer.clone())];
+            publish(&scenario.fake, SUITE_REPO, &suite_key, suite);
+            scenario.data_explorer =
+                Some(DataExplorer { executable: data_explorer, asset, builds: 0 });
             scenario.publish_data_explorer(false)?;
         }
         Ok(scenario)
@@ -163,7 +195,8 @@ impl Scenario {
         let mut content = published.executable.clone();
         content.extend_from_slice(format!("build {}", published.builds).as_bytes());
         let key = if new_key { &self.new_key } else { &self.catalog_key };
-        publish(&self.fake, DATA_EXPLORER_REPO, key, FakeAsset::new(&published.asset, content));
+        let asset = FakeAsset::new(&published.asset, content);
+        publish(&self.fake, DATA_EXPLORER_REPO, key, vec![asset]);
         Ok(())
     }
 
@@ -182,19 +215,19 @@ impl Scenario {
     }
 }
 
-/// Serves a catalog at `repo` listing `entries` (repository, name,
+/// Serves a catalog at `repo` listing `entries` (repository, slug, name,
 /// description, key).
 fn serve_catalog(
     fake: &FakeGitHub,
     repo: &str,
     name: &str,
-    entries: &[(&str, &str, &str, &TestKey)],
+    entries: &[(&str, Option<&str>, &str, &str, &TestKey)],
 ) {
     let dashboards: Vec<serde_json::Value> = entries
         .iter()
-        .map(|(repo, name, description, key)| {
+        .map(|(repo, slug, name, description, key)| {
             serde_json::json!({
-                "repo": repo, "name": name, "description": description,
+                "repo": repo, "slug": slug, "name": name, "description": description,
                 "public_key": key.public_key(),
             })
         })
@@ -204,11 +237,11 @@ fn serve_catalog(
     fake.catalog(repo, catalog.to_string());
 }
 
-/// Serves `asset` as the latest release of `repo`, with its checksum list
-/// signed by `key` and `key`'s `minisign.pub`.
-fn publish(fake: &FakeGitHub, repo: &str, key: &TestKey, asset: FakeAsset) {
-    let signed = key.release_files(std::slice::from_ref(&asset));
-    let mut files = vec![asset];
+/// Serves `assets` as the latest release of `repo`, with their checksum
+/// list signed by `key` and `key`'s `minisign.pub`.
+fn publish(fake: &FakeGitHub, repo: &str, key: &TestKey, assets: Vec<FakeAsset>) {
+    let signed = key.release_files(&assets);
+    let mut files = assets;
     files.extend(signed);
     fake.release(repo, TAG, &files);
 }

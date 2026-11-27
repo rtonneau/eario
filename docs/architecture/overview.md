@@ -352,6 +352,7 @@ a command or arguments.
 | `POST /api/sources/{owner}/{repo}/preview` | `InstallPreview` of the latest release, downloaded and verified, not installed |
 | `POST /api/sources/{owner}/{repo}/accept-key/{key_sha256}` | `InstallPreview`, complete, once the previewed key is accepted |
 | `POST /api/sources/{owner}/{repo}/install/{sha256}` | `HubInfo`; installs the preview of that SHA-256 |
+| `POST /api/sources/{owner}/{repo}/dashboards/{slug}/preview`, `/accept-key/{key_sha256}`, `/install/{sha256}` | The same for the dashboard `slug` of a repository that publishes several in one release |
 | `POST /api/check` | `HubInfo` with the new `last_check` |
 | `POST /api/dashboards/{slug}/update-preview` | `InstallPreview` of the newer release |
 | `POST /api/dashboards/{slug}/update/{sha256}` | `HubInfo`; installs that previewed update |

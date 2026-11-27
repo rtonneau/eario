@@ -127,8 +127,11 @@ describe('api', () => {
     await api.hubAddCatalog('lab/catalog');
     await api.hubRemoveCatalog('lab/catalog');
     await api.hubPreview('lab/signal-lab');
-    await api.hubAcceptKey('lab/signal-lab', key);
-    await api.hubInstall('lab/signal-lab', sha);
+    await api.hubAcceptKey('lab/signal-lab', null, key);
+    await api.hubInstall('lab/signal-lab', null, sha);
+    await api.hubPreview('lab/suite', 'signal-lab');
+    await api.hubAcceptKey('lab/suite', 'signal-lab', key);
+    await api.hubInstall('lab/suite', 'signal-lab', sha);
     await api.hubCheck();
     await api.hubUpdatePreview('signal-lab');
     await api.hubUpdate('signal-lab', sha);
@@ -145,6 +148,9 @@ describe('api', () => {
       ['POST', '/api/sources/lab/signal-lab/preview'],
       ['POST', `/api/sources/lab/signal-lab/accept-key/${key}`],
       ['POST', `/api/sources/lab/signal-lab/install/${sha}`],
+      ['POST', '/api/sources/lab/suite/dashboards/signal-lab/preview'],
+      ['POST', `/api/sources/lab/suite/dashboards/signal-lab/accept-key/${key}`],
+      ['POST', `/api/sources/lab/suite/dashboards/signal-lab/install/${sha}`],
       ['POST', '/api/check'],
       ['POST', '/api/dashboards/signal-lab/update-preview'],
       ['POST', `/api/dashboards/signal-lab/update/${sha}`],
@@ -160,11 +166,13 @@ describe('api', () => {
     }
   });
 
-  it('keeps a repository to two path segments', async () => {
+  it('keeps a repository to two path segments, and a slug to one', async () => {
     fetchMock.mockImplementation(async () => respond(200, {}));
     await api.hubPreview('lab/../../stop-all');
+    await api.hubPreview('lab/suite', '../../stop-all');
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       '/api/sources/lab/..%2F..%2Fstop-all/preview',
+      '/api/sources/lab/suite/dashboards/..%2F..%2Fstop-all/preview',
     ]);
   });
 
@@ -188,7 +196,9 @@ describe('api', () => {
       expect(() => api.componentData(name), name).toThrow(ApiFailure);
       expect(() => api.setState(name, 1), name).toThrow(ApiFailure);
       expect(() => api.hubUpdate('alpha', name), name).toThrow(ApiFailure);
-      expect(() => api.hubAcceptKey('lab/alpha', name), name).toThrow(ApiFailure);
+      expect(() => api.hubAcceptKey('lab/alpha', null, name), name).toThrow(ApiFailure);
+      expect(() => api.hubPreview('lab/alpha', name), name).toThrow(ApiFailure);
+      expect(() => api.hubInstall('lab/alpha', name, 'a'.repeat(64)), name).toThrow(ApiFailure);
     }
     let failure: unknown;
     try {

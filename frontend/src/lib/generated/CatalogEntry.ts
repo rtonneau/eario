@@ -10,6 +10,13 @@ export type CatalogEntry = {
  */
 repo: string, 
 /**
+ * Slug of the dashboard among those the repository's releases carry,
+ * see [`is_slug`]: the hub installs the asset `<slug>-<target
+ * triple>[.exe]`. `None` for a repository whose releases carry one
+ * dashboard. A repository may be listed once per slug.
+ */
+slug: string | null, 
+/**
  * Name of the dashboard, shown to the user.
  */
 name: string, 
@@ -20,6 +27,7 @@ description: string,
 /**
  * Minisign public key (the base64 text of a `.pub` file's key line) the
  * repository's releases are signed with. The catalog's author vouches for
- * it.
+ * it. The key belongs to the repository: when a catalog lists it under
+ * several slugs, the first entry's key is the one used.
  */
 public_key: string, };

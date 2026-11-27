@@ -14,9 +14,12 @@
 //! | `GET /catalogs` | `HubCatalog[]`: each catalog read from GitHub, with its dashboards |
 //! | `POST /catalogs/{owner}/{repo}/add` | `HubCatalog[]`, with that catalog, once it was read |
 //! | `POST /catalogs/{owner}/{repo}/remove` | `HubCatalog[]`, without that catalog |
-//! | `POST /sources/{owner}/{repo}/preview` | `InstallPreview` of the latest release: downloaded and verified, not installed |
-//! | `POST /sources/{owner}/{repo}/accept-key/{key_sha256}` | `InstallPreview`, complete: the previewed key is accepted, then the executable is read |
+//! | `POST /sources/{owner}/{repo}/preview` | `InstallPreview` of the latest release, which must have one dashboard for this machine: downloaded and verified, not installed |
+//! | `POST /sources/{owner}/{repo}/accept-key/{key_sha256}` | `InstallPreview`, complete: the key of the repository's latest preview is accepted, then the executable is read |
 //! | `POST /sources/{owner}/{repo}/install/{sha256}` | `HubInfo`, with the dashboard the preview of that SHA-256 installed |
+//! | `POST /sources/{owner}/{repo}/dashboards/{slug}/preview` | `InstallPreview` of the dashboard `slug` of the latest release, one of several the repository may publish |
+//! | `POST /sources/{owner}/{repo}/dashboards/{slug}/accept-key/{key_sha256}` | `InstallPreview`, complete: the key of the preview of `slug` is accepted (for the repository), then the executable is read |
+//! | `POST /sources/{owner}/{repo}/dashboards/{slug}/install/{sha256}` | `HubInfo`, with `slug` installed from the preview of that SHA-256 |
 //! | `POST /check` | `HubInfo`, whose `last_check` is the check just made |
 //! | `POST /dashboards/{slug}/update-preview` | `InstallPreview` of the newer release of `slug` |
 //! | `POST /dashboards/{slug}/update/{sha256}` | `HubInfo`, once the update previewed with that SHA-256 is installed |
@@ -44,6 +47,15 @@
 //! `update-preview`; the one-step `update` is refused with
 //! `hub_key_changed` when the key changed, and leaves its preview for
 //! `accept-key`.
+//!
+//! A repository may publish several dashboards in one release. A preview
+//! that names none (`/sources/{owner}/{repo}/preview`) is refused with
+//! `hub_ambiguous_asset` when the release has several for this machine; the
+//! `/dashboards/{slug}/` routes name one. Each dashboard of a repository has
+//! a preview of its own; `accept-key` and `install` without a slug take the
+//! repository's latest preview and its preview of that SHA-256. The key
+//! belongs to the repository: one accepted for a dashboard is accepted for
+//! the others, and an install or update pins it for all of them.
 //!
 //! `self-update` takes one request: the hub accepts only a release signed
 //! with the Eario release key compiled into it, so there is no key for the
@@ -85,6 +97,17 @@ pub(crate) fn routes(supervisor: Supervisor) -> Router {
         .route("/sources/{owner}/{repo}/preview", post(preview))
         .route("/sources/{owner}/{repo}/accept-key/{key_sha256}", post(accept_key))
         .route("/sources/{owner}/{repo}/install/{sha256}", post(install))
+        // `dashboards` keeps a slug out of the place of `accept-key` and
+        // `install`: a dashboard may be called either.
+        .route("/sources/{owner}/{repo}/dashboards/{slug}/preview", post(preview_dashboard))
+        .route(
+            "/sources/{owner}/{repo}/dashboards/{slug}/accept-key/{key_sha256}",
+            post(accept_dashboard_key),
+        )
+        .route(
+            "/sources/{owner}/{repo}/dashboards/{slug}/install/{sha256}",
+            post(install_dashboard),
+        )
         .route("/check", post(check))
         .route("/dashboards/{slug}/update-preview", post(preview_update))
         .route("/dashboards/{slug}/update/{sha256}", post(apply_update))
@@ -137,6 +160,7 @@ impl From<HubError> for Failure {
             | HubError::PreviewMismatch { .. }
             | HubError::KeyNotAccepted { .. }
             | HubError::KeyChanged { .. }
+            | HubError::KeyPinnedMeanwhile { .. }
             | HubError::KeyMismatch { .. }
             | HubError::NotFromGitHub { .. }
             | HubError::NotNewer { .. }
@@ -273,21 +297,44 @@ async fn preview(
     State(supervisor): State<Supervisor>,
     Path((owner, repo)): Path<(String, String)>,
 ) -> Result<Json<InstallPreview>, Failure> {
-    Ok(Json(supervisor.preview(&repository(&owner, &repo)).await?))
+    Ok(Json(supervisor.preview(&repository(&owner, &repo), None).await?))
 }
 
 async fn accept_key(
     State(supervisor): State<Supervisor>,
     Path((owner, repo, key_sha256)): Path<(String, String, String)>,
 ) -> Result<Json<InstallPreview>, Failure> {
-    Ok(Json(supervisor.accept_key(&repository(&owner, &repo), &key_sha256).await?))
+    Ok(Json(supervisor.accept_key(&repository(&owner, &repo), None, &key_sha256).await?))
 }
 
 async fn install(
     State(supervisor): State<Supervisor>,
     Path((owner, repo, sha256)): Path<(String, String, String)>,
 ) -> Result<Json<HubInfo>, Failure> {
-    supervisor.install(&repository(&owner, &repo), &sha256).await?;
+    supervisor.install(&repository(&owner, &repo), None, &sha256).await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn preview_dashboard(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, slug)): Path<(String, String, String)>,
+) -> Result<Json<InstallPreview>, Failure> {
+    Ok(Json(supervisor.preview(&repository(&owner, &repo), Some(&slug)).await?))
+}
+
+async fn accept_dashboard_key(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, slug, key_sha256)): Path<(String, String, String, String)>,
+) -> Result<Json<InstallPreview>, Failure> {
+    let repo = repository(&owner, &repo);
+    Ok(Json(supervisor.accept_key(&repo, Some(&slug), &key_sha256).await?))
+}
+
+async fn install_dashboard(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, slug, sha256)): Path<(String, String, String, String)>,
+) -> Result<Json<HubInfo>, Failure> {
+    supervisor.install(&repository(&owner, &repo), Some(&slug), &sha256).await?;
     Ok(Json(supervisor.list().await?))
 }
 

@@ -148,6 +148,15 @@ function repository(repo: string): string {
 }
 
 /**
+ * The route prefix of a release of `repo`: of the dashboard `slug` among
+ * those the repository publishes, or, with `null`, of its only one.
+ */
+function source(repo: string, slug: string | null): string {
+  const base = `/sources/${repository(repo)}`;
+  return slug === null ? base : `${base}/dashboards/${segment(slug)}`;
+}
+
+/**
  * The backend's routes. A name that cannot be a path segment (see
  * `segment`) throws an `ApiFailure` before any request is sent.
  */
@@ -202,17 +211,17 @@ export const api = {
   hubRemoveCatalog: (repo: string) =>
     request<HubCatalog[]>('POST', `/catalogs/${repository(repo)}/remove`),
 
-  hubPreview: (repo: string) =>
-    request<InstallPreview>('POST', `/sources/${repository(repo)}/preview`),
+  // A preview names the dashboard when the repository publishes several;
+  // accepting its key and installing it always name the previewed slug, so
+  // no other preview of the repository is ever the one confirmed.
+  hubPreview: (repo: string, slug: string | null = null) =>
+    request<InstallPreview>('POST', `${source(repo, slug)}/preview`),
 
-  hubAcceptKey: (repo: string, keySha256: string) =>
-    request<InstallPreview>(
-      'POST',
-      `/sources/${repository(repo)}/accept-key/${segment(keySha256)}`,
-    ),
+  hubAcceptKey: (repo: string, slug: string | null, keySha256: string) =>
+    request<InstallPreview>('POST', `${source(repo, slug)}/accept-key/${segment(keySha256)}`),
 
-  hubInstall: (repo: string, sha256: string) =>
-    request<HubInfo>('POST', `/sources/${repository(repo)}/install/${segment(sha256)}`),
+  hubInstall: (repo: string, slug: string | null, sha256: string) =>
+    request<HubInfo>('POST', `${source(repo, slug)}/install/${segment(sha256)}`),
 
   hubCheck: () => request<HubInfo>('POST', '/check'),
 

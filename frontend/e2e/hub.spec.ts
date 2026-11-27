@@ -182,7 +182,7 @@ test.describe('hub with GitHub', () => {
       timeout: REMOTE_TIMEOUT_MS,
     });
     await expect(
-      dialog(page).getByText('The same key signed the version you have installed.'),
+      dialog(page).getByText('The same key signed what you installed from this repository.'),
     ).toBeVisible();
     await expectAccessible(page, 'update dialog, pinned key');
     await dialog(page).getByRole('button', { name: 'Update', exact: true }).click();
@@ -280,6 +280,67 @@ test.describe('hub with GitHub', () => {
     await expect(pageStatus(page)).toHaveText('Signal Lab installed.');
     await expect(card(page, 'Signal Lab').getByText('From GitHub: lab/signal-lab')).toBeVisible();
     await expectAccessible(page, 'hub after an install from a repository');
+  });
+
+  test('installs two dashboards of one repository, by their slugs', async ({
+    page,
+    launchRemoteHub,
+  }) => {
+    await launchRemoteHub();
+    // lab/suite publishes signal-lab and data-explorer in one release.
+    await page.getByLabel('Repository (owner/repo)', { exact: true }).fill('lab/suite');
+    await page.getByRole('button', { name: 'Add repository' }).click();
+    const refusal = page.getByRole('alert');
+    await expect(refusal).toContainText('choose the one to install by its slug', {
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(refusal).toContainText('data-explorer, signal-lab');
+    await expect(refusal).toContainText('(hub_ambiguous_asset)');
+    const slug = page.getByLabel('Dashboard slug (optional)');
+    await expect(slug).toBeFocused();
+    await expect(dialog(page)).toHaveCount(0);
+    await expectAccessible(page, 'a repository that publishes several dashboards, no slug given');
+
+    // Named by its slug in the form: no catalog lists the repository yet.
+    await slug.fill('signal-lab');
+    await page.getByRole('button', { name: 'Add repository' }).click();
+    await expect(dialog(page).getByRole('heading', { name: 'Unknown key' })).toBeVisible({
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await dialog(page).getByRole('button', { name: 'Trust this key' }).click();
+    await expect(dialog(page).getByRole('heading', { name: 'Install Signal Lab?' })).toBeVisible({
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await dialog(page).getByRole('button', { name: 'Install', exact: true }).click();
+    await expect(dialog(page)).toHaveCount(0, { timeout: REMOTE_TIMEOUT_MS });
+    await expect(pageStatus(page)).toHaveText('Signal Lab installed.');
+    await expect(card(page, 'Signal Lab').getByText('From GitHub: lab/suite')).toBeVisible();
+
+    // A catalog that lists the repository once per slug.
+    await page.getByLabel('Catalog repository (owner/repo)').fill('lab/suite-catalog');
+    await page.getByRole('button', { name: 'Add catalog' }).click();
+    await expect(pageStatus(page)).toHaveText('Catalog lab/suite-catalog added.');
+    const suite = page.getByRole('list', { name: 'Dashboards of Suite catalog' });
+    await expect(suite.getByText('lab/suite, dashboard signal-lab')).toBeVisible();
+    await expect(suite.getByText('Installed')).toHaveCount(1);
+    await expectAccessible(page, 'a catalog that lists one repository once per slug');
+
+    // The second dashboard of the repository: its key is the one pinned.
+    await suite.getByRole('button', { name: 'Install Data Explorer from lab/suite' }).click();
+    await expect(dialog(page).getByRole('heading', { name: 'Install Data Explorer?' })).toBeVisible({
+      timeout: REMOTE_TIMEOUT_MS,
+    });
+    await expect(
+      dialog(page).getByText('The same key signed what you installed from this repository.'),
+    ).toBeVisible();
+    await expectAccessible(page, 'install dialog, second dashboard of a repository');
+    await dialog(page).getByRole('button', { name: 'Install', exact: true }).click();
+    await expect(dialog(page)).toHaveCount(0, { timeout: REMOTE_TIMEOUT_MS });
+    await expect(pageStatus(page)).toHaveText('Data Explorer installed.');
+    await expect(card(page, 'Data Explorer').getByText('From GitHub: lab/suite')).toBeVisible();
+    await expect(card(page, 'Signal Lab').getByText('From GitHub: lab/suite')).toBeVisible();
+    await expect(suite.getByText('Installed')).toHaveCount(2);
+    await expectAccessible(page, 'two dashboards installed from one repository');
   });
 
   test('adds and removes catalogs, and turns the check at start off', async ({

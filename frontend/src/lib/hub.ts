@@ -2,6 +2,7 @@
 // update checks. Pure functions of the contract types; the hub decides
 // everything, these only put its answers into words.
 
+import type { HubCatalogEntry } from './generated/HubCatalogEntry';
 import type { HubDashboard } from './generated/HubDashboard';
 import type { HubInfo } from './generated/HubInfo';
 import type { KeyStatus } from './generated/KeyStatus';
@@ -26,15 +27,47 @@ export function looksLikeRepo(text: string): boolean {
   return OWNER.test(owner) && NAME.test(name) && name !== '.' && name !== '..';
 }
 
-/** The dashboard installed from `repo`, compared without case as GitHub does. */
+const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Whether `text` has the shape of a dashboard's slug: lower-case letters and
+ * digits, in words joined by single dashes. Only a hint before a request:
+ * the hub checks every slug again.
+ */
+export function looksLikeSlug(text: string): boolean {
+  return SLUG.test(text);
+}
+
+/** Whether `dashboard` was installed from `repo`, compared without case as GitHub does. */
+function isFrom(dashboard: HubDashboard, repo: string): boolean {
+  return (
+    dashboard.source.kind === 'github' &&
+    dashboard.source.repo.toLowerCase() === repo.toLowerCase()
+  );
+}
+
+/** The first dashboard installed from `repo`, compared without case as GitHub does. */
 export function installedFrom(
   repo: string,
   dashboards: readonly HubDashboard[],
 ): HubDashboard | undefined {
-  const wanted = repo.toLowerCase();
+  return dashboards.find((dashboard) => isFrom(dashboard, repo));
+}
+
+/**
+ * The dashboard installed from a catalog entry: its slug from its
+ * repository, or, for an entry that names no slug, the first dashboard
+ * installed from the repository.
+ */
+export function installedFromEntry(
+  entry: Pick<HubCatalogEntry, 'repo' | 'slug'>,
+  dashboards: readonly HubDashboard[],
+): HubDashboard | undefined {
+  if (entry.slug === null) {
+    return installedFrom(entry.repo, dashboards);
+  }
   return dashboards.find(
-    (dashboard) =>
-      dashboard.source.kind === 'github' && dashboard.source.repo.toLowerCase() === wanted,
+    (dashboard) => dashboard.slug === entry.slug && isFrom(dashboard, entry.repo),
   );
 }
 
@@ -72,7 +105,7 @@ export function keyExplanation(status: KeyStatus): KeyExplanation {
     case 'pinned':
       return {
         title: 'Trusted key',
-        text: 'The same key signed the version you have installed.',
+        text: 'The same key signed what you installed from this repository.',
         level: 'trusted',
       };
     case 'accepted':

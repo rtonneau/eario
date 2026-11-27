@@ -13,6 +13,10 @@
 //! only then is the downloaded executable run for its manifest, and the
 //! command shows the full preview and asks to install it.
 //!
+//! `install` takes `--slug` to choose one of the dashboards a repository
+//! publishes in one release; without it the release must have only one for
+//! this machine.
+//!
 //! The commands work beside a running hub. The hub reads the registry again
 //! for every request, and every file is written atomically. Every change
 //! that reads a file of the hub directory and writes it back (the registry,
@@ -62,6 +66,8 @@ Commands:
 Options:
   --version               Show the version of the hub
   --yes                   Do not ask for confirmations
+  --slug <slug>           With install: the dashboard to install, when the
+                          repository publishes several in one release
   --accept-key <sha256>   With install or update: trust the key the release is
                           signed with if it has this SHA-256, as the command
                           shows it. Compare the key with the one its author
@@ -100,6 +106,7 @@ enum Action {
 struct Options {
     yes: bool,
     accept_key: Option<String>,
+    slug: Option<String>,
 }
 
 /// Why a command failed.
@@ -188,6 +195,12 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<(Command, Opti
                     value.ok_or_else(|| usage("--accept-key needs the SHA-256 of a key".into()))?;
                 options.accept_key = Some(value);
             }
+            "--slug" => {
+                let value = arguments.next().and_then(|value| value.into_string().ok());
+                let value =
+                    value.ok_or_else(|| usage("--slug needs the slug of a dashboard".into()))?;
+                options.slug = Some(value);
+            }
             "--help" | "-h" => return Ok((Command::Help, Options::default())),
             VERSION_ARGUMENT => return Ok((Command::Version, Options::default())),
             other if other.starts_with('-') => {
@@ -217,6 +230,9 @@ fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<(Command, Opti
     let takes_key = matches!(command, Command::Action(Action::Install(_) | Action::Update(_)));
     if options.accept_key.is_some() && !takes_key {
         return Err(usage("--accept-key goes with install or update".into()));
+    }
+    if options.slug.is_some() && !matches!(command, Command::Action(Action::Install(_))) {
+        return Err(usage("--slug goes with install".into()));
     }
     if command == Command::Hub && options.yes {
         return Err(usage("--yes goes with a command".into()));
@@ -373,8 +389,12 @@ async fn install(
     options: &Options,
     terminal: &mut Terminal<'_>,
 ) -> Result<(), CliError> {
-    terminal.say(&format!("Reading the latest release of `{repo}` and verifying it..."))?;
-    let preview = supervisor.preview(repo).await?;
+    let slug = options.slug.as_deref();
+    terminal.say(&format!(
+        "Reading the latest release of `{repo}`{} and verifying it...",
+        remote::dashboard_text(slug)
+    ))?;
+    let preview = supervisor.preview(repo, slug).await?;
     terminal.say(&describe_preview(&preview))?;
     let Some(preview) = trust_key(supervisor, preview, options, terminal).await? else {
         return terminal.say(NOTHING_CHANGED);
@@ -388,7 +408,7 @@ async fn install(
     if !terminal.confirm(&question, "installing")? {
         return terminal.say(NOTHING_CHANGED);
     }
-    let slug = supervisor.install(repo, &preview.sha256).await?;
+    let slug = supervisor.install(repo, Some(&preview.slug), &preview.sha256).await?;
     terminal.say(&format!(
         "Installed {}, version {}, as `{slug}`. Start it from the hub.",
         shown(&manifest.name),
@@ -486,7 +506,7 @@ async fn trust_key(
         None => return Ok(None),
     };
     terminal.say("Accepting the key, then reading the manifest of the verified executable...")?;
-    let full = supervisor.accept_key(&preview.repo, &key_sha256).await?;
+    let full = supervisor.accept_key(&preview.repo, Some(&preview.slug), &key_sha256).await?;
     terminal.say("Key accepted.")?;
     terminal.say(&describe_preview(&full))?;
     Ok(Some(full))
@@ -521,7 +541,9 @@ fn version(version: Option<&str>) -> String {
 fn describe_preview(preview: &InstallPreview) -> String {
     let status = match preview.key_status {
         KeyStatus::Catalog => "listed with this key by a catalog of the hub",
-        KeyStatus::Pinned => "the key this dashboard was installed with",
+        KeyStatus::Pinned => {
+            "the key pinned for this repository when a dashboard was installed from it"
+        }
         KeyStatus::Unknown => "UNKNOWN: no catalog lists this repository",
         KeyStatus::Changed => {
             "CHANGED: not the key trusted for this repository (pinned, or listed by a catalog)"
@@ -610,7 +632,11 @@ fn describe_catalogs(catalogs: &[HubCatalog]) -> String {
                         format!(": {}", shown(&entry.description))
                     };
                     let name = shown(&entry.name);
-                    lines.push(format!("  {}  {name}{description}{state}", entry.repo));
+                    let source = match &entry.slug {
+                        Some(slug) => format!("{} --slug {slug}", entry.repo),
+                        None => entry.repo.clone(),
+                    };
+                    lines.push(format!("  {source}  {name}{description}{state}"));
                 }
             }
         }
@@ -668,6 +694,11 @@ mod tests {
         );
         assert_eq!(command_of(&["check-at-start", "off"]), Some(Action::CheckAtStart(Some(false))));
         assert_eq!(command_of(&["check-at-start"]), Some(Action::CheckAtStart(None)));
+        let (command, options) = parsed(&["install", "lab/suite", "--slug", "signal-lab"])?;
+        assert_eq!(command, Command::Action(Action::Install("lab/suite".into())));
+        assert_eq!(options.slug.as_deref(), Some("signal-lab"));
+        let (_, options) = parsed(&["install", "lab/signal-lab"])?;
+        assert_eq!(options.slug, None, "without --slug, the release's only dashboard");
         Ok(())
     }
 
@@ -695,6 +726,10 @@ mod tests {
             &["--yes"],
             &["self-update", "now"],
             &["self-update", "--accept-key", "ab"],
+            &["install", "a/b", "--slug"],
+            &["update", "signal-lab", "--slug", "signal-lab"],
+            &["check", "--slug", "x"],
+            &["--slug", "x"],
         ] {
             let code = parsed(arguments).err().map(|error| error.code());
             assert_eq!(code, Some("hub_usage"), "{arguments:?}");
@@ -725,6 +760,33 @@ mod tests {
         assert!(printed.starts_with("v1.0.0\u{FFFD}\u{FFFD}Key status:"), "{printed:?}");
         assert_eq!(shown("Signal Lab é 1.2.0"), "Signal Lab é 1.2.0");
         assert_eq!(version(None), "unknown");
+    }
+
+    #[test]
+    fn a_catalog_entry_with_a_slug_shows_how_to_install_it() {
+        use eario_core::HubCatalogEntry;
+        let entry = |slug: Option<&str>, installed: Option<&str>| HubCatalogEntry {
+            repo: "lab/suite".to_owned(),
+            slug: slug.map(str::to_owned),
+            name: "Signal Lab".to_owned(),
+            description: String::new(),
+            installed_slug: installed.map(str::to_owned),
+        };
+        let catalogs = [HubCatalog {
+            repo: "lab/catalog".to_owned(),
+            name: Some("Suite".to_owned()),
+            dashboards: vec![entry(Some("signal-lab"), Some("signal-lab")), entry(None, None)],
+            error: None,
+        }];
+        let text = describe_catalogs(&catalogs);
+        assert!(
+            text.contains("  lab/suite --slug signal-lab  Signal Lab [installed as `signal-lab`]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  lab/suite  Signal Lab\n") || text.ends_with("  lab/suite  Signal Lab"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -213,17 +213,18 @@ pub enum HubError {
         /// The asset looked for, or the pattern of its name.
         asset: String,
     },
-    /// The release has several assets a first install could take.
+    /// The release has several dashboards for this machine and the install
+    /// named none.
     #[error(
-        "the latest release of `{repo}` has several assets ending in `{ending}` ({assets}), so the hub cannot tell which dashboard to install; a repository installed from the hub publishes one dashboard"
+        "the latest release of `{repo}` has several dashboards for this computer, with assets ending in `{ending}` ({slugs}); choose the one to install by its slug"
     )]
     AmbiguousAsset {
         /// The repository.
         repo: String,
         /// The ending of the asset names for this machine.
         ending: String,
-        /// Their names.
-        assets: String,
+        /// Their slugs.
+        slugs: String,
     },
     /// The verified executable did not print its manifest.
     #[error(
@@ -263,19 +264,25 @@ pub enum HubError {
         /// Where the installed one comes from.
         installed_from: String,
     },
-    /// The repository is installed already.
-    #[error("`{repo}` is already installed, as `{slug}`; update it instead")]
+    /// The dashboard is installed already from this repository.
+    #[error("`{slug}` is already installed from `{repo}`; update it instead")]
     AlreadyInstalled {
         /// The repository.
         repo: String,
         /// The slug it is installed as.
         slug: String,
     },
-    /// Nothing was previewed for the repository.
-    #[error("no verified release of `{repo}` is waiting to be installed; preview it first")]
+    /// Nothing was previewed for the repository, or for that dashboard of
+    /// it.
+    #[error(
+        "no verified release of `{repo}`{dashboard} is waiting to be installed; preview it first"
+    )]
     NoPreview {
         /// The repository.
         repo: String,
+        /// The dashboard asked for, as the message names it; empty when none
+        /// was named.
+        dashboard: String,
     },
     /// The verified file of a preview is no longer in the staging directory.
     #[error(
@@ -319,6 +326,17 @@ pub enum HubError {
         repo: String,
         /// SHA-256 of the new key.
         key_sha256: String,
+    },
+    /// Another key was pinned for the repository while the release waited
+    /// to be installed.
+    #[error(
+        "the key trusted for `{repo}` changed while the release of `{slug}` waited to be installed: another of its dashboards was installed or updated with another key, or the last one pinning it was uninstalled, meanwhile; preview `{slug}` again"
+    )]
+    KeyPinnedMeanwhile {
+        /// The repository.
+        repo: String,
+        /// The dashboard of the refused release.
+        slug: String,
     },
     /// The key accepted is not the previewed one.
     #[error(
@@ -449,6 +467,7 @@ impl HubError {
             Self::InvalidSha256(_) => "hub_invalid_sha256",
             Self::KeyNotAccepted { .. } => "hub_key_not_accepted",
             Self::KeyChanged { .. } => "hub_key_changed",
+            Self::KeyPinnedMeanwhile { .. } => "hub_key_changed_meanwhile",
             Self::KeyMismatch { .. } => "hub_key_mismatch",
             Self::NotFromGitHub { .. } => "hub_not_from_github",
             Self::NotNewer { .. } => "hub_not_newer",
@@ -507,10 +526,11 @@ enum GitHubAccess {
 #[derive(Default)]
 struct RemoteState {
     /// Verified releases waiting to be confirmed, oldest first, at most one
-    /// per repository and [`MAX_STAGED`] in all.
+    /// per repository and slug and [`MAX_STAGED`] in all.
     staged: Vec<Staged>,
-    /// Keys the user accepted, by repository in lower case, until an install
-    /// pins them.
+    /// Keys the user accepted, by repository in lower case (a key belongs to
+    /// the repository, whichever of its dashboards it was accepted for),
+    /// until an install or an update pins them.
     accepted: HashMap<String, PublicKey>,
 }
 
@@ -1292,33 +1312,57 @@ impl Supervisor {
     /// [`crate::remote`] describes, without writing outside `staging/`.
     /// The preview waits for [`Supervisor::install`] with its SHA-256.
     ///
-    /// Refused when the repository, or a dashboard of the same slug, is
-    /// installed already. The key status is `catalog` when a catalog lists
-    /// the repository with that key, `unknown` when none lists it, `changed`
-    /// when the catalog lists another key, and `accepted` once the user
-    /// accepted it ([`Supervisor::accept_key`]).
+    /// With `slug`, the asset is exactly `<slug>-<target triple>[.exe]`, one
+    /// of the dashboards the repository publishes; without, the release must
+    /// have only one dashboard for this machine (`hub_ambiguous_asset`
+    /// otherwise, naming their slugs). The manifest must give that slug.
+    ///
+    /// Refused when a dashboard of that slug is installed already, from this
+    /// repository or elsewhere; with `slug`, before any request. The key
+    /// status is `pinned` when another dashboard of the repository is
+    /// installed with that key (and `changed` with another), else `catalog`
+    /// when a catalog lists the repository with that key, `unknown` when
+    /// none lists it, `changed` when the catalog lists another key; and
+    /// `accepted` once the user accepted it for the repository
+    /// ([`Supervisor::accept_key`]).
     ///
     /// With a key that is `unknown` or `changed`, the downloaded executable
     /// is not run: the preview has no manifest, and only
     /// [`Supervisor::accept_key`] completes it.
-    pub async fn preview(&self, repo: &str) -> Result<InstallPreview, HubError> {
+    pub async fn preview(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+    ) -> Result<InstallPreview, HubError> {
         check_repo(repo)?;
+        if let Some(slug) = slug {
+            check_slug(slug)?;
+        }
         let supervisor = self.clone();
-        let repo = repo.to_owned();
+        let (repo, slug) = (repo.to_owned(), slug.map(str::to_owned));
         blocking(move || {
             let hub = supervisor.hub_dir();
             let registry = hub.read_registry()?;
-            // Before any request: an installed repository is updated.
-            if let Some(entry) = remote::installed_from(&registry, &repo) {
-                return Err(HubError::AlreadyInstalled { repo, slug: entry.slug.clone() });
+            // Before any request: an installed dashboard is updated, and a
+            // slug installed from elsewhere is refused.
+            if let Some(slug) = &slug {
+                remote::refuse_installed(&registry, &repo, slug)?;
             }
+            let pinned = remote::pinned_key(&registry, &repo)?;
             let github = supervisor.github()?;
-            let catalogs = remote::read_catalogs(hub)?;
-            let catalog_key = remote::catalog_key(github.as_ref(), &catalogs, &repo)?;
+            // A pinned key decides: the catalogs are not read.
+            let catalog_key = match &pinned {
+                Some(_) => None,
+                None => {
+                    let catalogs = remote::read_catalogs(hub)?;
+                    remote::catalog_key(github.as_ref(), &catalogs, &repo)?
+                }
+            };
             let request = StageRequest {
                 accepted: supervisor.accepted_key(&repo),
                 repo,
-                purpose: Purpose::Install { registry, catalog_key },
+                purpose: Purpose::Install { registry, catalog_key, slug },
+                pinned,
                 target: Target::CURRENT,
                 manifest_timeout: supervisor.shared.options.manifest_timeout,
             };
@@ -1329,11 +1373,13 @@ impl Supervisor {
         .await
     }
 
-    /// Accepts the key of the release previewed for `repo`, which must have
-    /// SHA-256 `key_sha256` (see [`InstallPreview::key_sha256`]): trust on
-    /// first use, or a key change the user confirms. The key is pinned when
-    /// the release is installed; until then it is trusted for this
-    /// repository by this hub only.
+    /// Accepts the key of the release previewed for `slug` of `repo` (the
+    /// latest preview of `repo` without `slug`), which must have SHA-256
+    /// `key_sha256` (see [`InstallPreview::key_sha256`]): trust on first use,
+    /// or a key change the user confirms. The key is accepted for the
+    /// repository, so a later preview of another of its dashboards finds it
+    /// `accepted`. It is pinned when the release is installed; until then it
+    /// is trusted by this hub only.
     ///
     /// Only now is the verified executable run: its staged file is hashed
     /// again, then run for its manifest, which is checked as for a trusted
@@ -1345,20 +1391,27 @@ impl Supervisor {
     pub async fn accept_key(
         &self,
         repo: &str,
+        slug: Option<&str>,
         key_sha256: &str,
     ) -> Result<InstallPreview, HubError> {
         check_repo(repo)?;
+        if let Some(slug) = slug {
+            check_slug(slug)?;
+        }
         check_sha256(key_sha256)?;
         let supervisor = self.clone();
-        let (repo, key_sha256) = (repo.to_owned(), key_sha256.to_owned());
+        let (repo, slug, key_sha256) =
+            (repo.to_owned(), slug.map(str::to_owned), key_sha256.to_owned());
         blocking(move || {
             let staged = {
                 let mut state = supervisor.remote_state();
-                let index = state
-                    .staged
-                    .iter()
-                    .position(|staged| same_repo(&staged.preview.repo, &repo))
-                    .ok_or_else(|| HubError::NoPreview { repo: repo.clone() })?;
+                let index =
+                    staged_index(&state.staged, &repo, slug.as_deref()).ok_or_else(|| {
+                        HubError::NoPreview {
+                            dashboard: remote::dashboard_text(slug.as_deref()),
+                            repo: repo.clone(),
+                        }
+                    })?;
                 let preview = &state.staged[index].preview;
                 if preview.key_sha256 != key_sha256 {
                     return Err(HubError::KeyMismatch {
@@ -1375,32 +1428,44 @@ impl Supervisor {
                 state.staged.remove(index)
             };
             let key = staged.key.clone();
+            let slug = staged.preview.slug.clone();
             // A release that fails is dropped here, its file with it.
             let staged = remote::accept_staged(staged, supervisor.shared.options.manifest_timeout)?;
             supervisor.remote_state().accepted.insert(repo.to_ascii_lowercase(), key);
-            tracing::info!(repo, key_sha256, "key accepted, release checked");
+            tracing::info!(repo, dashboard = %slug, key_sha256, "key accepted, release checked");
             Ok(supervisor.keep_staged(staged))
         })
         .await
     }
 
-    /// Installs the release previewed for `repo`, which must have SHA-256
-    /// `sha256` (see [`InstallPreview::sha256`]), and returns its slug.
+    /// Installs the release previewed for `slug` of `repo`, which must have
+    /// SHA-256 `sha256` (see [`InstallPreview::sha256`]), and returns its
+    /// slug. Without `slug`, the preview of `repo` with that SHA-256 is
+    /// taken.
     ///
     /// Refused when nothing was previewed, the SHA-256 differs, the key is
     /// `unknown` or `changed` and was not accepted (so the preview has no
-    /// manifest), or the repository or the slug was installed since. The
-    /// file is moved into `bin/<slug>/` and recorded with its key pinned,
-    /// under the hub directory's lock; the preview is used up either way,
-    /// unless it was refused for its SHA-256 or its key.
-    pub async fn install(&self, repo: &str, sha256: &str) -> Result<String, HubError> {
+    /// manifest), the slug was installed since, or another key was pinned
+    /// for the repository since (`hub_key_changed_meanwhile`). The file is
+    /// moved into `bin/<slug>/` and recorded with its key pinned for the
+    /// repository, under the hub directory's lock; the preview is used up
+    /// either way, unless it was refused for its SHA-256 or its key.
+    pub async fn install(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+        sha256: &str,
+    ) -> Result<String, HubError> {
         check_repo(repo)?;
+        if let Some(slug) = slug {
+            check_slug(slug)?;
+        }
         check_sha256(sha256)?;
         let _operation = self.shared.operations.lock().await;
         let supervisor = self.clone();
-        let (repo, sha256) = (repo.to_owned(), sha256.to_owned());
+        let (repo, slug, sha256) = (repo.to_owned(), slug.map(str::to_owned), sha256.to_owned());
         let entry = blocking(move || {
-            let staged = supervisor.take_staged(&repo, &sha256)?;
+            let staged = supervisor.take_staged(&repo, slug.as_deref(), &sha256)?;
             let installed = remote::install_staged(supervisor.hub_dir(), &staged);
             // Removes what is left of the staged release, here, off the
             // asynchronous runtime.
@@ -1439,10 +1504,7 @@ impl Supervisor {
                 Vec::new()
             } else {
                 match supervisor.github() {
-                    Ok(github) => installed
-                        .iter()
-                        .map(|(entry, repo)| remote::check_entry(github.as_ref(), entry, repo))
-                        .collect(),
+                    Ok(github) => remote::check_entries(github.as_ref(), &installed),
                     Err(error) => installed
                         .iter()
                         .map(|(entry, repo)| remote::could_not_check(entry, repo, &error))
@@ -1469,11 +1531,12 @@ impl Supervisor {
     }
 
     /// Previews an update of `slug` to the latest release of the repository
-    /// it was installed from, as [`Supervisor::preview`] does, with the key
-    /// pinned at install. Refused before any download when `slug` is
-    /// running or starting, was installed locally, or the release's tag is
-    /// not a newer version; after the download, when the executable's
-    /// version is not newer than the installed one. The preview waits for
+    /// it was installed from, as [`Supervisor::preview`] does: the asset of
+    /// that slug, with the key pinned for the repository. Refused before any
+    /// download when `slug` is running or starting, was installed locally,
+    /// or the release's tag is not a newer version; after the download, when
+    /// the executable's version is not newer than the installed one. The
+    /// preview waits for
     /// [`Supervisor::apply_update`] with its SHA-256.
     pub async fn preview_update(&self, slug: &str) -> Result<InstallPreview, HubError> {
         check_slug(slug)?;
@@ -1489,11 +1552,13 @@ impl Supervisor {
         }
         let supervisor = self.clone();
         blocking(move || {
+            let pinned = remote::pinned_key(&supervisor.hub_dir().read_registry()?, &repo)?;
             let github = supervisor.github()?;
             let request = StageRequest {
                 accepted: supervisor.accepted_key(&repo),
                 repo,
                 purpose: Purpose::Update { entry: Box::new(entry) },
+                pinned,
                 target: Target::CURRENT,
                 manifest_timeout: supervisor.shared.options.manifest_timeout,
             };
@@ -1508,8 +1573,10 @@ impl Supervisor {
     /// [`Supervisor::preview_update`], which must have SHA-256 `sha256`.
     ///
     /// Refused while `slug` runs or starts, when the key changed and was not
-    /// accepted, and when the dashboard changed since the preview. The
-    /// version it replaces is kept as the previous version, for
+    /// accepted, when the dashboard changed since the preview, and when
+    /// another dashboard of its repository pinned another key since
+    /// (`hub_key_changed_meanwhile`). The key is pinned for the repository.
+    /// The version it replaces is kept as the previous version, for
     /// [`Supervisor::rollback`]; the older previous version is removed.
     pub async fn apply_update(&self, slug: &str, sha256: &str) -> Result<(), HubError> {
         check_slug(slug)?;
@@ -1521,9 +1588,9 @@ impl Supervisor {
         };
         self.make_idle(slug).await?;
         let supervisor = self.clone();
-        let sha256 = sha256.to_owned();
+        let (name, sha256) = (slug.to_owned(), sha256.to_owned());
         let entry = blocking(move || {
-            let staged = supervisor.take_staged(&repo, &sha256)?;
+            let staged = supervisor.take_staged(&repo, Some(&name), &sha256)?;
             let updated = remote::update_staged(supervisor.hub_dir(), &staged);
             drop(staged);
             let entry = updated?;
@@ -1746,16 +1813,15 @@ impl Supervisor {
     }
 
     /// Keeps a staged release until it is confirmed, replacing the one of
-    /// the same repository and dropping the oldest beyond [`MAX_STAGED`].
-    /// Returns its preview. Blocking: removes the files of those dropped.
+    /// the same repository and slug and dropping the oldest beyond
+    /// [`MAX_STAGED`]. Returns its preview. Blocking: removes the files of
+    /// those dropped.
     fn keep_staged(&self, staged: Staged) -> InstallPreview {
         let preview = staged.preview.clone();
         let dropped = {
             let mut state = self.remote_state();
             let mut dropped = Vec::new();
-            if let Some(index) =
-                state.staged.iter().position(|kept| same_repo(&kept.preview.repo, &preview.repo))
-            {
+            if let Some(index) = staged_index(&state.staged, &preview.repo, Some(&preview.slug)) {
                 dropped.push(state.staged.remove(index));
             }
             while state.staged.len() >= MAX_STAGED {
@@ -1769,16 +1835,30 @@ impl Supervisor {
         preview
     }
 
-    /// Takes the staged release of `repo` to install it, when its SHA-256 is
-    /// `sha256` and its preview is complete: its key trusted and its
-    /// manifest read. Otherwise leaves it and refuses.
-    fn take_staged(&self, repo: &str, sha256: &str) -> Result<Staged, HubError> {
+    /// Takes the staged release of `slug` of `repo` to install it, when its
+    /// SHA-256 is `sha256` and its preview is complete: its key trusted and
+    /// its manifest read. Without `slug`, the staged release of `repo` with
+    /// that SHA-256, else its latest. Otherwise leaves it and refuses.
+    fn take_staged(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+        sha256: &str,
+    ) -> Result<Staged, HubError> {
         let mut state = self.remote_state();
-        let index = state
-            .staged
-            .iter()
-            .position(|staged| same_repo(&staged.preview.repo, repo))
-            .ok_or_else(|| HubError::NoPreview { repo: repo.to_owned() })?;
+        let by_hash = || {
+            state.staged.iter().rposition(|staged| {
+                same_repo(&staged.preview.repo, repo) && staged.preview.sha256 == sha256
+            })
+        };
+        let index = match slug {
+            Some(_) => staged_index(&state.staged, repo, slug),
+            None => by_hash().or_else(|| staged_index(&state.staged, repo, None)),
+        }
+        .ok_or_else(|| HubError::NoPreview {
+            repo: repo.to_owned(),
+            dashboard: remote::dashboard_text(slug),
+        })?;
         let staged = &state.staged[index];
         if staged.preview.sha256 != sha256 {
             return Err(HubError::PreviewMismatch {
@@ -1789,6 +1869,14 @@ impl Supervisor {
         staged.manifest()?;
         Ok(state.staged.remove(index))
     }
+}
+
+/// Index of the staged release of `slug` of `repo`; without `slug`, of the
+/// latest staged release of `repo`.
+fn staged_index(staged: &[Staged], repo: &str, slug: Option<&str>) -> Option<usize> {
+    staged.iter().rposition(|staged| {
+        same_repo(&staged.preview.repo, repo) && slug.is_none_or(|slug| staged.preview.slug == slug)
+    })
 }
 
 /// Runs blocking work (file system, hashing, processes) off the asynchronous

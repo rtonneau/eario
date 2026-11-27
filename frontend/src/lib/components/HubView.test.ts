@@ -48,10 +48,18 @@ const SHA = 'a'.repeat(64);
 const KEY_SHA = 'b'.repeat(64);
 const KEY = 'RWQBAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJicoKQ==';
 
-/** What the hub answers for a release of `repo`: the preview and, once trusted, its manifest. */
-function preview(repo: string, name: string, status: KeyStatus, version = '1.0.0'): InstallPreview {
+/**
+ * What the hub answers for a release of `repo`: the preview of its dashboard
+ * `slug` (by default the repository's name) and, once trusted, its manifest.
+ */
+function preview(
+  repo: string,
+  name: string,
+  status: KeyStatus,
+  version = '1.0.0',
+  slug = repo.split('/')[1] ?? repo,
+): InstallPreview {
   const trusted = status !== 'unknown' && status !== 'changed';
-  const slug = repo.split('/')[1] ?? repo;
   return {
     repo,
     slug,
@@ -81,7 +89,11 @@ let settings: HubSettings;
 let lastCheck: UpdateCheck | null;
 /** A newer hub the last check found. */
 let hubAvailable: string | null;
-/** The latest release of each repository, as a preview. */
+/**
+ * The latest release of each repository, as a preview: by `owner/repo` for a
+ * repository with one dashboard, by `owner/repo#slug` for one that publishes
+ * several (a preview without a slug is then refused as the hub does).
+ */
 let releases: Record<string, InstallPreview>;
 /** The update preview of each slug. */
 let updates: Record<string, InstallPreview>;
@@ -135,29 +147,45 @@ function remote(method: string, url: string): Response | null {
     }
     return json(catalogs);
   }
-  const source = /^\/api\/sources\/([^/]+\/[^/]+)\/(preview|accept-key|install)(?:\/([0-9a-f]+))?$/.exec(
-    url,
-  );
+  const source =
+    /^\/api\/sources\/([^/]+\/[^/]+)\/(?:dashboards\/([^/]+)\/)?(preview|accept-key|install)(?:\/([0-9a-f]+))?$/.exec(
+      url,
+    );
   if (source !== null) {
-    const release = releases[source[1] ?? ''];
+    const [, repo = '', slug, action, hash] = source;
+    const single = releases[repo];
+    const release =
+      slug === undefined
+        ? single
+        : (releases[`${repo}#${slug}`] ?? (single?.slug === slug ? single : undefined));
     if (release === undefined) {
-      return refuse(502, 'github_not_found', 'No such repository.');
+      if (slug === undefined && Object.keys(releases).some((key) => key.startsWith(`${repo}#`))) {
+        return refuse(
+          502,
+          'hub_ambiguous_asset',
+          `The latest release of ${repo} has several dashboards for this computer; choose the one to install by its slug.`,
+        );
+      }
+      return slug === undefined
+        ? refuse(502, 'github_not_found', 'No such repository.')
+        : refuse(502, 'hub_no_asset', 'The release has no such dashboard.');
     }
-    switch (source[2]) {
+    switch (action) {
       case 'preview':
         return json(release);
       case 'accept-key':
-        if (source[3] !== release.key_sha256) {
+        if (hash !== release.key_sha256) {
           return refuse(409, 'hub_key_mismatch');
         }
         release.key_status = 'accepted';
-        release.manifest = preview(release.repo, release.repo, 'accepted').manifest;
+        release.manifest = preview(release.repo, release.repo, 'accepted', '1.0.0', release.slug)
+          .manifest;
         return json(release);
       case 'install': {
         if (release.manifest === null) {
           return refuse(409, 'hub_key_not_accepted');
         }
-        if (source[3] !== release.sha256) {
+        if (hash !== release.sha256) {
           return refuse(409, 'hub_preview_mismatch');
         }
         const { slug, name, version } = release.manifest;
@@ -502,8 +530,14 @@ describe('HubView catalogs and installs', () => {
         repo: 'lab/catalog',
         name: 'Lab',
         dashboards: [
-          { repo: 'lab/explorer', name: 'Explorer', description: 'Explore', installed_slug: null },
-          { repo: 'lab/alpha', name: 'Alpha', description: '', installed_slug: 'alpha' },
+          {
+            repo: 'lab/explorer',
+            slug: null,
+            name: 'Explorer',
+            description: 'Explore',
+            installed_slug: null,
+          },
+          { repo: 'lab/alpha', slug: null, name: 'Alpha', description: '', installed_slug: 'alpha' },
         ],
         error: null,
       },
@@ -587,7 +621,9 @@ describe('HubView catalogs and installs', () => {
     await fireEvent.click(found.getByRole('button', { name: 'Install' }));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(posted(`/api/sources/lab/explorer/install/${SHA}`)).toBe(true);
+    // Confirmed by the previewed slug, so no other preview of the repository
+    // is the one installed.
+    expect(posted(`/api/sources/lab/explorer/dashboards/explorer/install/${SHA}`)).toBe(true);
     expect(pageStatus().textContent).toBe('Explorer installed.');
     expect(within(card('Explorer')).getByText('From GitHub: lab/explorer')).toBeTruthy();
     expect(
@@ -615,18 +651,18 @@ describe('HubView catalogs and installs', () => {
     await fireEvent.click(found.getByRole('button', { name: 'Trust this key' }));
 
     await waitFor(() => expect(found.getByRole('heading', { name: 'Key trusted by you' })).toBeTruthy());
-    expect(posted(`/api/sources/lab/unknown/accept-key/${KEY_SHA}`)).toBe(true);
+    expect(posted(`/api/sources/lab/unknown/dashboards/unknown/accept-key/${KEY_SHA}`)).toBe(true);
     expect(found.getByText('lab/unknown, version 1.0.0')).toBeTruthy();
     expect(found.getByRole('status').textContent).toBe('Key trusted. lab/unknown, version 1.0.0.');
     expect(document.activeElement).toBe(found.getByRole('button', { name: 'Cancel' }));
-    expect(posted(`/api/sources/lab/unknown/install/${SHA}`)).toBe(false);
+    expect(posted(`/api/sources/lab/unknown/dashboards/unknown/install/${SHA}`)).toBe(false);
     const confirm = found.getByRole('button', { name: 'Install' }) as HTMLButtonElement;
     await waitFor(() => expect(confirm.disabled).toBe(false));
 
     await fireEvent.click(confirm);
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(posted(`/api/sources/lab/unknown/install/${SHA}`)).toBe(true);
+    expect(posted(`/api/sources/lab/unknown/dashboards/unknown/install/${SHA}`)).toBe(true);
   });
 
   it('does not send a repository that is not owner/repo', async () => {
@@ -639,6 +675,145 @@ describe('HubView catalogs and installs', () => {
 
     expect(screen.getByRole('alert').textContent).toMatch(/owner\/repo/);
     expect(requests.some((request) => request.url.includes('/sources/'))).toBe(false);
+  });
+
+  it('installs two dashboards of one repository that a catalog lists once per slug', async () => {
+    catalogs = [
+      {
+        repo: 'lab/catalog',
+        name: 'Suite',
+        dashboards: ['signal-lab', 'data-explorer'].map((slug) => ({
+          repo: 'lab/suite',
+          slug,
+          name: slug === 'signal-lab' ? 'Signal Lab' : 'Data Explorer',
+          description: '',
+          installed_slug: null,
+        })),
+        error: null,
+      },
+    ];
+    releases = {
+      'lab/suite#signal-lab': preview('lab/suite', 'Signal Lab', 'catalog', '1.0.0', 'signal-lab'),
+      'lab/suite#data-explorer': preview(
+        'lab/suite',
+        'Data Explorer',
+        'pinned',
+        '1.0.0',
+        'data-explorer',
+      ),
+    };
+    await showHub();
+    const suite = within(await screen.findByRole('list', { name: 'Dashboards of Suite' }));
+    expect(suite.getByText('lab/suite, dashboard signal-lab')).toBeTruthy();
+    expect(suite.getByText('lab/suite, dashboard data-explorer')).toBeTruthy();
+
+    for (const [slug, name] of [
+      ['signal-lab', 'Signal Lab'],
+      ['data-explorer', 'Data Explorer'],
+    ] as const) {
+      await fireEvent.click(suite.getByRole('button', { name: `Install ${name} from lab/suite` }));
+      const found = within(await dialog());
+      expect(found.getByRole('heading', { name: `Install ${name}?` })).toBeTruthy();
+      expect(posted(`/api/sources/lab/suite/dashboards/${slug}/preview`)).toBe(true);
+      const confirm = found.getByRole('button', { name: 'Install' }) as HTMLButtonElement;
+      await waitFor(() => expect(confirm.disabled).toBe(false));
+      await fireEvent.click(confirm);
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      expect(posted(`/api/sources/lab/suite/dashboards/${slug}/install/${SHA}`)).toBe(true);
+      expect(pageStatus().textContent).toBe(`${name} installed.`);
+      expect(within(card(name)).getByText('From GitHub: lab/suite')).toBeTruthy();
+      // Only the entry of that slug shows as installed.
+      expect(suite.queryByRole('button', { name: `Install ${name} from lab/suite` })).toBeNull();
+    }
+    expect(suite.getAllByText('Installed')).toHaveLength(2);
+    expect(requests.some((request) => request.url === '/api/sources/lab/suite/preview')).toBe(false);
+  });
+
+  it('fills the repository when a catalog entry publishes several dashboards', async () => {
+    catalogs = [
+      {
+        repo: 'lab/catalog',
+        name: 'Lab',
+        dashboards: [
+          { repo: 'lab/suite', slug: null, name: 'Suite', description: '', installed_slug: null },
+        ],
+        error: null,
+      },
+    ];
+    releases = {
+      'lab/suite#signal-lab': preview('lab/suite', 'Signal Lab', 'unknown', '1.0.0', 'signal-lab'),
+      'lab/suite#data-explorer': preview(
+        'lab/suite',
+        'Data Explorer',
+        'unknown',
+        '1.0.0',
+        'data-explorer',
+      ),
+    };
+    await showHub();
+    await fireEvent.input(screen.getByLabelText('Repository (owner/repo)'), {
+      target: { value: 'lab/other' },
+    });
+    const lab = within(await screen.findByRole('list', { name: 'Dashboards of Lab' }));
+    await fireEvent.click(lab.getByRole('button', { name: 'Install Suite from lab/suite' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/\(hub_ambiguous_asset\)$/);
+    const slug = screen.getByLabelText('Dashboard slug (optional)') as HTMLInputElement;
+    await waitFor(() => expect(document.activeElement).toBe(slug));
+    const repository = screen.getByLabelText('Repository (owner/repo)') as HTMLInputElement;
+    expect(repository.value).toBe('lab/suite');
+
+    await fireEvent.input(slug, { target: { value: 'signal-lab' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add repository' }));
+    await dialog();
+    expect(posted('/api/sources/lab/suite/dashboards/signal-lab/preview')).toBe(true);
+  });
+
+  it('asks for a slug when the repository publishes several dashboards', async () => {
+    releases = {
+      'lab/suite#signal-lab': preview('lab/suite', 'Signal Lab', 'unknown', '1.0.0', 'signal-lab'),
+      'lab/suite#data-explorer': preview(
+        'lab/suite',
+        'Data Explorer',
+        'unknown',
+        '1.0.0',
+        'data-explorer',
+      ),
+    };
+    await showHub();
+    await fireEvent.input(screen.getByLabelText('Repository (owner/repo)'), {
+      target: { value: 'lab/suite' },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add repository' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/choose the one to install by its slug\. \(hub_ambiguous_asset\)$/);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const slug = screen.getByLabelText('Dashboard slug (optional)') as HTMLInputElement;
+    // The field to name one is where the user goes next.
+    expect(document.activeElement).toBe(slug);
+
+    // Not a slug: refused before any request.
+    const sent = requests.length;
+    await fireEvent.input(slug, { target: { value: 'Signal Lab' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add repository' }));
+    expect(screen.getByRole('alert').textContent).toMatch(/lower-case letters, digits/);
+    expect(slug.getAttribute('aria-invalid')).toBe('true');
+    expect(requests.length).toBe(sent);
+
+    await fireEvent.input(slug, { target: { value: ' signal-lab ' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Add repository' }));
+    const found = within(await dialog());
+    expect(posted('/api/sources/lab/suite/dashboards/signal-lab/preview')).toBe(true);
+    await fireEvent.click(found.getByRole('button', { name: 'Trust this key' }));
+    await waitFor(() => expect(found.getByRole('heading', { name: 'Key trusted by you' })).toBeTruthy());
+    expect(posted(`/api/sources/lab/suite/dashboards/signal-lab/accept-key/${KEY_SHA}`)).toBe(true);
+    const confirm = found.getByRole('button', { name: 'Install' }) as HTMLButtonElement;
+    await waitFor(() => expect(confirm.disabled).toBe(false));
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(posted(`/api/sources/lab/suite/dashboards/signal-lab/install/${SHA}`)).toBe(true);
   });
 
   it('shows a refused preview where it was asked for, with its code', async () => {
@@ -722,7 +897,7 @@ describe('HubView catalogs and installs', () => {
     await fireEvent.click(found.getByRole('button', { name: 'Install' }));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(posted(`/api/sources/lab/explorer/install/${SHA}`)).toBe(true);
+    expect(posted(`/api/sources/lab/explorer/dashboards/explorer/install/${SHA}`)).toBe(true);
     expect(requests.some((request) => request.url.includes('/update/'))).toBe(false);
     expect(button('Alpha', 'Update').disabled).toBe(false);
   });
@@ -761,8 +936,14 @@ describe('HubView catalogs and installs', () => {
         repo: 'lab/catalog',
         name: 'Lab',
         dashboards: [
-          { repo: 'lab/explorer', name: 'Explorer', description: '', installed_slug: null },
-          { repo: 'lab/explorer', name: 'Explorer again', description: '', installed_slug: null },
+          { repo: 'lab/explorer', slug: null, name: 'Explorer', description: '', installed_slug: null },
+          {
+            repo: 'lab/explorer',
+            slug: null,
+            name: 'Explorer again',
+            description: '',
+            installed_slug: null,
+          },
         ],
         error: null,
       },
@@ -799,7 +980,7 @@ describe('HubView catalogs and installs', () => {
     const confirm = found.getByRole('button', { name: 'Install' }) as HTMLButtonElement;
     expect(confirm.disabled).toBe(true);
     await fireEvent.click(confirm);
-    expect(posted(`/api/sources/lab/unknown/install/${SHA}`)).toBe(false);
+    expect(posted(`/api/sources/lab/unknown/dashboards/unknown/install/${SHA}`)).toBe(false);
     await vi.advanceTimersByTimeAsync(CONFIRM_DELAY_MS - 1);
     expect(confirm.disabled).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
@@ -810,7 +991,7 @@ describe('HubView catalogs and installs', () => {
     await fireEvent.click(confirm);
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(posted(`/api/sources/lab/unknown/install/${SHA}`)).toBe(true);
+    expect(posted(`/api/sources/lab/unknown/dashboards/unknown/install/${SHA}`)).toBe(true);
   });
 
   it('shows a refused install in the dialog and keeps it open', async () => {
@@ -863,7 +1044,7 @@ describe('HubView updates', () => {
 
     const found = within(await screen.findByRole('dialog'));
     expect(found.getByRole('heading', { name: 'Update Alpha?' })).toBeTruthy();
-    expect(found.getByText('The same key signed the version you have installed.')).toBeTruthy();
+    expect(found.getByText('The same key signed what you installed from this repository.')).toBeTruthy();
     await fireEvent.click(found.getByRole('button', { name: 'Update' }));
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());

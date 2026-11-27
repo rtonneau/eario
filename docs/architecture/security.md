@@ -28,7 +28,7 @@ Protected asset: the data the user loaded, and control of the application.
 | A request runs a program or script | No endpoint or MCP tool executes commands or code supplied at run time. The hub starting an installed dashboard, running a verified release for its manifest, and running and starting its own verified new version, is the one bounded exception, below. |
 | A request makes the hub start or install a program of its choice | Hub routes take only path segments, each validated strictly: a slug, an `owner/repo`, a SHA-256, `on` or `off`; never a URL, a path, an executable or arguments, and they read no body or query. The hub starts only its own copy in `bin/<slug>/`, with `--eario-child <run file>` and nothing else, and installs only a signed GitHub release. |
 | A spoofed or compromised release ships other code | The release's `SHA256SUMS.txt` must carry a valid minisign signature (`SHA256SUMS.txt.minisig`; a release without one is refused before its asset is downloaded), and the asset's SHA-256 must be the signed one. Nothing enters `bin/<slug>/` before every check has passed. A signature proves who published, not that the code is safe: the user decides whom to trust. |
-| Someone substitutes their own signing key | A key is trusted only when it is pinned for the installed repository, listed by a catalog for it, or accepted by the user by the SHA-256 of the whole key line (not the copyable minisign key id). A different key is `changed` and refused until accepted. A release signed by one key but carrying another's `minisign.pub` fails its signature. |
+| Someone substitutes their own signing key | A key is trusted only when it is pinned for the installed repository, listed by a catalog for it, or accepted by the user by the SHA-256 of the whole key line (not the copyable minisign key id). A different key is `changed` and refused until accepted. A release signed by one key but carrying another's `minisign.pub` fails its signature. The key belongs to the repository: one pin for every dashboard installed from it, so a new key seen for one is `changed` for each, and a preview judged against a pin that another dashboard changed since is refused (`hub_key_changed_meanwhile`) unless its key is the new pin. |
 | A release under a key not trusted yet runs on the machine | Until its key is trusted, the downloaded file is never run, not even for its manifest; the preview shows no name or version. Accepting the key hashes the staged file again before running it with `--eario-manifest` alone (no input, bounded output, a timeout). |
 | An old, vulnerable release is served again (downgrade, replay) | An update installs only a strictly newer manifest version (SemVer); an older or equal tag is refused before the download, and the signed executable's own version after it. Versions that cannot be compared are refused. Only a rollback, to the one previous version kept, installs an older version. The hub's own update takes only a version strictly newer than its own, as its signed executable prints it with `--version`. |
 | A spoofed or compromised release replaces the hub itself | The hub's own releases are verified with the Eario release key compiled into it (`crates/eario-hub/eario-release.pub`), its only trust anchor for itself: never a key the release carries, a catalog's, or one trusted on first use, and no route or command takes another. A build whose key file is the placeholder does not update itself (`self_update_not_configured`). The asset must also have the signed SHA-256 before it is run, with `--version` alone. |
@@ -36,7 +36,7 @@ Protected asset: the data the user loaded, and control of the application.
 | A redirect leads the download to another host | Every URL, the first and each redirect, must be HTTPS on the default port to one of `api.github.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`; each redirect is checked before it is followed, at most 5. |
 | An oversized or endless download fills the disk or memory | Reads are capped while they stream, whatever the server declares: 2 MiB for an API answer or a catalog, the size the release lists for an asset and at most 512 MiB. Requests time out (30 s between reads, 60 s for a small file whole). |
 | A malicious page drives the install routes | The routes sit behind the token and Origin check. An install needs two requests, the preview and then the install repeating the previewed SHA-256, and a third, with the key's SHA-256, for a key not trusted yet. The one-step update route skips the SHA-256 confirmation only for an installed dashboard signed by its pinned key or a key already accepted by its SHA-256, never a changed key not yet accepted, and whose new version is strictly newer. |
-| A stale or swapped preview is installed | An install or update takes only the preview staged for that repository with that SHA-256 (`hub_no_preview`, `hub_preview_mismatch`); the moved file is hashed again, and a file gone from `staging/` is `hub_preview_gone`. A preview is used up by its install, and an update refuses a dashboard that changed since its preview. |
+| A stale or swapped preview is installed | An install or update takes only the preview staged for that repository and dashboard (slug) with that SHA-256 (`hub_no_preview`, `hub_preview_mismatch`); the view always confirms by the previewed slug; the moved file is hashed again, and a file gone from `staging/` is `hub_preview_gone`. A preview is used up by its install, and an update refuses a dashboard that changed since its preview. |
 | The hub's copy of a dashboard is replaced on disk | Size and SHA-256 are checked against the registry before every start; a mismatch is refused and the user is told to reinstall. |
 | A stale run file, left by a dashboard that crashed, misleads the hub | A run file counts only while the server at its loopback address answers `GET /api/app` with its token. Stale ones are deleted when the hub starts and whenever it lists, starts, stops or uninstalls that dashboard, and only while they still hold the token that failed to answer. |
 | A page obtains a dashboard's token through the hub | The open route is behind the hub's own token and Origin check, and returns only loopback addresses. |
@@ -140,6 +140,12 @@ The routes, relative to `/api` (the module documentation of
   previewed key, which must have that SHA-256, then reads the manifest.
 - `POST /sources/{owner}/{repo}/install/{sha256}`: installs the preview of
   that SHA-256.
+- `POST /sources/{owner}/{repo}/dashboards/{slug}/preview`,
+  `.../accept-key/{key_sha256}` and `.../install/{sha256}`: the same for the
+  dashboard `slug` of a repository that publishes several in one release.
+  The literal `dashboards` keeps a slug apart from `accept-key` and
+  `install`. Without a slug, a release with several dashboards for this
+  machine is refused (`hub_ambiguous_asset`) before any download.
 - `POST /check`: reads the latest release of each dashboard installed from
   GitHub; downloads nothing.
 - `POST /dashboards/{slug}/update-preview`, `/update/{sha256}`, `/update`
@@ -148,7 +154,7 @@ The routes, relative to `/api` (the module documentation of
 - `POST /self-update`: replaces the hub's executable with its verified
   newer release, answers, then restarts the hub.
 
-The command line (`eario-hub install`, `update`, `rollback`, `check`,
+The command line (`eario-hub install [--slug <slug>]`, `update`, `rollback`, `check`,
 `catalog`, `check-at-start`, `self-update`) calls the same services after a
 terminal confirmation; `--yes` confirms an install but never accepts a key,
 which takes a terminal answer or `--accept-key <key sha256>`.
@@ -157,18 +163,23 @@ which takes a terminal answer or `--accept-key <key sha256>`.
 **Trust order.** A release is verified with the key it carries as
 `minisign.pub`, or, without that file, the key the hub trusts for the
 repository. The key is trusted when it equals the key pinned in the registry
-(an installed repository; the pin decides), else the key of the first
+(a repository with an installed dashboard; the pin decides, and is the same
+for all its dashboards), else the key of the first
 catalog, in the user's order, that lists the repository, else when the user
-accepted it by its SHA-256. A key that differs from the pinned or catalog
+accepted it by its SHA-256 (for the repository). A key that differs from the pinned or catalog
 key is `changed`; one that nothing vouches for is `unknown`; both are
 refused until accepted. A repository that no catalog lists must attach
-`minisign.pub`. An install or update pins the key it was verified with. The
+`minisign.pub`. An install or update pins the key it was verified with on
+every dashboard of the repository, once the pin it was previewed against is
+still the one recorded (or is its own key). The
 checks run in this order: signature of `SHA256SUMS.txt`, SHA-256 of the
 downloaded asset, trusted key, and only then the manifest (`--eario-manifest`
 alone, no standard input, output bounded to 64 KiB, killed after 20 s, no
-console window): its slug must be the asset name's prefix (or the installed
-slug), its launch protocol the hub's, and for an update its version strictly
-newer. A slug installed from another source is refused.
+console window): its slug must be the slug asked for, else the asset name's
+prefix (or the installed slug for an update), its launch protocol the
+hub's, and for an update its version strictly newer. A slug installed from
+another source is refused, and each dashboard of a repository is installed
+once.
 
 **The hub's own update.** One key verifies a release of the hub: the
 minisign public key file `crates/eario-hub/eario-release.pub`, compiled

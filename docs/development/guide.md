@@ -399,8 +399,9 @@ the release stops before building. To release Eario: replace the
 placeholder with the release key's `minisign.pub` (the hub's unit test
 refuses a file that is neither), set the secrets, set the version in
 `Cargo.toml`, tag `v<version>`, and publish the draft once its files are
-attached. The examples' files are downloads: a hub cannot install from a
-release with several executables per target, but it finds its own by name.
+attached. A hub installs the examples from that release one at a time, by
+slug (`eario-hub install rtonneau/eario --slug data-explorer`, or a catalog
+entry with a `slug`); it finds its own executable by name.
 
 ## Publishing the crates (not done yet)
 
