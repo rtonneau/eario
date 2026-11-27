@@ -4,7 +4,12 @@
 //! <hub dir>/
 //! ├── registry.json     installed dashboards
 //! ├── hub.json          address and token of the running hub
+//! ├── catalogs.json     catalogs the hub reads (written once the user changes them)
+//! ├── settings.json     the hub's settings (written once the user changes them)
+//! ├── updates.json      result of the last update check
+//! ├── hub.lock          locked while a process changes the files above
 //! ├── bin/<slug>/       the hub's copy of each installed executable
+//! ├── staging/          release assets being verified, one directory per process
 //! ├── run/<slug>.json   one per running dashboard, written by the dashboard
 //! └── logs/<slug>.log   output of each dashboard
 //! ```
@@ -12,7 +17,9 @@
 //! The directory is `<config dir>/eario/hub/`, or the one named by the
 //! `EARIO_HUB_DIR` environment variable. Every file is written atomically: a
 //! temporary file in the same directory is renamed over the destination, so a
-//! reader sees the old or the new content, never a mixture. On Unix the
+//! reader sees the old or the new content, never a mixture. A process that
+//! reads a file, changes it and writes it back holds [`HubDir::lock`]
+//! meanwhile, so two processes never lose each other's change. On Unix the
 //! directories this module creates are readable by the user only (`0700`),
 //! and so are the files it writes (`0600`): run files and `hub.json` hold
 //! session tokens.
@@ -175,6 +182,56 @@ impl HubDir {
         self.root.join("hub.json")
     }
 
+    /// Path of `catalogs.json`: the repositories of the catalogs the hub
+    /// reads.
+    pub fn catalogs_path(&self) -> PathBuf {
+        self.root.join("catalogs.json")
+    }
+
+    /// Path of `settings.json`: the hub's settings.
+    pub fn settings_path(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
+    /// Path of `updates.json`: what the last update check found.
+    pub fn updates_path(&self) -> PathBuf {
+        self.root.join("updates.json")
+    }
+
+    /// Directory where release assets are downloaded and verified before
+    /// they are moved into `bin/<slug>/`. On the same volume as `bin/`, so
+    /// the move is a rename.
+    pub fn staging_dir(&self) -> PathBuf {
+        self.root.join("staging")
+    }
+
+    /// Path of `hub.lock`, the file [`HubDir::lock`] locks.
+    pub fn lock_path(&self) -> PathBuf {
+        self.root.join("hub.lock")
+    }
+
+    /// Takes the lock of the hub directory, waiting while another holder,
+    /// in this process or another, has it; see [`HubLock`]. Creates the
+    /// directory and `hub.lock` when missing.
+    ///
+    /// Blocking. The lock is not reentrant: a thread holding it must not ask
+    /// for it again.
+    pub fn lock(&self) -> Result<HubLock, HubDirError> {
+        create_private_dir_all(&self.root)
+            .map_err(|source| HubDirError::Io { path: self.root.clone(), source })?;
+        let path = self.lock_path();
+        let io_error = |source| HubDirError::Io { path: path.clone(), source };
+        let file = private_file_options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(io_error)?;
+        file.lock().map_err(io_error)?;
+        Ok(HubLock { _file: file })
+    }
+
     /// Directory of the run files.
     pub fn run_dir(&self) -> PathBuf {
         self.root.join("run")
@@ -276,9 +333,50 @@ impl HubDir {
     }
 }
 
+/// The lock of a hub directory, taken by [`HubDir::lock`] and released when
+/// dropped.
+///
+/// It is held around every change that reads a file of the hub directory,
+/// changes it and writes it back: the registry, with the hub's copies in
+/// `bin/`, and `catalogs.json` and `settings.json`. Every Eario process
+/// takes it for such a change: a hub, the `eario-hub` command line, a
+/// dashboard executable given `--eario-install` or `--eario-uninstall`. A
+/// write is atomic without it; what the lock prevents is a change made
+/// between another process's read and its write, which that write would
+/// undo.
+///
+/// It is an operating-system lock on `hub.lock` (`flock` on Unix,
+/// `LockFileEx` on Windows), so it is released when the process ends, even
+/// by a crash. It is never held while waiting for the user or the network.
+#[derive(Debug)]
+#[must_use = "the lock is released as soon as it is dropped"]
+pub struct HubLock {
+    _file: fs::File,
+}
+
 /// Reads the run file at `path`; `None` when there is none.
 pub fn read_run_file_at(path: &Path) -> Result<Option<RunFile>, HubDirError> {
+    read_json_at(path)
+}
+
+/// Reads the JSON file at `path`; `None` when it does not exist. A file that
+/// does not parse as `T` is [`HubDirError::Invalid`], naming it.
+pub fn read_json_at<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, HubDirError> {
     read_optional(path)?.map(|text| parse(path, &text)).transpose()
+}
+
+/// Writes `value` as JSON at `path` atomically, like every file of the hub
+/// directory: through a temporary file in the same directory, then a
+/// rename. Creates the directory when missing; on Unix the file is readable
+/// by the user only.
+pub fn write_json_at<T: Serialize>(path: &Path, value: &T) -> Result<(), HubDirError> {
+    write_json_atomic(path, value)
+}
+
+/// Creates the directory `path` and its missing parents, readable by the
+/// user only on Unix (`0700`), as the hub directory's own.
+pub fn create_private_dir(path: &Path) -> Result<(), HubDirError> {
+    create_private_dir_all(path).map_err(|source| HubDirError::Io { path: path.to_owned(), source })
 }
 
 /// Writes a run file atomically at `path`, creating its directory when
@@ -329,6 +427,14 @@ pub fn copy_atomic(from: &Path, to: &Path) -> Result<(), HubDirError> {
         return Err(HubDirError::Io { path: to.to_owned(), source });
     }
     Ok(())
+}
+
+/// Moves the file `from` to `to`, which must be on the same volume, with one
+/// rename: `to` is never seen half-written. Retries briefly while another
+/// program (an antivirus, on Windows) holds either file. An error names
+/// `to`.
+pub fn move_file(from: &Path, to: &Path) -> Result<(), HubDirError> {
+    rename_retrying(from, to).map_err(|source| HubDirError::Io { path: to.to_owned(), source })
 }
 
 fn check_slug(slug: &str) -> Result<(), HubDirError> {
@@ -763,6 +869,39 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .count();
         assert_eq!(temporaries, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_hub_lock_excludes_every_other_holder_until_dropped() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path().join("hub"));
+        let held = hub.lock()?;
+        assert!(hub.lock_path().is_file(), "the lock file is created with its directory");
+
+        // Any other handle, as another process would open, is refused.
+        let other = fs::OpenOptions::new().read(true).write(true).open(hub.lock_path())?;
+        assert!(matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)), "the lock is held");
+
+        // A second writer waits until the first is done.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let second = {
+            let hub = hub.clone();
+            std::thread::spawn(move || -> Result<(), HubDirError> {
+                let lock = hub.lock()?;
+                // Gone only when the test failed already.
+                let _ = sender.send(());
+                drop(lock);
+                Ok(())
+            })
+        };
+        assert_eq!(receiver.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        drop(held);
+        receiver.recv()?;
+        second.join().map_err(|_| "the second writer panicked")??;
+
+        // Released by both: anyone can take it.
+        other.try_lock().map_err(io::Error::from)?;
         Ok(())
     }
 

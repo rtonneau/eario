@@ -2,10 +2,12 @@
 //!
 //! A release carries one executable per target, named by [`asset_name`], and
 //! a [`SUMS_FILE`] listing their SHA-256, signed with minisign in
-//! [`SIGNATURE_FILE`]. [`verify_sums`] checks that signature against a
-//! [`PublicKey`] and only then reads the list, so a [`Checksums`] exists only
-//! for a list the key signed. [`key_status`] says how a key relates to the
-//! one pinned for the repository.
+//! [`SIGNATURE_FILE`]; it may carry the signer's public key in [`KEY_FILE`].
+//! [`verify_sums`] checks that signature against a [`PublicKey`] and only
+//! then reads the list, so a [`Checksums`] exists only for a list the key
+//! signed. [`key_status`] says how a key relates to the one pinned for the
+//! repository. A key is identified by [`PublicKey::sha256`], never by its
+//! minisign key id.
 //!
 //! Nothing here touches the network or the disk: callers download the files,
 //! then compare the SHA-256 of the asset with [`Checksums::sha256`]. Every
@@ -14,12 +16,22 @@
 use std::collections::BTreeMap;
 
 use eario_core::{KeyStatus, is_slug};
+use sha2::{Digest, Sha256};
 
 /// Name of the checksum list in a release.
 pub const SUMS_FILE: &str = "SHA256SUMS.txt";
 
 /// Name of the minisign signature of [`SUMS_FILE`] in a release.
 pub const SIGNATURE_FILE: &str = "SHA256SUMS.txt.minisig";
+
+/// Name of the minisign public key file in a release: the `.pub` file
+/// minisign writes. What a repository that no catalog lists is trusted with
+/// on first use, once the user has accepted it.
+pub const KEY_FILE: &str = "minisign.pub";
+
+/// Largest [`KEY_FILE`] read, in bytes. A minisign `.pub` file takes about
+/// 100.
+pub const MAX_KEY_FILE_BYTES: usize = 4 * 1024;
 
 /// Largest [`SUMS_FILE`] read, in bytes. The list of four assets takes about
 /// 400.
@@ -47,6 +59,32 @@ pub enum VerifyError {
     InvalidKey {
         /// The repository the key is for.
         repo: String,
+    },
+    /// The release's key file is not a minisign public key file.
+    #[error(
+        "`minisign.pub` of `{repo}` is not a minisign public key file (an untrusted comment line, then the key line); its author must attach the `.pub` file minisign wrote"
+    )]
+    InvalidKeyFile {
+        /// The repository.
+        repo: String,
+    },
+    /// Nothing tells which key the release must be signed with.
+    #[error(
+        "no catalog lists a key for `{repo}` and its release has no `minisign.pub`, so nothing can verify it; ask its author to attach the public key to the release, or add a catalog that lists the repository"
+    )]
+    MissingKey {
+        /// The repository.
+        repo: String,
+    },
+    /// A downloaded asset does not have the SHA-256 the signed list gives.
+    #[error(
+        "the downloaded `{asset}` of `{repo}` does not have the SHA-256 its signed `SHA256SUMS.txt` lists: it was changed or damaged on the way; nothing was installed"
+    )]
+    HashMismatch {
+        /// The repository.
+        repo: String,
+        /// The asset.
+        asset: String,
     },
     /// The release has no signature of its checksum list.
     #[error(
@@ -151,6 +189,9 @@ impl VerifyError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidKey { .. } => "release_invalid_key",
+            Self::InvalidKeyFile { .. } => "release_invalid_key_file",
+            Self::MissingKey { .. } => "release_missing_key",
+            Self::HashMismatch { .. } => "release_hash_mismatch",
             Self::MissingSignature { .. } => "release_missing_signature",
             Self::MalformedSignature { .. } => "release_malformed_signature",
             Self::UnsupportedSignature { .. } => "release_unsupported_signature",
@@ -199,9 +240,35 @@ impl PublicKey {
         Ok(Self { key, text: text.to_owned(), fingerprint })
     }
 
+    /// Reads a minisign `.pub` file, as a release carries it in
+    /// [`KEY_FILE`]: an untrusted comment line, then the key line (see
+    /// [`PublicKey::from_base64`]), each ended by `\n` or `\r\n`, the last one
+    /// optionally. Nothing else is accepted.
+    pub fn from_pub_file(repo: &str, bytes: &[u8]) -> Result<Self, VerifyError> {
+        let invalid = || VerifyError::InvalidKeyFile { repo: repo.to_owned() };
+        check_size(repo, KEY_FILE, bytes.len(), MAX_KEY_FILE_BYTES)?;
+        let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+        let body = text.strip_suffix('\n').unwrap_or(text);
+        let mut lines = body.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line));
+        let (Some(comment), Some(key), None) = (lines.next(), lines.next(), lines.next()) else {
+            return Err(invalid());
+        };
+        if !comment.starts_with(UNTRUSTED_COMMENT) {
+            return Err(invalid());
+        }
+        Self::from_base64(repo, key).map_err(|_| invalid())
+    }
+
     /// The key line, as read: what the registry stores as the pinned key.
     pub fn as_base64(&self) -> &str {
         &self.text
+    }
+
+    /// SHA-256 of the key line, in lower-case hexadecimal: what identifies the
+    /// key when the user accepts it. Two keys have the same hash only if they
+    /// are the same key.
+    pub fn sha256(&self) -> String {
+        sha256_hex(self.text.as_bytes())
     }
 
     /// Fingerprint of the key, for the user to compare: its minisign key id
@@ -214,6 +281,17 @@ impl PublicKey {
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
+}
+
+/// SHA-256 of `bytes` in lower-case hexadecimal.
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Whether `text` is a SHA-256 in lower-case hexadecimal: 64 digits `0-9a-f`,
+/// as the hub writes them and asks them back.
+pub fn is_sha256(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// How `key`, the key a release would be verified with, relates to what the
@@ -372,7 +450,7 @@ fn parse_line(line: &[u8]) -> Option<(String, &str)> {
 
 /// Whether `name` can name a release asset: ASCII letters, digits, `.`, `_`,
 /// `-` and `+`, and neither `.` nor `..`.
-fn is_asset_name(name: &str) -> bool {
+pub(crate) fn is_asset_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -792,6 +870,72 @@ QtKMXWyYcwdpZAlPF7tE2ENJkRd1ujvKjlj1m9RtHTBnZPa5WKU5uWRs5GoP5M/VqE81QFuMKI5k/SfN
             assert!(error.to_string().contains(REPO), "{error}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_pub_file_gives_its_key() -> TestResult {
+        let comment = "untrusted comment: minisign public key 027D40E88081F840";
+        for text in [
+            format!("{comment}\n{KEY_A}\n"),
+            format!("{comment}\n{KEY_A}"),
+            format!("{comment}\r\n{KEY_A}\r\n"),
+        ] {
+            assert_eq!(PublicKey::from_pub_file(REPO, text.as_bytes())?, key(KEY_A)?, "{text:?}");
+        }
+        let invalid = [
+            String::new(),
+            KEY_A.to_owned(),
+            format!("{KEY_A}\n"),
+            format!("comment\n{KEY_A}\n"),
+            format!("{comment}\n{KEY_A}\n\n"),
+            format!("{comment}\n\n{KEY_A}\n"),
+            format!("{comment}\n{KEY_A}\n{KEY_B}\n"),
+            format!("{comment}\n {KEY_A}\n"),
+            format!("{comment}\n{}\n", KEY_A.replacen("RW", "RU", 1)),
+        ];
+        for text in invalid {
+            let error = PublicKey::from_pub_file(REPO, text.as_bytes()).err();
+            let error = error.ok_or("not a .pub file")?;
+            assert_eq!(error.code(), "release_invalid_key_file", "{text:?}");
+            assert!(error.to_string().contains(REPO), "{error}");
+        }
+        let not_utf8 = [comment.as_bytes(), b"\n\xff"].concat();
+        let read = PublicKey::from_pub_file(REPO, &not_utf8);
+        assert_eq!(refusal(read), Some("release_invalid_key_file"));
+        let large = format!("{comment}{}\n{KEY_A}\n", " ".repeat(MAX_KEY_FILE_BYTES));
+        let read = PublicKey::from_pub_file(REPO, large.as_bytes());
+        assert_eq!(refusal(read), Some("release_file_too_large"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_key_is_identified_by_the_sha256_of_its_key_line() -> TestResult {
+        let (genuine, impostor) = (key(KEY_A)?, key(KEY_A_ID_B_KEY)?);
+        // What `printf %s <key line> | sha256sum` prints.
+        assert_eq!(
+            genuine.sha256(),
+            "92552869fa877ed5681c1282c9c47cac63eba1e3f3e5e037041b133fe4187493"
+        );
+        assert!(is_sha256(&genuine.sha256()));
+        // Same key id, another key: another hash.
+        assert_eq!(impostor.fingerprint(), genuine.fingerprint());
+        assert_ne!(impostor.sha256(), genuine.sha256());
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_lower_case_sha256_digests_are_digests() {
+        assert!(is_sha256(&"0a".repeat(32)));
+        let upper = "0A".repeat(32);
+        let long = "0a".repeat(33);
+        let not_hex = format!("{}g", "0".repeat(63));
+        for text in ["", "0a", &upper, &long, &not_hex] {
+            assert!(!is_sha256(text), "{text}");
+        }
     }
 
     #[test]

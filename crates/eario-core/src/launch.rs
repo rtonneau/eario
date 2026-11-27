@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::payload::ApiError;
+
 /// Version of the launch contract: the manifest, the run file and the
 /// command-line flags of a dashboard executable.
 pub const LAUNCH_PROTOCOL_VERSION: u32 = 1;
@@ -17,6 +19,10 @@ pub const HUB_LOG_LINES: usize = 20;
 /// Argument that starts a dashboard executable for a hub; the path of the run
 /// file follows it.
 pub const CHILD_ARGUMENT: &str = "--eario-child";
+
+/// Argument that makes a dashboard executable print its [`Manifest`] as one
+/// line of JSON, then exit.
+pub const MANIFEST_ARGUMENT: &str = "--eario-manifest";
 
 /// What a dashboard executable prints for `--eario-manifest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +127,9 @@ pub struct HubInfo {
     pub eario_version: String,
     /// Installed dashboards, in registry order.
     pub dashboards: Vec<HubDashboard>,
+    /// The last update check, `None` until one has run in this hub
+    /// directory.
+    pub last_check: Option<UpdateCheck>,
 }
 
 /// The hub's answer to an open request.
@@ -175,22 +184,46 @@ pub enum KeyStatus {
     Catalog,
     /// The key is the one already pinned for this repository.
     Pinned,
-    /// No key is known for this repository: the user must confirm the
-    /// fingerprint to trust it (trust on first use).
+    /// No key is known for this repository: the user must compare the key
+    /// and accept it by its SHA-256 to trust it (trust on first use). Until
+    /// then the release's executable is not run.
     Unknown,
-    /// The key differs from the one pinned for this repository. Refused.
+    /// The key differs from the one pinned for this repository, or from the
+    /// one its catalog lists. Refused, and the release's executable not run,
+    /// until the user accepts it by its SHA-256.
     Changed,
+    /// A key that was `unknown` or `changed`, which the user accepted by its
+    /// SHA-256 in this hub; it becomes the pinned key when the release is
+    /// installed.
+    Accepted,
 }
 
-/// What the hub found for an install, shown to the user before anything is
-/// written.
+/// What the hub found for an install or an update, shown to the user before
+/// anything is written. The hub has downloaded the asset and verified its
+/// signature and SHA-256.
+///
+/// A preview comes in two steps when the key is not trusted yet. While
+/// `key_status` is `unknown` or `changed`, the hub has not run the
+/// downloaded executable, so `manifest` is `None`: the user first compares
+/// the key and accepts it by `key_sha256`. The hub then runs the executable
+/// for its manifest and answers the full preview, with `manifest` set and
+/// `key_status` `accepted`. Only a full preview can be installed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct InstallPreview {
     /// The repository, as `owner/repo`.
     pub repo: String,
-    /// Version of the release that would be installed.
-    pub version: String,
+    /// Slug the dashboard is installed as: the prefix of the asset's name
+    /// for a first install, the installed slug for an update. The manifest
+    /// must give the same.
+    pub slug: String,
+    /// What the verified executable printed for `--eario-manifest`: its
+    /// name, version and description. Updates compare its version, not the
+    /// tag. `None` while the key is not trusted, as the hub runs no
+    /// executable before.
+    pub manifest: Option<Manifest>,
+    /// Tag of the release, for example `v1.2.0`.
+    pub tag: String,
     /// Name of the release asset for this machine.
     pub asset: String,
     /// Size of the asset in bytes.
@@ -198,10 +231,95 @@ pub struct InstallPreview {
     /// SHA-256 of the asset from the signed checksum list, in lower-case
     /// hexadecimal. The install request must repeat it.
     pub sha256: String,
-    /// Fingerprint of the signing key, for the user to compare.
-    pub key_fingerprint: String,
+    /// The minisign public key the release is signed with: the key line of
+    /// its `.pub` file, for the user to compare with the one its author
+    /// publishes.
+    pub public_key: String,
+    /// SHA-256 of `public_key`, in lower-case hexadecimal: what identifies the
+    /// key when the user accepts it. The minisign key id does not, as anyone
+    /// can make a key with a given id.
+    pub key_sha256: String,
     /// How the key relates to what the hub trusts.
     pub key_status: KeyStatus,
+}
+
+/// What the last update check found, stored in the hub directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct UpdateCheck {
+    /// When the check ran, in seconds since the Unix epoch.
+    pub checked_at: u64,
+    /// One per dashboard installed from GitHub, in registry order.
+    pub dashboards: Vec<DashboardUpdate>,
+}
+
+/// What the last update check found for one dashboard installed from
+/// GitHub.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct DashboardUpdate {
+    /// The dashboard.
+    pub slug: String,
+    /// The repository it was installed from, as `owner/repo`.
+    pub repo: String,
+    /// Version of the latest release: its tag without a leading `v`. `None`
+    /// when the release could not be read.
+    pub latest_version: Option<String>,
+    /// `latest_version` when it is newer than the installed version: an
+    /// update to offer. `None` otherwise.
+    pub available_version: Option<String>,
+    /// Why the latest release could not be read (the dashboard "could not be
+    /// checked"); `None` when it was read.
+    pub error: Option<ApiError>,
+}
+
+/// A catalog the hub reads, with its dashboards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HubCatalog {
+    /// Repository of the catalog, as `owner/repo`.
+    pub repo: String,
+    /// Name the catalog gives itself; `None` when it could not be read.
+    pub name: Option<String>,
+    /// Its dashboards, in its order; empty when it could not be read.
+    pub dashboards: Vec<HubCatalogEntry>,
+    /// Why the catalog could not be read; `None` when it was.
+    pub error: Option<ApiError>,
+}
+
+/// One dashboard of a [`HubCatalog`], with its install state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HubCatalogEntry {
+    /// Repository that publishes the dashboard, as `owner/repo`.
+    pub repo: String,
+    /// Name of the dashboard.
+    pub name: String,
+    /// One-line description.
+    pub description: String,
+    /// Slug of the dashboard installed from this repository, when there is
+    /// one.
+    pub installed_slug: Option<String>,
+}
+
+/// Settings of the hub, stored in the hub directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct HubSettings {
+    /// Whether the hub checks GitHub for updates of its dashboards when it
+    /// starts. On by default.
+    #[serde(default = "default_true")]
+    pub check_updates_at_start: bool,
+}
+
+impl Default for HubSettings {
+    fn default() -> Self {
+        Self { check_updates_at_start: true }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Whether `text` is a GitHub repository, as `owner/repo`.
@@ -357,18 +475,75 @@ mod tests {
         assert_eq!(catalog.dashboards[0].description, "");
         assert_eq!(serde_json::from_str::<Catalog>(&serde_json::to_string(&catalog)?)?, catalog);
 
-        let preview = InstallPreview {
+        let pending = InstallPreview {
             repo: "o/r".to_owned(),
-            version: "1.0.0".to_owned(),
+            slug: "r".to_owned(),
+            manifest: None,
+            tag: "v1.0.0".to_owned(),
             asset: "r-x86_64-pc-windows-msvc.exe".to_owned(),
             size: 10,
             sha256: "ab".repeat(32),
-            key_fingerprint: "AB12".to_owned(),
+            public_key: "RWQabc".to_owned(),
+            key_sha256: "cd".repeat(32),
             key_status: KeyStatus::Unknown,
         };
-        let text = serde_json::to_string(&preview)?;
+        let text = serde_json::to_string(&pending)?;
         assert!(text.contains(r#""key_status":"unknown""#), "{text}");
-        assert_eq!(serde_json::from_str::<InstallPreview>(&text)?, preview);
+        assert!(text.contains(r#""manifest":null"#), "{text}");
+        assert_eq!(serde_json::from_str::<InstallPreview>(&text)?, pending);
+        let full = InstallPreview {
+            manifest: Some(Manifest {
+                name: "R".to_owned(),
+                slug: "r".to_owned(),
+                version: Some("1.0.0".to_owned()),
+                eario_version: "0.2.0".to_owned(),
+                protocol: LAUNCH_PROTOCOL_VERSION,
+                description: String::new(),
+            }),
+            key_status: KeyStatus::Accepted,
+            ..pending
+        };
+        let text = serde_json::to_string(&full)?;
+        assert_eq!(serde_json::from_str::<InstallPreview>(&text)?, full);
+        assert_eq!(serde_json::to_string(&KeyStatus::Accepted)?, r#""accepted""#);
+        Ok(())
+    }
+
+    #[test]
+    fn settings_check_for_updates_unless_turned_off() -> Result<(), serde_json::Error> {
+        assert!(HubSettings::default().check_updates_at_start);
+        assert_eq!(serde_json::from_str::<HubSettings>("{}")?, HubSettings::default());
+        let off: HubSettings = serde_json::from_str(r#"{"check_updates_at_start":false}"#)?;
+        assert!(!off.check_updates_at_start);
+        Ok(())
+    }
+
+    #[test]
+    fn update_checks_round_trip() -> Result<(), serde_json::Error> {
+        let check = UpdateCheck {
+            checked_at: 1_700_000_000,
+            dashboards: vec![
+                DashboardUpdate {
+                    slug: "r".to_owned(),
+                    repo: "o/r".to_owned(),
+                    latest_version: Some("1.1.0".to_owned()),
+                    available_version: Some("1.1.0".to_owned()),
+                    error: None,
+                },
+                DashboardUpdate {
+                    slug: "s".to_owned(),
+                    repo: "o/s".to_owned(),
+                    latest_version: None,
+                    available_version: None,
+                    error: Some(ApiError {
+                        code: "github_offline".to_owned(),
+                        message: "offline".to_owned(),
+                    }),
+                },
+            ],
+        };
+        let text = serde_json::to_string(&check)?;
+        assert_eq!(serde_json::from_str::<UpdateCheck>(&text)?, check);
         Ok(())
     }
 

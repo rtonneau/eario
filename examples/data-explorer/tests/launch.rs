@@ -9,7 +9,7 @@ use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use eario::core::{LAUNCH_PROTOCOL_VERSION, Manifest, RunFile};
+use eario::core::{LAUNCH_PROTOCOL_VERSION, Manifest, RunFile, Source};
 use eario::runtime::hub_dir::{self, HubDir};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -186,6 +186,57 @@ fn install_copies_and_records_the_executable_and_uninstall_removes_it() -> TestR
     let output = execute(hub.root(), &["--eario-uninstall", "--yes"])?;
     assert!(!output.status.success());
     assert!(text(&output.stderr).contains("not installed"), "{}", text(&output.stderr));
+    Ok(())
+}
+
+#[test]
+fn install_never_replaces_a_dashboard_installed_from_github() -> TestResult {
+    let hub_root = tempfile::tempdir()?;
+    let hub = HubDir::at(hub_root.path());
+    let output = execute(hub.root(), &["--eario-install", "--yes"])?;
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    // The hub's registry says the same slug came from a GitHub release.
+    let mut registry = hub.read_registry()?;
+    let mut entry = registry.get(SLUG).cloned().ok_or("no registry entry")?;
+    entry.source = Source::Github { repo: "lab/data-explorer".to_owned() };
+    entry.pinned_key = Some("RWQabc".to_owned());
+    registry.insert(entry);
+    hub.write_registry(&registry)?;
+    let copy = std::fs::read(&registry.get(SLUG).ok_or("no registry entry")?.path)?;
+
+    let output = execute(hub.root(), &["--eario-install", "--yes"])?;
+    assert!(!output.status.success(), "a GitHub install must not be replaced");
+    let error = text(&output.stderr);
+    assert!(error.contains("launch_installed_from_github"), "{error}");
+    assert!(error.contains(SLUG) && error.contains("lab/data-explorer"), "{error}");
+    assert!(error.contains("uninstall it in the hub first"), "{error}");
+    assert_eq!(hub.read_registry()?, registry, "the registry is untouched");
+    let entry = registry.get(SLUG).ok_or("no registry entry")?;
+    assert_eq!(std::fs::read(&entry.path)?, copy, "the hub's copy is untouched");
+    Ok(())
+}
+
+#[test]
+fn install_waits_while_another_process_changes_the_hub_directory() -> TestResult {
+    let hub_root = tempfile::tempdir()?;
+    let hub = HubDir::at(hub_root.path());
+    let lock = hub.lock()?;
+    let mut install = command(hub.root(), &["--eario-install", "--yes"]);
+    let mut child = Spawned(install.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?);
+
+    // While this process holds the lock, the install cannot read the
+    // registry to change it: it is still waiting, whatever time it took to
+    // start, and has copied nothing (the copy into `bin/` comes right after
+    // the lock, long before the registry is written).
+    thread::sleep(Duration::from_secs(2));
+    assert!(child.0.try_wait()?.is_none(), "the install did not wait for the lock");
+    assert!(!hub.bin_dir(SLUG)?.exists(), "the copy was made under the lock");
+    assert!(!hub.registry_path().exists(), "the registry was written under the lock");
+
+    drop(lock);
+    let (status, _, stderr) = child.exit()?;
+    assert!(status.success(), "{stderr}");
+    assert!(hub.read_registry()?.get(SLUG).is_some());
     Ok(())
 }
 

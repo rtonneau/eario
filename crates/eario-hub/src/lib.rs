@@ -1,19 +1,27 @@
 //! The Eario hub: one place to see, start, open and stop the dashboards a
-//! user installed (ADR 0011).
+//! user installed (ADR 0011), and to install and update them from GitHub
+//! releases (ADR 0013).
 //!
-//! A dashboard enters the hub only through `--eario-install`, run by the user
-//! from its own executable, which copies it into the hub directory and
-//! records it in the registry. The hub then starts that copy with
-//! `--eario-child` when asked, by slug.
+//! A dashboard enters the hub through `--eario-install`, run by the user from
+//! its own executable, which copies it into the hub directory and records it
+//! in the registry; or from the signed release of a GitHub repository, once
+//! the user confirmed what the hub verified. The hub then starts that copy
+//! with `--eario-child` when asked, by slug.
 //!
 //! - [`supervisor`]: the hub's services. A [`Supervisor`] lists, starts,
-//!   opens, stops and uninstalls dashboards. The HTTP API is a thin adapter
-//!   over it.
+//!   opens, stops and uninstalls dashboards; reads catalogs; previews and
+//!   installs releases; checks for updates, updates and rolls back. The HTTP
+//!   API and the command line are thin adapters over it.
+//! - [`remote`]: the blocking work of installing and updating from GitHub:
+//!   staging, verification, the manifest of a downloaded executable, the
+//!   one previous version kept, the version rule.
 //! - [`start`] serves the hub on the loopback interface, behind the same
 //!   Host/Origin check and session token as a dashboard, with the generic
-//!   frontend.
-//! - [`run`] is the `eario-hub` executable: one hub per user, recorded in
-//!   `hub.json`, in a terminal that shows its address.
+//!   frontend, and checks for updates in the background.
+//! - [`run`] is the `eario-hub` executable without arguments: one hub per
+//!   user, recorded in `hub.json`, in a terminal that shows its address.
+//!   [`cli`] is the executable with a command, such as `install` or
+//!   `update`.
 //! - [`verify`] checks a GitHub release before anything from it is installed
 //!   (ADR 0013): the minisign signature of its checksum list, the key pinned
 //!   for its repository, and the name of the asset for this machine.
@@ -24,10 +32,12 @@
 //! Quitting the hub leaves the dashboards running. The next hub re-attaches
 //! to those whose run file answers with its token, and deletes the others.
 
-#[cfg(any(test, feature = "fake-github"))]
+pub mod cli;
+#[cfg(feature = "fake-github")]
 pub mod fake_github;
 pub mod github;
 mod http;
+pub mod remote;
 pub mod supervisor;
 pub mod verify;
 
@@ -82,14 +92,21 @@ impl RunningHub {
 }
 
 /// Starts a hub: re-attaches to the dashboards of its directory that are
-/// still running, deletes the stale run files, then serves the hub's API and
-/// the frontend on the loopback interface.
+/// still running, deletes the stale run files, removes the staging areas
+/// left by processes that ended (not that of a command still running), then
+/// serves the hub's API and the frontend on the loopback interface.
+///
+/// Once serving, it checks GitHub for updates of the dashboards installed
+/// from it, in the background, unless the setting `check_updates_at_start`
+/// is off; that check never delays or stops the hub.
 ///
 /// It does not write `hub.json`, open a browser or handle Ctrl+C; [`run`]
 /// does.
 pub async fn start(supervisor: Supervisor, config: ServerConfig) -> Result<RunningHub, HubError> {
     supervisor.reattach().await?;
+    supervisor.clean_staging().await;
     let server = eario_runtime::start_routes(http::routes(supervisor.clone()), config).await?;
+    supervisor.check_in_background();
     Ok(RunningHub { server, supervisor })
 }
 
@@ -222,7 +239,7 @@ fn open_in_browser(url: &str) {
 }
 
 /// Seconds since the Unix epoch; 0 when the clock is set before it.
-fn unix_seconds() -> u64 {
+pub(crate) fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -231,7 +248,7 @@ fn unix_seconds() -> u64 {
 
 /// Installs a log subscriber writing to standard error, unless one is
 /// installed. `EARIO_LOG` sets the filter, for example `EARIO_LOG=info`.
-fn init_logging() {
+pub(crate) fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("EARIO_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     // Fails when a subscriber is already installed, which is fine.

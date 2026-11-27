@@ -1,6 +1,7 @@
 //! The hub on the real example executables: each test installs them into a
-//! temporary hub directory with `--eario-install --yes`, then drives a hub
-//! through its HTTP API.
+//! temporary hub directory, with `--eario-install --yes` or from a fake
+//! GitHub serving them as signed releases, then drives a hub through its
+//! HTTP API, its supervisor or its command line.
 //!
 //! The examples are not executables of this package, so they are looked up
 //! beside `eario-hub` in the target directory (which follows
@@ -14,13 +15,17 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use eario_core::{
-    ApiError, AppResponse, DashboardState, HubDashboard, HubInfo, HubOpen, LAUNCH_PROTOCOL_VERSION,
-    RunFile,
+    ApiError, AppResponse, DashboardState, HubDashboard, HubInfo, HubOpen, HubSettings, KeyStatus,
+    LAUNCH_PROTOCOL_VERSION, RunFile, Source,
 };
+use eario_hub::fake_github::{FakeAsset, FakeGitHub, TestKey};
+use eario_hub::github::{ClientOptions, Endpoint, GitHub, GitHubClient};
+use eario_hub::verify::{self, Target};
 use eario_hub::{RunningHub, Supervisor, SupervisorOptions};
 use eario_runtime::ServerConfig;
 use eario_runtime::hub_dir::{self, HubDir};
@@ -146,9 +151,12 @@ impl TestHub {
     }
 
     fn with_options(root: &Path, options: SupervisorOptions) -> Result<Self, Failure> {
+        Self::with_supervisor(Supervisor::new(HubDir::at(root), options)?)
+    }
+
+    fn with_supervisor(supervisor: Supervisor) -> Result<Self, Failure> {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
-        let supervisor = Supervisor::new(HubDir::at(root), options)?;
         let config = ServerConfig { open_browser: false, ..ServerConfig::default() };
         let running = runtime.block_on(eario_hub::start(supervisor.clone(), config))?;
         let address = running.address().to_string();
@@ -689,4 +697,1255 @@ fn answer_everything() -> Result<String, Failure> {
         }
     });
     Ok(address)
+}
+
+// Installs and updates from GitHub (ADR 0013), against a fake GitHub on the
+// loopback interface. The asset is the real data-explorer executable, signed
+// with test keys. Every example declares version 0.0.0, so a test that needs
+// an older installed version sets it back in the registry; and each release
+// appends a few bytes to the executable (which still runs), so every version
+// is a different file.
+
+/// Repository the tests publish data-explorer from.
+const REPO: &str = "lab/data-explorer";
+
+/// A test signing key; `seed` tells keys, and their key ids, apart.
+fn test_key(seed: u8) -> Result<TestKey, Failure> {
+    Ok(TestKey::new([seed; 32], [b'e', b'a', b'r', b'i', b'o', 0, 0, seed])?)
+}
+
+/// The data-explorer executable, with `marker` appended unless it is empty.
+fn data_explorer_build(marker: &str) -> Result<Vec<u8>, Failure> {
+    let mut bytes = fs::read(example(DATA_EXPLORER)?)?;
+    bytes.extend_from_slice(marker.as_bytes());
+    Ok(bytes)
+}
+
+/// Name of the release asset of `slug` for this machine.
+fn asset_of(slug: &str, target: Target) -> Result<String, Failure> {
+    Ok(verify::asset_name(slug, target)?)
+}
+
+/// Serves `assets` as the latest release `tag` of `repo`, with their
+/// checksum list signed by `key`, and `key`'s `minisign.pub` when
+/// `with_key_file`.
+fn publish(
+    fake: &FakeGitHub,
+    repo: &str,
+    tag: &str,
+    key: &TestKey,
+    assets: Vec<FakeAsset>,
+    with_key_file: bool,
+) {
+    let mut files = assets.clone();
+    files.extend(
+        key.release_files(&assets)
+            .into_iter()
+            .filter(|file| with_key_file || file.name != verify::KEY_FILE),
+    );
+    fake.release(repo, tag, &files);
+}
+
+/// Serves a catalog at `catalog` listing `entries` (repository, key).
+fn serve_catalog(fake: &FakeGitHub, catalog: &str, entries: &[(&str, String)]) {
+    let dashboards: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|(repo, key)| {
+            serde_json::json!({
+                "repo": repo, "name": "Data Explorer", "description": "Explore a table",
+                "public_key": key,
+            })
+        })
+        .collect();
+    let catalog_json =
+        serde_json::json!({ "format_version": 1, "name": "Lab", "dashboards": dashboards });
+    fake.catalog(catalog, catalog_json.to_string());
+}
+
+/// A client of the fake GitHub.
+fn fake_client(fake: &FakeGitHub) -> Result<Arc<dyn GitHub>, Failure> {
+    let endpoint = Endpoint::loopback(&fake.base_url()).ok_or("the fake is not on loopback")?;
+    Ok(Arc::new(GitHubClient::with_options(endpoint, ClientOptions::default())?))
+}
+
+/// A supervisor of `root` that reaches the fake GitHub, without a server.
+/// Dropping it stops every dashboard of the directory.
+struct RemoteHub {
+    supervisor: Supervisor,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl Drop for RemoteHub {
+    fn drop(&mut self) {
+        // A failure here is a dashboard that could not be stopped; the test
+        // has failed already or reports it itself.
+        let _ = self.runtime.block_on(self.supervisor.stop_all());
+    }
+}
+
+impl RemoteHub {
+    fn new(root: &Path, fake: &FakeGitHub) -> Result<Self, Failure> {
+        let supervisor = Supervisor::with_github(
+            HubDir::at(root),
+            SupervisorOptions::default(),
+            fake_client(fake)?,
+        )?;
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+        Ok(Self { supervisor, runtime })
+    }
+
+    fn run<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
+    }
+
+    fn state(&self, slug: &str) -> Result<HubDashboard, Failure> {
+        let info = self.run(self.supervisor.list())?;
+        let found = info.dashboards.into_iter().find(|dashboard| dashboard.slug == slug);
+        found.ok_or_else(|| format!("{slug} is not listed").into())
+    }
+
+    fn wait_for(&self, slug: &str, state: DashboardState) -> Result<(), Failure> {
+        let started = Instant::now();
+        loop {
+            let dashboard = self.state(slug)?;
+            if dashboard.state == state {
+                return Ok(());
+            }
+            if dashboard.state == DashboardState::Failed || started.elapsed() > TIMEOUT {
+                return Err(
+                    format!("{slug} is {:?}: {:?}", dashboard.state, dashboard.log_lines).into()
+                );
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Code of a refusal; `None` on success.
+fn refusal<T>(result: Result<T, eario_hub::HubError>) -> Option<&'static str> {
+    result.err().map(|error| error.code())
+}
+
+/// Sets the version the registry records for `slug`.
+fn set_installed_version(root: &Path, slug: &str, version: &str) -> TestResult {
+    let hub = HubDir::at(root);
+    let mut registry = hub.read_registry()?;
+    let mut entry = registry.get(slug).ok_or("not installed")?.clone();
+    entry.manifest.version = Some(version.to_owned());
+    registry.insert(entry);
+    hub.write_registry(&registry)?;
+    Ok(())
+}
+
+/// The files in `bin/<slug>/`, sorted.
+fn bin_files(root: &Path, slug: &str) -> Result<Vec<String>, Failure> {
+    let directory = HubDir::at(root).bin_dir(slug)?;
+    let mut names = Vec::new();
+    match fs::read_dir(&directory) {
+        Ok(entries) => {
+            for entry in entries {
+                names.push(entry?.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Files under `staging/`, at any depth, except the `lock` of each staging
+/// area: the downloaded releases.
+fn staged_paths(root: &Path) -> Result<Vec<PathBuf>, Failure> {
+    fn walk(directory: &Path, found: &mut Vec<PathBuf>) -> TestResult {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                walk(&entry.path(), found)?;
+            } else if entry.file_name() != "lock" {
+                found.push(entry.path());
+            }
+        }
+        Ok(())
+    }
+    let mut found = Vec::new();
+    walk(&HubDir::at(root).staging_dir(), &mut found)?;
+    Ok(found)
+}
+
+/// Number of [`staged_paths`].
+fn staged_files(root: &Path) -> Result<usize, Failure> {
+    Ok(staged_paths(root)?.len())
+}
+
+/// Nothing of `slug` was installed: no registry entry, no `bin/<slug>/`, and
+/// nothing left in the staging directory.
+fn assert_nothing_installed(root: &Path, slug: &str) -> TestResult {
+    assert!(HubDir::at(root).read_registry()?.get(slug).is_none(), "{slug} is in the registry");
+    assert!(!HubDir::at(root).bin_dir(slug)?.exists(), "bin/{slug} exists");
+    assert_eq!(staged_files(root)?, 0, "the staging directory is not empty");
+    Ok(())
+}
+
+/// Requests of the fake for the asset itself (not its redirect).
+fn asset_downloads(fake: &FakeGitHub, asset: &str) -> usize {
+    fake.requests()
+        .iter()
+        .filter(|path| path.starts_with("/assets/") && path.ends_with(asset))
+        .count()
+}
+
+#[test]
+fn a_release_listed_by_a_catalog_installs_and_runs() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(1)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let executable = data_explorer_build("")?;
+    // No minisign.pub: the catalog's key verifies the release.
+    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, executable.clone())], false);
+    serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, key.public_key())]);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+
+    let catalogs = hub.run(hub.supervisor.catalog_listing())?;
+    assert_eq!(catalogs.len(), 1, "the default catalog");
+    assert_eq!(catalogs[0].dashboards[0].repo, REPO);
+    assert_eq!(catalogs[0].dashboards[0].installed_slug, None);
+
+    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    assert_eq!(preview.key_status, KeyStatus::Catalog);
+    assert_eq!(preview.slug, DATA_EXPLORER);
+    // A trusted key: the verified file was run for its manifest.
+    let manifest = preview.manifest.clone().ok_or("the preview of a trusted key is complete")?;
+    assert_eq!((manifest.slug.as_str(), manifest.name.as_str()), (DATA_EXPLORER, "Data Explorer"));
+    assert_eq!(manifest.version.as_deref(), Some("0.0.0"));
+    assert_eq!((preview.tag.as_str(), preview.asset.as_str()), ("v0.0.0", asset.as_str()));
+    assert_eq!(preview.size, executable.len() as u64);
+    assert_eq!(preview.public_key, key.public_key());
+    let key_line = key.public_key();
+    let parsed = verify::PublicKey::from_base64(REPO, &key_line)?;
+    assert_eq!(preview.key_sha256, parsed.sha256());
+    // Nothing is installed by a preview.
+    assert!(bin_files(root.path(), DATA_EXPLORER)?.is_empty());
+    assert_eq!(staged_files(root.path())?, 1, "the verified file waits in staging");
+
+    // The confirmation must repeat the previewed SHA-256.
+    let wrong = "0".repeat(64);
+    assert_eq!(
+        refusal(hub.run(hub.supervisor.install(REPO, &wrong))),
+        Some("hub_preview_mismatch")
+    );
+    let not_a_hash = hub.run(hub.supervisor.install(REPO, "../../bin"));
+    assert_eq!(refusal(not_a_hash), Some("hub_invalid_sha256"));
+    let other_repo = hub.run(hub.supervisor.install("lab/other", &preview.sha256));
+    assert_eq!(refusal(other_repo), Some("hub_no_preview"));
+
+    let slug = hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    assert_eq!(slug, DATA_EXPLORER);
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.source, Source::Github { repo: REPO.to_owned() });
+    assert_eq!(entry.pinned_key.as_deref(), Some(key_line.as_str()), "the key is pinned");
+    assert_eq!(entry.sha256, preview.sha256);
+    assert_eq!(entry.previous, None);
+    assert_eq!(
+        entry.path.parent(),
+        Some(HubDir::at(root.path()).bin_dir(DATA_EXPLORER)?.as_path())
+    );
+    assert_eq!(fs::read(&entry.path)?, executable);
+    assert_eq!(staged_files(root.path())?, 0, "the staging directory is emptied");
+    // The preview was used up.
+    let again = hub.run(hub.supervisor.install(REPO, &preview.sha256));
+    assert_eq!(refusal(again), Some("hub_no_preview"));
+
+    let catalogs = hub.run(hub.supervisor.catalog_listing())?;
+    assert_eq!(catalogs[0].dashboards[0].installed_slug.as_deref(), Some(DATA_EXPLORER));
+    assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO))), Some("hub_already_installed"));
+
+    // It starts like a local install.
+    hub.run(hub.supervisor.start(DATA_EXPLORER))?;
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    let listed = hub.state(DATA_EXPLORER)?;
+    assert_eq!(listed.source, Source::Github { repo: REPO.to_owned() });
+    assert!(!listed.has_previous);
+    hub.run(hub.supervisor.stop(DATA_EXPLORER))?;
+    Ok(())
+}
+
+#[test]
+fn a_repository_no_catalog_lists_is_trusted_once_its_key_is_accepted() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(2)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &key,
+        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
+        true,
+    );
+    // The default catalog does not exist: its key vouches for nothing.
+    let hub = RemoteHub::new(root.path(), &fake)?;
+
+    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    assert_eq!(preview.key_status, KeyStatus::Unknown);
+    assert_eq!(preview.manifest, None, "not run before its key is trusted");
+    assert_eq!(preview.slug, DATA_EXPLORER, "from the asset's name");
+    assert_eq!(staged_files(root.path())?, 1, "the verified file waits in staging");
+    let refused = hub.run(hub.supervisor.install(REPO, &preview.sha256));
+    let error = refused.err().ok_or("an unknown key must be refused")?;
+    assert_eq!(error.code(), "hub_key_not_accepted");
+    assert!(error.to_string().contains(&preview.key_sha256), "{error}");
+    assert!(HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).is_none());
+
+    // Only the previewed key's SHA-256 accepts it; the minisign key id is not
+    // enough.
+    let wrong = hub.run(hub.supervisor.accept_key(REPO, &"ab".repeat(32)));
+    assert_eq!(refusal(wrong), Some("hub_key_mismatch"));
+    let key_id = verify::PublicKey::from_base64(REPO, &key.public_key())?.fingerprint().to_owned();
+    let id_only = hub.run(hub.supervisor.accept_key(REPO, &key_id));
+    assert_eq!(refusal(id_only), Some("hub_invalid_sha256"));
+    let accepted = hub.run(hub.supervisor.accept_key(REPO, &preview.key_sha256))?;
+    assert_eq!(accepted.key_status, KeyStatus::Accepted);
+    assert_eq!(accepted.sha256, preview.sha256);
+    // Accepted: only now was it run, for the full preview.
+    let manifest = accepted.manifest.clone().ok_or("the full preview")?;
+    assert_eq!((manifest.slug.as_str(), manifest.name.as_str()), (DATA_EXPLORER, "Data Explorer"));
+    let again = hub.run(hub.supervisor.accept_key(REPO, &preview.key_sha256))?;
+    assert_eq!(again, accepted, "accepting again changes nothing");
+
+    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.pinned_key, Some(key.public_key()), "the key seen at install is pinned");
+    assert_eq!(staged_files(root.path())?, 0);
+    Ok(())
+}
+
+#[test]
+fn a_changed_key_is_refused_until_accepted() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let (first, second) = (test_key(3)?, test_key(4)?);
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &first,
+        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
+        true,
+    );
+    serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, first.public_key())]);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    assert_eq!(preview.key_status, KeyStatus::Catalog);
+    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let installed = fs::read(
+        &HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).ok_or("entry")?.path,
+    )?;
+
+    // A newer release signed with another key, which it carries.
+    let newer = FakeAsset::new(&asset, data_explorer_build("v2")?);
+    publish(&fake, REPO, "v0.0.0", &second, vec![newer.clone()], true);
+    let changed = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    assert_eq!(changed.key_status, KeyStatus::Changed);
+    assert_eq!(changed.public_key, second.public_key());
+    assert_eq!(changed.manifest, None, "not run before the new key is accepted");
+    let refused = hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &changed.sha256));
+    let error = refused.err().ok_or("a changed key must be refused")?;
+    assert_eq!(error.code(), "hub_key_changed");
+    assert!(error.to_string().contains(&changed.key_sha256), "{error}");
+    assert_eq!(refusal(hub.run(hub.supervisor.update(DATA_EXPLORER))), Some("hub_key_changed"));
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.pinned_key, Some(first.public_key()), "still pinned to the first key");
+    assert_eq!(fs::read(&entry.path)?, installed, "the installed copy is untouched");
+
+    // Signed with the second key but presenting the first: refused outright.
+    let mut files = vec![newer.clone()];
+    let [signature, sums, _] = second.release_files(&files);
+    files.extend([signature, sums, FakeAsset::new(verify::KEY_FILE, first.pub_file())]);
+    fake.release(REPO, "v0.0.0", &files);
+    let forged = hub.run(hub.supervisor.preview_update(DATA_EXPLORER));
+    assert_eq!(refusal(forged), Some("release_wrong_key"));
+
+    // Accepted by its SHA-256, the new key is pinned by the update.
+    publish(&fake, REPO, "v0.0.0", &second, vec![newer], true);
+    let changed = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    assert_eq!(changed.manifest, None);
+    let accepted = hub.run(hub.supervisor.accept_key(REPO, &changed.key_sha256))?;
+    assert_eq!(accepted.key_status, KeyStatus::Accepted);
+    let manifest = accepted.manifest.ok_or("the full preview once the key is accepted")?;
+    assert_eq!(manifest.version.as_deref(), Some("0.0.0"), "newer than 0.0.0-test.1");
+    hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &changed.sha256))?;
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.pinned_key, Some(second.public_key()));
+    assert_eq!(entry.sha256, changed.sha256);
+    Ok(())
+}
+
+#[test]
+fn a_slug_installed_from_elsewhere_is_refused() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(5)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let release = vec![FakeAsset::new(&asset, data_explorer_build("")?)];
+    publish(&fake, REPO, "v0.0.0", &key, release.clone(), true);
+    publish(&fake, "elsewhere/data-explorer", "v0.0.0", &key, release, true);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+
+    // Installed locally.
+    install(root.path(), DATA_EXPLORER)?;
+    let local = HubDir::at(root.path()).read_registry()?;
+    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("slug clash")?;
+    assert_eq!(error.code(), "hub_slug_taken");
+    assert!(error.to_string().contains("--eario-install"), "{error}");
+    assert_eq!(HubDir::at(root.path()).read_registry()?, local, "the local install is untouched");
+    assert_eq!(asset_downloads(&fake, &asset), 0, "refused before the download");
+
+    // Installed from another repository.
+    hub.run(hub.supervisor.uninstall(DATA_EXPLORER))?;
+    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    hub.run(hub.supervisor.accept_key(REPO, &preview.key_sha256))?;
+    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    let error = hub.run(hub.supervisor.preview("elsewhere/data-explorer")).err().ok_or("clash")?;
+    assert_eq!(error.code(), "hub_slug_taken");
+    assert!(error.to_string().contains(REPO), "{error}");
+    // The same repository, in another case, is the one installed.
+    let error = hub.run(hub.supervisor.preview("Lab/Data-Explorer")).err().ok_or("installed")?;
+    assert_eq!(error.code(), "hub_already_installed");
+    // A local install is never updated from GitHub.
+    hub.run(hub.supervisor.uninstall(DATA_EXPLORER))?;
+    install(root.path(), DATA_EXPLORER)?;
+    assert_eq!(refusal(hub.run(hub.supervisor.update(DATA_EXPLORER))), Some("hub_not_from_github"));
+    Ok(())
+}
+
+#[test]
+fn a_tampered_asset_or_an_unsigned_release_installs_nothing() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(6)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let genuine = FakeAsset::new(&asset, data_explorer_build("")?);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+
+    // Same size, one byte changed after signing.
+    let mut tampered = genuine.clone();
+    if let Some(last) = tampered.content.last_mut() {
+        *last ^= 0xff;
+    }
+    let mut files = vec![tampered];
+    files.extend(key.release_files(std::slice::from_ref(&genuine)));
+    fake.release(REPO, "v0.0.0", &files);
+    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("a tampered asset")?;
+    assert_eq!(error.code(), "release_hash_mismatch");
+    assert!(error.to_string().contains(&asset), "{error}");
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+
+    // No signature: refused before the asset is downloaded.
+    let mut unsigned = vec![genuine.clone()];
+    let [_, sums, pub_file] = key.release_files(std::slice::from_ref(&genuine));
+    unsigned.extend([sums, pub_file]);
+    let downloads = asset_downloads(&fake, &asset);
+    fake.release(REPO, "v0.0.0", &unsigned);
+    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("an unsigned release")?;
+    assert_eq!(error.code(), "release_missing_signature");
+    assert!(error.to_string().contains(REPO), "{error}");
+    assert_eq!(asset_downloads(&fake, &asset), downloads);
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+
+    // A checksum list changed after signing.
+    let mut files = vec![genuine.clone()];
+    let [signature, sums, pub_file] = key.release_files(std::slice::from_ref(&genuine));
+    let mut changed = sums.content.clone();
+    changed.extend_from_slice(format!("{}  evil.exe\n", "ab".repeat(32)).as_bytes());
+    files.extend([signature, FakeAsset::new(verify::SUMS_FILE, changed), pub_file]);
+    fake.release(REPO, "v0.0.0", &files);
+    assert_eq!(refusal(hub.run(hub.supervisor.preview(REPO))), Some("release_bad_signature"));
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+    Ok(())
+}
+
+#[test]
+fn an_asset_that_is_another_dashboard_or_not_one_is_refused() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(7)?;
+    // The catalog vouches for the key, so the verified file is run at once.
+    let listed = [("lab/signal-lab", key.public_key()), (REPO, key.public_key())];
+    serve_catalog(&fake, eario_hub::remote::DEFAULT_CATALOG, &listed);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+
+    // data-explorer published as signal-lab: its manifest tells.
+    let disguised = FakeAsset::new(&asset_of(SIGNAL_LAB, target)?, data_explorer_build("")?);
+    publish(&fake, "lab/signal-lab", "v1.0.0", &key, vec![disguised], false);
+    let error = hub.run(hub.supervisor.preview("lab/signal-lab")).err().ok_or("disguised")?;
+    assert_eq!(error.code(), "hub_manifest_mismatch");
+    let message = error.to_string();
+    assert!(message.contains(SIGNAL_LAB) && message.contains(DATA_EXPLORER), "{message}");
+    assert_nothing_installed(root.path(), SIGNAL_LAB)?;
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+
+    // Signed, but not an executable at all.
+    let text = FakeAsset::new(&asset_of(DATA_EXPLORER, target)?, "not an executable");
+    publish(&fake, REPO, "v1.0.0", &key, vec![text], false);
+    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("not an executable")?;
+    assert_eq!(error.code(), "hub_manifest_failed");
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+    Ok(())
+}
+
+#[test]
+fn a_release_signed_with_an_untrusted_key_is_not_run_before_it_is_accepted() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let untrusted = test_key(17)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    // Signed and listed in the checksums, but not an executable: running it
+    // fails, so a preview that ran it would fail with `hub_manifest_failed`.
+    let not_executable = FakeAsset::new(&asset, "not an executable");
+    publish(&fake, REPO, "v0.0.0", &untrusted, vec![not_executable.clone()], true);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+
+    // An unknown key: verified, staged, not run.
+    let pending = hub.run(hub.supervisor.preview(REPO))?;
+    assert_eq!(pending.key_status, KeyStatus::Unknown);
+    assert_eq!(pending.manifest, None);
+    assert_eq!(pending.slug, DATA_EXPLORER);
+    assert_eq!(pending.size, not_executable.content.len() as u64);
+    assert_eq!(pending.public_key, untrusted.public_key());
+    assert_eq!(staged_files(root.path())?, 1);
+    let refused = hub.run(hub.supervisor.install(REPO, &pending.sha256));
+    assert_eq!(refusal(refused), Some("hub_key_not_accepted"));
+    // Accepted: only now is it run, and refused for what it is.
+    let error = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256)).err();
+    assert_eq!(error.map(|error| error.code()), Some("hub_manifest_failed"));
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+    let dropped = hub.run(hub.supervisor.install(REPO, &pending.sha256));
+    assert_eq!(refusal(dropped), Some("hub_no_preview"), "the failed preview is dropped");
+
+    // A changed key on an update: the same.
+    let trusted = test_key(18)?;
+    install_from_github(&hub, &fake, &trusted, "build 1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let before = HubDir::at(root.path()).read_registry()?;
+    let copies = bin_files(root.path(), DATA_EXPLORER)?;
+    publish(&fake, REPO, "v0.0.0", &untrusted, vec![not_executable], true);
+    let pending = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    assert_eq!(pending.key_status, KeyStatus::Changed);
+    assert_eq!(pending.manifest, None);
+    let refused = hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &pending.sha256));
+    assert_eq!(refusal(refused), Some("hub_key_changed"));
+    let error = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256)).err();
+    assert_eq!(error.map(|error| error.code()), Some("hub_manifest_failed"));
+    assert_eq!(HubDir::at(root.path()).read_registry()?, before, "nothing was changed");
+    assert_eq!(bin_files(root.path(), DATA_EXPLORER)?, copies);
+    assert_eq!(staged_files(root.path())?, 0);
+
+    // A staged file that went away is not accepted: preview it again.
+    let newer = FakeAsset::new(&asset, data_explorer_build("build 2")?);
+    publish(&fake, REPO, "v0.0.0", &untrusted, vec![newer], true);
+    let pending = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    for path in staged_paths(root.path())? {
+        fs::remove_file(path)?;
+    }
+    let error = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256)).err();
+    let error = error.ok_or("a staged file that is gone")?;
+    assert_eq!(error.code(), "hub_preview_gone");
+    assert!(error.to_string().contains("preview it again"), "{error}");
+
+    // Previewed again and accepted, it is run, then installed.
+    let pending = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    let full = hub.run(hub.supervisor.accept_key(REPO, &pending.key_sha256))?;
+    let manifest = full.manifest.ok_or("the full preview")?;
+    assert_eq!(manifest.slug, DATA_EXPLORER);
+    hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &pending.sha256))?;
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.pinned_key, Some(untrusted.public_key()), "the accepted key is pinned");
+    assert_eq!(entry.sha256, pending.sha256);
+
+    // An install whose staged file went away is refused the same way.
+    hub.run(hub.supervisor.uninstall(DATA_EXPLORER))?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &trusted,
+        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
+        true,
+    );
+    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    assert_eq!(preview.key_status, KeyStatus::Catalog);
+    for path in staged_paths(root.path())? {
+        fs::remove_file(path)?;
+    }
+    let refused = hub.run(hub.supervisor.install(REPO, &preview.sha256));
+    assert_eq!(refusal(refused), Some("hub_preview_gone"));
+    assert!(HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).is_none());
+    Ok(())
+}
+
+#[test]
+fn a_starting_hub_keeps_the_previews_of_running_processes() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(19)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let build = FakeAsset::new(&asset, data_explorer_build("")?);
+    publish(&fake, REPO, "v0.0.0", &key, vec![build], true);
+
+    // Left by processes that ended (no process has id 1 or 2 here): an area
+    // whose lock nobody holds, an area without a lock, a stray file.
+    let staging = HubDir::at(root.path()).staging_dir();
+    let unlocked = staging.join("1-0");
+    fs::create_dir_all(unlocked.join("3"))?;
+    fs::write(unlocked.join("lock"), "")?;
+    fs::write(unlocked.join("3").join(&asset), "old")?;
+    let lockless = staging.join("2-0");
+    fs::create_dir_all(&lockless)?;
+    fs::write(lockless.join(&asset), "old")?;
+    let stray = staging.join("stray");
+    fs::write(&stray, "old")?;
+
+    // Another process's preview, waiting for its key to be accepted, as an
+    // `eario-hub install` waits for its terminal.
+    let command = RemoteHub::new(root.path(), &fake)?;
+    let preview = command.run(command.supervisor.preview(REPO))?;
+    assert_eq!(staged_files(root.path())?, 4);
+
+    // The hub below reaches the real GitHub; it must not check for updates.
+    command.run(command.supervisor.set_check_updates_at_start(false))?;
+    let hub = TestHub::start(root.path())?;
+    assert!(!unlocked.exists() && !lockless.exists() && !stray.exists(), "stale ones are removed");
+    assert_eq!(staged_files(root.path())?, 1, "the running process's preview is kept");
+    command.run(command.supervisor.accept_key(REPO, &preview.key_sha256))?;
+    command.run(command.supervisor.install(REPO, &preview.sha256))?;
+    assert_eq!(hub.dashboard(DATA_EXPLORER)?.source, Source::Github { repo: REPO.to_owned() });
+
+    // A process removes its own staging area when it ends.
+    drop(command);
+    assert_eq!(fs::read_dir(&staging)?.count(), 0, "no staging area is left");
+    Ok(())
+}
+
+#[test]
+fn a_command_waits_while_another_process_changes_the_hub_directory() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let hub_dir = HubDir::at(root.path());
+    let lock = hub_dir.lock()?;
+    let child = hub_command(root.path())
+        .args(["check-at-start", "off"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let mut command = HubProcess(child);
+
+    // While this process holds the lock, the command cannot read the
+    // settings to change them: it is still waiting, whatever time it took
+    // to start, and has written nothing.
+    thread::sleep(Duration::from_secs(1));
+    assert!(command.0.try_wait()?.is_none(), "the command did not wait for the lock");
+    assert!(!hub_dir.settings_path().exists(), "the settings were written under the lock");
+
+    drop(lock);
+    let status = exit_status(&mut command.0)?;
+    assert!(status.success(), "{status}");
+    let settings: Option<HubSettings> = hub_dir::read_json_at(&hub_dir.settings_path())?;
+    assert_eq!(settings.map(|settings| settings.check_updates_at_start), Some(false));
+    Ok(())
+}
+
+#[test]
+fn a_first_install_needs_exactly_one_asset_for_this_machine() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(8)?;
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let other = Target::ALL.into_iter().find(|other| *other != target).ok_or("another target")?;
+
+    let elsewhere = FakeAsset::new(&asset_of(DATA_EXPLORER, other)?, "x");
+    publish(&fake, REPO, "v1.0.0", &key, vec![elsewhere], true);
+    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("no asset")?;
+    assert_eq!(error.code(), "hub_no_asset");
+    assert!(error.to_string().contains(target.triple()), "{error}");
+
+    let two = vec![
+        FakeAsset::new(&asset_of(DATA_EXPLORER, target)?, "x"),
+        FakeAsset::new(&asset_of(SIGNAL_LAB, target)?, "y"),
+    ];
+    publish(&fake, REPO, "v1.0.0", &key, two, true);
+    let error = hub.run(hub.supervisor.preview(REPO)).err().ok_or("two assets")?;
+    assert_eq!(error.code(), "hub_ambiguous_asset");
+    assert_eq!(fake.requests().iter().filter(|path| path.starts_with("/assets/")).count(), 0);
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+    Ok(())
+}
+
+/// Installs data-explorer from `REPO` signed by `key`, through the
+/// supervisor, with the catalog vouching for the key.
+fn install_from_github(
+    hub: &RemoteHub,
+    fake: &FakeGitHub,
+    key: &TestKey,
+    marker: &str,
+) -> TestResult {
+    let Some(target) = Target::CURRENT else { return Err("no target".into()) };
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    let build = data_explorer_build(marker)?;
+    publish(fake, REPO, "v0.0.0", key, vec![FakeAsset::new(&asset, build)], true);
+    serve_catalog(fake, eario_hub::remote::DEFAULT_CATALOG, &[(REPO, key.public_key())]);
+    let preview = hub.run(hub.supervisor.preview(REPO))?;
+    hub.run(hub.supervisor.install(REPO, &preview.sha256))?;
+    Ok(())
+}
+
+#[test]
+fn an_update_keeps_one_previous_version_and_a_rollback_restores_it() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(9)?;
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let hub_dir = HubDir::at(root.path());
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    install_from_github(&hub, &fake, &key, "build 1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let first = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(refusal(hub.run(hub.supervisor.rollback(DATA_EXPLORER))), Some("hub_no_previous"));
+
+    // First update: the installed version becomes the previous one.
+    let second_build = data_explorer_build("build 2")?;
+    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, second_build.clone())], true);
+    let preview = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+    assert_eq!(preview.key_status, KeyStatus::Pinned);
+    hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &preview.sha256))?;
+    let second = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(fs::read(&second.path)?, second_build);
+    assert_eq!(second.manifest.version.as_deref(), Some("0.0.0"), "from the new manifest");
+    let previous = second.previous.clone().ok_or("a previous version")?;
+    assert_eq!((previous.size, previous.sha256.as_str()), (first.size, first.sha256.as_str()));
+    assert_eq!(previous.manifest.version.as_deref(), Some("0.0.0-test.1"));
+    let first_name = first.path.file_name().and_then(|name| name.to_str()).ok_or("name")?;
+    assert_eq!(previous.file_name, first_name);
+    assert_eq!(bin_files(root.path(), DATA_EXPLORER)?.len(), 2);
+    assert!(hub.state(DATA_EXPLORER)?.has_previous);
+
+    // Second update: the first version is removed.
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.2")?;
+    let second = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    let third_build = data_explorer_build("build 3")?;
+    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, third_build.clone())], true);
+    hub.run(hub.supervisor.update(DATA_EXPLORER))?;
+    let third = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(fs::read(&third.path)?, third_build);
+    let previous = third.previous.clone().ok_or("a previous version")?;
+    assert_eq!(previous.sha256, second.sha256);
+    let mut expected: Vec<String> = [&third.path, &second.path]
+        .iter()
+        .filter_map(|path| path.file_name().and_then(|name| name.to_str()).map(str::to_owned))
+        .collect();
+    expected.sort();
+    assert_eq!(bin_files(root.path(), DATA_EXPLORER)?, expected, "exactly one previous version");
+    assert!(!first.path.exists(), "the older version is removed");
+    assert_eq!(staged_files(root.path())?, 0);
+
+    // A rollback restores the previous version and removes the newer copy.
+    hub.run(hub.supervisor.rollback(DATA_EXPLORER))?;
+    let restored = hub_dir.read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(restored.path, second.path);
+    assert_eq!((restored.size, restored.sha256.as_str()), (second.size, second.sha256.as_str()));
+    assert_eq!(restored.manifest.version.as_deref(), Some("0.0.0-test.2"));
+    assert_eq!(restored.previous, None);
+    assert_eq!(restored.pinned_key, Some(key.public_key()));
+    assert!(!third.path.exists(), "the newer copy is removed");
+    assert_eq!(bin_files(root.path(), DATA_EXPLORER)?.len(), 1);
+    assert_eq!(refusal(hub.run(hub.supervisor.rollback(DATA_EXPLORER))), Some("hub_no_previous"));
+    // The restored copy passes the check before each start.
+    hub.run(hub.supervisor.start(DATA_EXPLORER))?;
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    hub.run(hub.supervisor.stop(DATA_EXPLORER))?;
+
+    // A previous version whose copy was changed is not restored.
+    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, third_build)], true);
+    hub.run(hub.supervisor.update(DATA_EXPLORER))?;
+    fs::write(&second.path, b"changed")?;
+    let error = hub.run(hub.supervisor.rollback(DATA_EXPLORER)).err().ok_or("changed copy")?;
+    assert_eq!(error.code(), "hub_previous_unusable");
+    // Nor one the registry names by a path.
+    let mut registry = hub_dir.read_registry()?;
+    let mut entry = registry.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    if let Some(previous) = entry.previous.as_mut() {
+        previous.file_name = "../../registry.json".to_owned();
+    }
+    registry.insert(entry);
+    hub_dir.write_registry(&registry)?;
+    let error = hub.run(hub.supervisor.rollback(DATA_EXPLORER)).err().ok_or("a path")?;
+    assert_eq!(error.code(), "hub_foreign_executable");
+    assert!(hub_dir.registry_path().exists());
+    Ok(())
+}
+
+#[test]
+fn an_update_is_refused_while_the_dashboard_runs() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(10)?;
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    install_from_github(&hub, &fake, &key, "build 1")?;
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &key,
+        vec![FakeAsset::new(&asset, data_explorer_build("build 2")?)],
+        true,
+    );
+    let preview = hub.run(hub.supervisor.preview_update(DATA_EXPLORER))?;
+
+    hub.run(hub.supervisor.start(DATA_EXPLORER))?;
+    let starting = hub.run(hub.supervisor.update(DATA_EXPLORER));
+    assert!(matches!(refusal(starting), Some("hub_starting" | "hub_running")));
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    let before = HubDir::at(root.path()).read_registry()?;
+    let downloads = asset_downloads(&fake, &asset);
+    assert_eq!(refusal(hub.run(hub.supervisor.update(DATA_EXPLORER))), Some("hub_running"));
+    assert_eq!(asset_downloads(&fake, &asset), downloads, "refused before the download");
+    let apply = hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &preview.sha256));
+    assert_eq!(refusal(apply), Some("hub_running"));
+    assert_eq!(refusal(hub.run(hub.supervisor.rollback(DATA_EXPLORER))), Some("hub_running"));
+    assert_eq!(HubDir::at(root.path()).read_registry()?, before, "nothing was changed");
+
+    hub.run(hub.supervisor.stop(DATA_EXPLORER))?;
+    hub.run(hub.supervisor.apply_update(DATA_EXPLORER, &preview.sha256))?;
+    assert!(hub.state(DATA_EXPLORER)?.has_previous);
+    // While the rolled-back copy runs, it is not rolled back again either.
+    hub.run(hub.supervisor.start(DATA_EXPLORER))?;
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    assert_eq!(refusal(hub.run(hub.supervisor.rollback(DATA_EXPLORER))), Some("hub_running"));
+    hub.run(hub.supervisor.stop(DATA_EXPLORER))?;
+    hub.run(hub.supervisor.rollback(DATA_EXPLORER))?;
+    Ok(())
+}
+
+#[test]
+fn an_update_to_an_older_or_incomparable_version_is_refused() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(11)?;
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    install_from_github(&hub, &fake, &key, "build 1")?;
+    let older = vec![FakeAsset::new(&asset, data_explorer_build("build 0")?)];
+
+    // Installed 0.0.1; the release, 0.0.0, is older: refused by its tag,
+    // before any download.
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.1")?;
+    publish(&fake, REPO, "v0.0.0", &key, older.clone(), true);
+    let downloads = asset_downloads(&fake, &asset);
+    let error = hub.run(hub.supervisor.update(DATA_EXPLORER)).err().ok_or("a downgrade")?;
+    assert_eq!(error.code(), "hub_not_newer");
+    assert!(error.to_string().contains("0.0.1"), "{error}");
+    assert_eq!(asset_downloads(&fake, &asset), downloads);
+    // The same version is no update either.
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0")?;
+    assert_eq!(refusal(hub.run(hub.supervisor.update(DATA_EXPLORER))), Some("hub_not_newer"));
+
+    // A newer tag on an older executable: its signed manifest decides.
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.1")?;
+    publish(&fake, REPO, "v9.0.0", &key, older.clone(), true);
+    let error = hub.run(hub.supervisor.update(DATA_EXPLORER)).err().ok_or("an older executable")?;
+    assert_eq!(error.code(), "hub_not_newer");
+    assert_eq!(asset_downloads(&fake, &asset), downloads + 1, "refused after the download");
+
+    // Without SemVer the hub cannot tell an update from a downgrade.
+    set_installed_version(root.path(), DATA_EXPLORER, "nightly")?;
+    publish(&fake, REPO, "latest", &key, older, true);
+    let refused = hub.run(hub.supervisor.update(DATA_EXPLORER));
+    assert_eq!(refusal(refused), Some("hub_version_not_comparable"));
+
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.previous, None, "nothing was installed");
+    assert_eq!(bin_files(root.path(), DATA_EXPLORER)?.len(), 1);
+    assert_eq!(staged_files(root.path())?, 0);
+    Ok(())
+}
+
+#[test]
+fn a_check_reports_updates_and_what_could_not_be_checked() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(12)?;
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    install_from_github(&hub, &fake, &key, "build 1")?;
+    install(root.path(), SIGNAL_LAB)?;
+    assert_eq!(hub.run(hub.supervisor.last_check())?, None);
+
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let downloads = |fake: &FakeGitHub| {
+        fake.requests().iter().filter(|path| path.starts_with("/assets/")).count()
+    };
+    let before = downloads(&fake);
+    let check = hub.run(hub.supervisor.check())?;
+    assert_eq!(downloads(&fake), before, "a check downloads nothing");
+    assert_eq!(check.dashboards.len(), 1, "only dashboards installed from GitHub: {check:?}");
+    let found = &check.dashboards[0];
+    assert_eq!((found.slug.as_str(), found.repo.as_str()), (DATA_EXPLORER, REPO));
+    assert_eq!(found.latest_version.as_deref(), Some("0.0.0"));
+    assert_eq!(found.available_version.as_deref(), Some("0.0.0"));
+    assert_eq!(found.error, None);
+    assert!(check.checked_at > 0);
+
+    // The list reads the stored result.
+    let info = hub.run(hub.supervisor.list())?;
+    assert_eq!(info.last_check.as_ref(), Some(&check));
+    let listed =
+        |slug: &str| info.dashboards.iter().find(|dashboard| dashboard.slug == slug).cloned();
+    let explorer = listed(DATA_EXPLORER).ok_or("listed")?;
+    assert_eq!(explorer.available_version.as_deref(), Some("0.0.0"));
+    assert_eq!(listed(SIGNAL_LAB).ok_or("listed")?.available_version, None);
+    assert_eq!(hub.run(hub.supervisor.last_check())?, Some(check.clone()));
+
+    // Once updated, nothing is available any more, without a new check.
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &key,
+        vec![FakeAsset::new(&asset, data_explorer_build("build 2")?)],
+        true,
+    );
+    hub.run(hub.supervisor.update(DATA_EXPLORER))?;
+    assert_eq!(hub.state(DATA_EXPLORER)?.available_version, None);
+
+    // Up to date.
+    let check = hub.run(hub.supervisor.check())?;
+    assert_eq!(check.dashboards[0].available_version, None);
+    assert_eq!(check.dashboards[0].latest_version.as_deref(), Some("0.0.0"));
+
+    // Offline: the dashboard could not be checked, and the hub still lists.
+    drop(fake);
+    let check = hub.run(hub.supervisor.check())?;
+    let error = check.dashboards[0].error.clone().ok_or("could not check")?;
+    assert_eq!(error.code, "github_offline");
+    assert!(error.message.contains(REPO), "{}", error.message);
+    assert_eq!(check.dashboards[0].available_version, None);
+    let info = hub.run(hub.supervisor.list())?;
+    assert_eq!(info.dashboards.len(), 2);
+    assert_eq!(info.last_check, Some(check));
+    Ok(())
+}
+
+#[test]
+fn the_hub_checks_for_updates_at_start_unless_turned_off() -> TestResult {
+    let Some(_) = Target::CURRENT else { return Ok(()) };
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(13)?;
+    {
+        let hub = RemoteHub::new(root.path(), &fake)?;
+        install_from_github(&hub, &fake, &key, "build 1")?;
+        set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+        let settings = hub.run(hub.supervisor.set_check_updates_at_start(false))?;
+        assert!(!settings.check_updates_at_start);
+    }
+    let latest = format!("/repos/{REPO}/releases/latest");
+    let checked =
+        |fake: &FakeGitHub| fake.requests().iter().filter(|path| **path == latest).count();
+    let before = checked(&fake);
+
+    // Off: the hub starts and reads nothing from GitHub.
+    let supervisor = Supervisor::with_github(
+        HubDir::at(root.path()),
+        SupervisorOptions::default(),
+        fake_client(&fake)?,
+    )?;
+    let hub = TestHub::with_supervisor(supervisor)?;
+    assert_eq!(hub.dashboard(DATA_EXPLORER)?.available_version, None);
+    thread::sleep(Duration::from_secs(2));
+    assert_eq!(checked(&fake), before, "no request to GitHub");
+    assert!(!HubDir::at(root.path()).updates_path().exists());
+    drop(hub);
+
+    // On (the default): checked in the background once the hub serves.
+    {
+        let remote = RemoteHub::new(root.path(), &fake)?;
+        remote.run(remote.supervisor.set_check_updates_at_start(true))?;
+    }
+    let supervisor = Supervisor::with_github(
+        HubDir::at(root.path()),
+        SupervisorOptions::default(),
+        fake_client(&fake)?,
+    )?;
+    let hub = TestHub::with_supervisor(supervisor)?;
+    let started = Instant::now();
+    while hub.dashboard(DATA_EXPLORER)?.available_version.is_none() {
+        if started.elapsed() > TIMEOUT {
+            return Err("the hub did not check for updates at start".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(checked(&fake), before + 1);
+    assert_eq!(hub.list()?.last_check.map(|check| check.dashboards.len()), Some(1));
+    drop(hub);
+
+    // Offline at start: logged, "could not check", and the hub serves.
+    drop(fake);
+    let offline = FakeGitHub::start()?;
+    let gone = offline.base_url();
+    drop(offline);
+    let endpoint = Endpoint::loopback(&gone).ok_or("loopback")?;
+    let client: Arc<dyn GitHub> =
+        Arc::new(GitHubClient::with_options(endpoint, ClientOptions::default())?);
+    let supervisor =
+        Supervisor::with_github(HubDir::at(root.path()), SupervisorOptions::default(), client)?;
+    let hub = TestHub::with_supervisor(supervisor)?;
+    let started = Instant::now();
+    loop {
+        let check = hub.list()?.last_check.ok_or("checked before")?;
+        if check.dashboards[0].error.is_some() {
+            assert_eq!(
+                check.dashboards[0].error.as_ref().map(|error| error.code.as_str()),
+                Some("github_offline")
+            );
+            break;
+        }
+        if started.elapsed() > TIMEOUT {
+            return Err("the hub did not record that it could not check".into());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(hub.dashboard(DATA_EXPLORER)?.state, DashboardState::Stopped);
+    Ok(())
+}
+
+#[test]
+fn catalogs_are_added_and_removed_by_repository() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let key = test_key(14)?;
+    serve_catalog(&fake, "lab/catalog", &[(REPO, key.public_key())]);
+    let hub = RemoteHub::new(root.path(), &fake)?;
+    let default = eario_hub::remote::DEFAULT_CATALOG;
+
+    assert_eq!(hub.run(hub.supervisor.catalogs())?, [default]);
+    // The default catalog is not served: listed, with why.
+    let listing = hub.run(hub.supervisor.catalog_listing())?;
+    assert_eq!(
+        listing[0].error.as_ref().map(|error| error.code.as_str()),
+        Some("github_not_found")
+    );
+
+    let error = hub.run(hub.supervisor.add_catalog("lab/nothing")).err().ok_or("no catalog")?;
+    assert_eq!(error.code(), "github_not_found");
+    for bad in ["../x", "https://github.com/lab/catalog", "lab"] {
+        assert_eq!(refusal(hub.run(hub.supervisor.add_catalog(bad))), Some("github_invalid_repo"));
+    }
+    assert_eq!(hub.run(hub.supervisor.add_catalog("lab/catalog"))?, [default, "lab/catalog"]);
+    assert_eq!(hub.run(hub.supervisor.add_catalog("Lab/Catalog"))?, [default, "lab/catalog"]);
+    let listing = hub.run(hub.supervisor.catalog_listing())?;
+    assert_eq!(listing[1].name.as_deref(), Some("Lab"));
+    assert_eq!(listing[1].dashboards[0].repo, REPO);
+
+    assert_eq!(hub.run(hub.supervisor.remove_catalog(default))?, ["lab/catalog"]);
+    let error = hub.run(hub.supervisor.remove_catalog(default)).err().ok_or("removed")?;
+    assert_eq!(error.code(), "hub_unknown_catalog");
+    // Stored in the hub directory: another supervisor reads the same list.
+    let other = RemoteHub::new(root.path(), &fake)?;
+    assert_eq!(other.run(other.supervisor.catalogs())?, ["lab/catalog"]);
+    assert_eq!(hub.run(hub.supervisor.remove_catalog("lab/catalog"))?, Vec::<String>::new());
+    assert!(hub.run(hub.supervisor.catalog_listing())?.is_empty());
+    Ok(())
+}
+
+/// Runs the `eario-hub` command line on `root`, against the fake GitHub
+/// at `api`. Returns its exit status, standard output and standard error.
+fn hub_cli(
+    root: &Path,
+    api: &str,
+    arguments: &[&str],
+) -> Result<(ExitStatus, String, String), Failure> {
+    let output = hub_command(root).env("EARIO_HUB_GITHUB_API", api).args(arguments).output()?;
+    let printed = String::from_utf8_lossy(&output.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+    Ok((output.status, printed, errors))
+}
+
+#[test]
+fn the_command_line_installs_updates_and_rolls_back() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    // Release builds ignore the fake GitHub's address and would reach GitHub.
+    if !cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let api = fake.base_url();
+    let key = test_key(15)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &key,
+        vec![FakeAsset::new(&asset, data_explorer_build("build 1")?)],
+        true,
+    );
+    serve_catalog(&fake, "lab/catalog", &[(REPO, key.public_key())]);
+    // A hub runs meanwhile: it sees every change at its next request.
+    let supervisor = Supervisor::with_github(
+        HubDir::at(root.path()),
+        SupervisorOptions::default(),
+        fake_client(&fake)?,
+    )?;
+    let hub = TestHub::with_supervisor(supervisor)?;
+
+    let (status, _, errors) = hub_cli(root.path(), &api, &["frobnicate"])?;
+    assert_eq!(status.code(), Some(2), "{errors}");
+    assert!(errors.contains("Usage: eario-hub"), "{errors}");
+
+    // No terminal: a confirmation cannot be asked.
+    let (status, _, errors) = hub_cli(root.path(), &api, &["catalog", "add", "lab/catalog"])?;
+    assert!(!status.success());
+    assert!(errors.contains("hub_confirmation_required"), "{errors}");
+    let (status, printed, errors) =
+        hub_cli(root.path(), &api, &["catalog", "add", "lab/catalog", "--yes"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("lab/catalog"), "{printed}");
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["catalog", "list"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains(REPO) && printed.contains("could not be read"), "{printed}");
+
+    // The catalog vouches for the key; the install still needs a yes.
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["install", REPO])?;
+    assert!(!status.success());
+    assert!(errors.contains("hub_confirmation_required"), "{errors}");
+    assert!(printed.contains("Key SHA-256:") && printed.contains(&key.public_key()), "{printed}");
+    assert!(printed.contains("catalog"), "{printed}");
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["install", REPO, "--yes"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("Installed Data Explorer"), "{printed}");
+    assert_eq!(hub.dashboard(DATA_EXPLORER)?.source, Source::Github { repo: REPO.to_owned() });
+
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["check"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("up to date"), "{printed}");
+    set_installed_version(root.path(), DATA_EXPLORER, "0.0.0-test.1")?;
+    let newer = data_explorer_build("build 2")?;
+    publish(&fake, REPO, "v0.0.0", &key, vec![FakeAsset::new(&asset, newer.clone())], true);
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["check"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("version 0.0.0 available"), "{printed}");
+    assert_eq!(hub.dashboard(DATA_EXPLORER)?.available_version.as_deref(), Some("0.0.0"));
+
+    // Not while it runs from the hub.
+    assert_eq!(hub.action(DATA_EXPLORER, "start")?.status, 200);
+    hub.wait_for(DATA_EXPLORER, DashboardState::Running)?;
+    let (status, _, errors) = hub_cli(root.path(), &api, &["update", DATA_EXPLORER, "--yes"])?;
+    assert!(!status.success());
+    assert!(errors.contains("hub_running"), "{errors}");
+    assert_eq!(hub.action(DATA_EXPLORER, "stop")?.status, 200);
+
+    let (status, printed, errors) =
+        hub_cli(root.path(), &api, &["update", DATA_EXPLORER, "--yes"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("Updated Data Explorer"), "{printed}");
+    let updated =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(fs::read(&updated.path)?, newer);
+    assert!(hub.dashboard(DATA_EXPLORER)?.has_previous);
+
+    let (status, printed, errors) =
+        hub_cli(root.path(), &api, &["rollback", DATA_EXPLORER, "--yes"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("Restored Data Explorer"), "{printed}");
+    assert!(!hub.dashboard(DATA_EXPLORER)?.has_previous);
+    assert!(!updated.path.exists());
+
+    let (status, printed, _) = hub_cli(root.path(), &api, &["check-at-start", "off"])?;
+    assert!(status.success());
+    assert!(printed.contains("does not check"), "{printed}");
+    let (status, printed, errors) =
+        hub_cli(root.path(), &api, &["catalog", "remove", "lab/catalog", "--yes"])?;
+    assert!(status.success(), "{errors}");
+    assert!(printed.contains("Catalogs: rtonneau/eario-catalog"), "{printed}");
+    Ok(())
+}
+
+#[test]
+fn the_command_line_trusts_a_new_key_only_when_told_its_sha256() -> TestResult {
+    let Some(target) = Target::CURRENT else { return Ok(()) };
+    if !cfg!(debug_assertions) {
+        return Ok(());
+    }
+    let root = tempfile::tempdir()?;
+    let fake = FakeGitHub::start()?;
+    let api = fake.base_url();
+    let key = test_key(16)?;
+    let asset = asset_of(DATA_EXPLORER, target)?;
+    publish(
+        &fake,
+        REPO,
+        "v0.0.0",
+        &key,
+        vec![FakeAsset::new(&asset, data_explorer_build("")?)],
+        true,
+    );
+    let key_sha256 = verify::PublicKey::from_base64(REPO, &key.public_key())?.sha256();
+
+    // --yes does not trust a key, and the executable is not run.
+    let (status, printed, errors) = hub_cli(root.path(), &api, &["install", REPO, "--yes"])?;
+    assert!(!status.success());
+    assert!(printed.contains("UNKNOWN") && printed.contains(&key_sha256), "{printed}");
+    assert!(printed.contains("read from the executable once its key is trusted"), "{printed}");
+    assert!(!printed.contains("Data Explorer"), "no manifest was read: {printed}");
+    assert!(errors.contains("hub_key_not_accepted") && errors.contains("--accept-key"), "{errors}");
+    let wrong = "ab".repeat(32);
+    let (status, _, errors) =
+        hub_cli(root.path(), &api, &["install", REPO, "--yes", "--accept-key", &wrong])?;
+    assert!(!status.success());
+    assert!(errors.contains("hub_key_mismatch"), "{errors}");
+    assert_nothing_installed(root.path(), DATA_EXPLORER)?;
+
+    let arguments = ["install", REPO, "--yes", "--accept-key", &key_sha256];
+    let (status, printed, errors) = hub_cli(root.path(), &api, &arguments)?;
+    assert!(status.success(), "{errors}");
+    // The key first, then the full preview, read once the key is accepted.
+    let accepted = printed.find("Key accepted.").ok_or_else(|| printed.clone())?;
+    let full = printed.find("Data Explorer (`data-explorer`), version 0.0.0");
+    assert!(full.is_some_and(|full| full > accepted), "{printed}");
+    assert!(printed.contains("Installed Data Explorer"), "{printed}");
+    let entry =
+        HubDir::at(root.path()).read_registry()?.get(DATA_EXPLORER).cloned().ok_or("entry")?;
+    assert_eq!(entry.pinned_key, Some(key.public_key()));
+    Ok(())
 }

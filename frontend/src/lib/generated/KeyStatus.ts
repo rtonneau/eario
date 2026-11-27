@@ -3,4 +3,4 @@
 /**
  * How the key that signed a release relates to what the hub trusts.
  */
-export type KeyStatus = "catalog" | "pinned" | "unknown" | "changed";
+export type KeyStatus = "catalog" | "pinned" | "unknown" | "changed" | "accepted";

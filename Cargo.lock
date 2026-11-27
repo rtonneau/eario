@@ -851,8 +851,10 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "eario-core",
+ "eario-hub",
  "eario-runtime",
  "minisign-verify",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",

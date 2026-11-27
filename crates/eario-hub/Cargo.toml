@@ -16,15 +16,17 @@ name = "eario-hub"
 path = "src/main.rs"
 
 [features]
-# `fake_github`: a fake GitHub on the loopback interface, for the tests of
-# this crate and of others. Never enabled in a release of the hub.
-fake-github = []
+# `fake_github`: a fake GitHub on the loopback interface, and a key to sign
+# its releases, for the tests of this crate and of others. Never enabled in a
+# release of the hub. This crate's own tests turn it on (dev-dependencies).
+fake-github = ["dep:ring"]
 
 [dependencies]
 eario-core.workspace = true
 eario-runtime.workspace = true
 axum.workspace = true
 minisign-verify.workspace = true
+ring = { workspace = true, optional = true }
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
@@ -38,6 +40,8 @@ ureq.workspace = true
 webbrowser.workspace = true
 
 [dev-dependencies]
+# The crate itself, with its fake GitHub, for its unit and integration tests.
+eario-hub = { path = ".", features = ["fake-github"] }
 tempfile.workspace = true
 
 [lints]

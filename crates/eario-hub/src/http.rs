@@ -76,6 +76,31 @@ impl From<HubError> for Failure {
             | HubError::MissingExecutable { .. }
             | HubError::ForeignExecutable { .. } => StatusCode::CONFLICT,
             HubError::StopTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+            // Routes for these come with ticket 05, which may refine them.
+            HubError::InvalidSha256(_) => StatusCode::BAD_REQUEST,
+            HubError::NoPreview { .. }
+            | HubError::PreviewGone { .. }
+            | HubError::UnknownCatalog { .. } => StatusCode::NOT_FOUND,
+            HubError::SlugTaken { .. }
+            | HubError::AlreadyInstalled { .. }
+            | HubError::PreviewMismatch { .. }
+            | HubError::KeyNotAccepted { .. }
+            | HubError::KeyChanged { .. }
+            | HubError::KeyMismatch { .. }
+            | HubError::NotFromGitHub { .. }
+            | HubError::NotNewer { .. }
+            | HubError::VersionNotComparable { .. }
+            | HubError::NoPrevious { .. }
+            | HubError::PreviousUnusable { .. }
+            | HubError::ChangedMeanwhile { .. } => StatusCode::CONFLICT,
+            // What GitHub served was refused.
+            HubError::Verify(_)
+            | HubError::NoAsset { .. }
+            | HubError::AmbiguousAsset { .. }
+            | HubError::ManifestFailed { .. }
+            | HubError::ManifestMismatch { .. }
+            | HubError::CatalogVersion { .. } => StatusCode::BAD_GATEWAY,
+            HubError::UnsupportedPlatform => StatusCode::INTERNAL_SERVER_ERROR,
             HubError::GitHub(GitHubError::InvalidRepo(_)) => StatusCode::BAD_REQUEST,
             // Local failures: the disk or the system's certificate store.
             HubError::GitHub(GitHubError::Write { .. } | GitHubError::Certificates { .. }) => {
