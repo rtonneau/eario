@@ -114,6 +114,30 @@
         "ticket": "02-release-verification",
         "commit": "57995d9"
       }
+    },
+    {
+      "at": "2026-11-27T08:18:45.238Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/03-github-client.md",
+        "03-implement/03-github-client/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-github-client"
+      }
+    },
+    {
+      "at": "2026-11-27T08:53:18.905Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-github-client/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-github-client",
+        "commit": "136a926"
+      }
     }
   ],
   "current_phase": "ship",
