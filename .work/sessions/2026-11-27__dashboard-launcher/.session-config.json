@@ -186,6 +186,30 @@
         "ticket": "05-hub-routes-and-security-docs",
         "commit": "caaa002"
       }
+    },
+    {
+      "at": "2026-11-27T11:28:30.127Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-hub-self-update.md",
+        "03-implement/06-hub-self-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-hub-self-update"
+      }
+    },
+    {
+      "at": "2026-11-27T13:09:57.785Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/06-hub-self-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-hub-self-update",
+        "commit": "a98a35f"
+      }
     }
   ],
   "current_phase": "ship",
