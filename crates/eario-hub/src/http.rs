@@ -1,31 +1,78 @@
 //! HTTP adapter over the [`Supervisor`].
 //!
-//! Routes, relative to `/api`; `{slug}` is the only parameter of any route:
+//! Routes, relative to `/api`:
 //!
 //! | Route | Answer |
 //! | --- | --- |
-//! | `GET /app` | `AppResponse` of kind `hub`: the installed dashboards and their state |
+//! | `GET /app` | `AppResponse` of kind `hub`: the installed dashboards, their state and the last update check |
 //! | `GET /alive` | `204`, at once: tells a second hub start that this hub runs |
 //! | `POST /dashboards/{slug}/start` | `HubInfo`, once the process is created (the dashboard is `starting`) |
 //! | `POST /dashboards/{slug}/stop` | `HubInfo`, once the dashboard is stopped |
 //! | `POST /dashboards/{slug}/open` | `HubOpen`: the dashboard's address with its token |
 //! | `POST /dashboards/{slug}/uninstall` | `HubInfo`, without the dashboard |
 //! | `POST /stop-all` | `HubInfo`, once every dashboard is stopped |
+//! | `GET /catalogs` | `HubCatalog[]`: each catalog read from GitHub, with its dashboards |
+//! | `POST /catalogs/{owner}/{repo}/add` | `HubCatalog[]`, with that catalog, once it was read |
+//! | `POST /catalogs/{owner}/{repo}/remove` | `HubCatalog[]`, without that catalog |
+//! | `POST /sources/{owner}/{repo}/preview` | `InstallPreview` of the latest release, which must have one dashboard for this machine: downloaded and verified, not installed |
+//! | `POST /sources/{owner}/{repo}/accept-key/{key_sha256}` | `InstallPreview`, complete: the key of the repository's latest preview is accepted, then the executable is read |
+//! | `POST /sources/{owner}/{repo}/install/{sha256}` | `HubInfo`, with the dashboard the preview of that SHA-256 installed |
+//! | `POST /sources/{owner}/{repo}/dashboards/{slug}/preview` | `InstallPreview` of the dashboard `slug` of the latest release, one of several the repository may publish |
+//! | `POST /sources/{owner}/{repo}/dashboards/{slug}/accept-key/{key_sha256}` | `InstallPreview`, complete: the key of the preview of `slug` is accepted (for the repository), then the executable is read |
+//! | `POST /sources/{owner}/{repo}/dashboards/{slug}/install/{sha256}` | `HubInfo`, with `slug` installed from the preview of that SHA-256 |
+//! | `POST /check` | `HubInfo`, whose `last_check` is the check just made |
+//! | `POST /dashboards/{slug}/update-preview` | `InstallPreview` of the newer release of `slug` |
+//! | `POST /dashboards/{slug}/update/{sha256}` | `HubInfo`, once the update previewed with that SHA-256 is installed |
+//! | `POST /dashboards/{slug}/update` | `HubInfo`, once `slug` is updated: preview and install in one step |
+//! | `POST /dashboards/{slug}/rollback` | `HubInfo`, once the previous version of `slug` is restored |
+//! | `GET /settings` | `HubSettings` |
+//! | `POST /settings/check-at-start/{on\|off}` | `HubSettings`, with the update check at start turned on or off |
+//! | `POST /self-update` | `HubSelfUpdate`, once the hub replaced its executable with a verified newer release; the hub then restarts, at a new address. Dashboards keep running. |
 //! | `POST /shutdown` | Added by the server: quits the hub. Dashboards keep running. |
 //!
 //! No route reads a request body or a query string, so none can be given a
-//! path, an executable or arguments. A slug that is not one is refused with
-//! 400. The server puts every route behind the Host and Origin check and the
-//! session token, as for a dashboard.
+//! URL, a path, an executable or arguments. Every parameter is one path
+//! segment, refused with 400 unless it is what it names: `{slug}` a slug,
+//! `{owner}/{repo}` a GitHub repository ([`eario_core::is_repo`]),
+//! `{sha256}` and `{key_sha256}` 64 lower-case hexadecimal digits, and
+//! `on` or `off`. The supervisor checks each before it acts. The server puts
+//! every route behind the Host and Origin check and the session token, as
+//! for a dashboard.
+//!
+//! An install takes two requests (ADR 0013): the preview, which the user
+//! reads, then the install, which must repeat the previewed SHA-256. A
+//! release whose key is not trusted yet (`unknown` or `changed`) needs a
+//! third, between them: `accept-key` with the SHA-256 of the key the
+//! preview showed. The same applies to an update previewed with
+//! `update-preview`; the one-step `update` is refused with
+//! `hub_key_changed` when the key changed, and leaves its preview for
+//! `accept-key`.
+//!
+//! A repository may publish several dashboards in one release. A preview
+//! that names none (`/sources/{owner}/{repo}/preview`) is refused with
+//! `hub_ambiguous_asset` when the release has several for this machine; the
+//! `/dashboards/{slug}/` routes name one. Each dashboard of a repository has
+//! a preview of its own; `accept-key` and `install` without a slug take the
+//! repository's latest preview and its preview of that SHA-256. The key
+//! belongs to the repository: one accepted for a dashboard is accepted for
+//! the others, and an install or update pins it for all of them.
+//!
+//! `self-update` takes one request: the hub accepts only a release signed
+//! with the Eario release key compiled into it, so there is no key for the
+//! user to accept ([`crate::self_update`]).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use eario_core::{ApiError, AppResponse, HubInfo, HubOpen};
+use eario_core::{
+    ApiError, AppResponse, HubCatalog, HubInfo, HubOpen, HubSelfUpdate, HubSettings, InstallPreview,
+};
 use eario_runtime::HubDirError;
 
+use crate::github::GitHubError;
+use crate::self_update::SelfUpdateError;
 use crate::supervisor::{HubError, Supervisor};
 
 /// Path of the route that answers `204` without looking at any dashboard or
@@ -44,6 +91,31 @@ pub(crate) fn routes(supervisor: Supervisor) -> Router {
         .route("/dashboards/{slug}/open", post(open))
         .route("/dashboards/{slug}/uninstall", post(uninstall))
         .route("/stop-all", post(stop_all))
+        .route("/catalogs", get(catalogs))
+        .route("/catalogs/{owner}/{repo}/add", post(add_catalog))
+        .route("/catalogs/{owner}/{repo}/remove", post(remove_catalog))
+        .route("/sources/{owner}/{repo}/preview", post(preview))
+        .route("/sources/{owner}/{repo}/accept-key/{key_sha256}", post(accept_key))
+        .route("/sources/{owner}/{repo}/install/{sha256}", post(install))
+        // `dashboards` keeps a slug out of the place of `accept-key` and
+        // `install`: a dashboard may be called either.
+        .route("/sources/{owner}/{repo}/dashboards/{slug}/preview", post(preview_dashboard))
+        .route(
+            "/sources/{owner}/{repo}/dashboards/{slug}/accept-key/{key_sha256}",
+            post(accept_dashboard_key),
+        )
+        .route(
+            "/sources/{owner}/{repo}/dashboards/{slug}/install/{sha256}",
+            post(install_dashboard),
+        )
+        .route("/check", post(check))
+        .route("/dashboards/{slug}/update-preview", post(preview_update))
+        .route("/dashboards/{slug}/update/{sha256}", post(apply_update))
+        .route("/dashboards/{slug}/update", post(update))
+        .route("/dashboards/{slug}/rollback", post(rollback))
+        .route("/settings", get(settings))
+        .route("/settings/check-at-start/{switch}", post(set_check_at_start))
+        .route("/self-update", post(self_update))
         .with_state(supervisor)
 }
 
@@ -75,6 +147,62 @@ impl From<HubError> for Failure {
             | HubError::MissingExecutable { .. }
             | HubError::ForeignExecutable { .. } => StatusCode::CONFLICT,
             HubError::StopTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+            HubError::InvalidSha256(_) => StatusCode::BAD_REQUEST,
+            // Nothing to act on: preview again, or name a listed catalog.
+            HubError::NoPreview { .. }
+            | HubError::PreviewGone { .. }
+            | HubError::UnknownCatalog { .. } => StatusCode::NOT_FOUND,
+            // Refused in the hub's present state; the message says what the
+            // user can do (accept the key, stop the dashboard, preview
+            // again, uninstall first).
+            HubError::SlugTaken { .. }
+            | HubError::AlreadyInstalled { .. }
+            | HubError::PreviewMismatch { .. }
+            | HubError::KeyNotAccepted { .. }
+            | HubError::KeyChanged { .. }
+            | HubError::KeyPinnedMeanwhile { .. }
+            | HubError::KeyMismatch { .. }
+            | HubError::NotFromGitHub { .. }
+            | HubError::NotNewer { .. }
+            | HubError::VersionNotComparable { .. }
+            | HubError::NoPrevious { .. }
+            | HubError::PreviousUnusable { .. }
+            | HubError::ChangedMeanwhile { .. } => StatusCode::CONFLICT,
+            // What GitHub served was refused.
+            HubError::Verify(_)
+            | HubError::NoAsset { .. }
+            | HubError::AmbiguousAsset { .. }
+            | HubError::ManifestFailed { .. }
+            | HubError::ManifestMismatch { .. }
+            | HubError::CatalogVersion { .. } => StatusCode::BAD_GATEWAY,
+            HubError::UnsupportedPlatform => StatusCode::INTERNAL_SERVER_ERROR,
+            // Refused in the hub's present state or build; the message says
+            // what the user can do.
+            HubError::SelfUpdate(
+                SelfUpdateError::NotConfigured
+                | SelfUpdateError::UnsupportedPlatform
+                | SelfUpdateError::NotWritable { .. }
+                | SelfUpdateError::NotNewer { .. }
+                | SelfUpdateError::VersionNotComparable { .. }
+                | SelfUpdateError::Pending
+                | SelfUpdateError::HubRunning { .. },
+            ) => StatusCode::CONFLICT,
+            // What GitHub served was refused.
+            HubError::SelfUpdate(SelfUpdateError::ProbeFailed { .. }) => StatusCode::BAD_GATEWAY,
+            // Local failures: the executable or its folder.
+            HubError::SelfUpdate(
+                SelfUpdateError::NoExecutable { .. }
+                | SelfUpdateError::Replace { .. }
+                | SelfUpdateError::RestoreFailed { .. },
+            ) => StatusCode::INTERNAL_SERVER_ERROR,
+            HubError::GitHub(GitHubError::InvalidRepo(_)) => StatusCode::BAD_REQUEST,
+            // Local failures: the disk or the system's certificate store.
+            HubError::GitHub(GitHubError::Write { .. } | GitHubError::Certificates { .. }) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            HubError::GitHub(GitHubError::Timeout { .. }) => StatusCode::GATEWAY_TIMEOUT,
+            // GitHub, not the hub, failed, refused or could not be reached.
+            HubError::GitHub(_) => StatusCode::BAD_GATEWAY,
             HubError::Spawn { .. }
             | HubError::Remove { .. }
             | HubError::HubDir(_)
@@ -136,4 +264,141 @@ async fn uninstall(
 async fn stop_all(State(supervisor): State<Supervisor>) -> Result<Json<HubInfo>, Failure> {
     supervisor.stop_all().await?;
     Ok(Json(supervisor.list().await?))
+}
+
+/// `owner/repo` from the two path segments `{owner}` and `{repo}`. The
+/// supervisor refuses it unless it is a GitHub repository, so a segment that
+/// decoded to a `/` or a `\` never passes.
+fn repository(owner: &str, repo: &str) -> String {
+    format!("{owner}/{repo}")
+}
+
+async fn catalogs(State(supervisor): State<Supervisor>) -> Result<Json<Vec<HubCatalog>>, Failure> {
+    Ok(Json(supervisor.catalog_listing().await?))
+}
+
+async fn add_catalog(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<Vec<HubCatalog>>, Failure> {
+    supervisor.add_catalog(&repository(&owner, &repo)).await?;
+    Ok(Json(supervisor.catalog_listing().await?))
+}
+
+async fn remove_catalog(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<Vec<HubCatalog>>, Failure> {
+    supervisor.remove_catalog(&repository(&owner, &repo)).await?;
+    Ok(Json(supervisor.catalog_listing().await?))
+}
+
+async fn preview(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo)): Path<(String, String)>,
+) -> Result<Json<InstallPreview>, Failure> {
+    Ok(Json(supervisor.preview(&repository(&owner, &repo), None).await?))
+}
+
+async fn accept_key(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, key_sha256)): Path<(String, String, String)>,
+) -> Result<Json<InstallPreview>, Failure> {
+    Ok(Json(supervisor.accept_key(&repository(&owner, &repo), None, &key_sha256).await?))
+}
+
+async fn install(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, sha256)): Path<(String, String, String)>,
+) -> Result<Json<HubInfo>, Failure> {
+    supervisor.install(&repository(&owner, &repo), None, &sha256).await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn preview_dashboard(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, slug)): Path<(String, String, String)>,
+) -> Result<Json<InstallPreview>, Failure> {
+    Ok(Json(supervisor.preview(&repository(&owner, &repo), Some(&slug)).await?))
+}
+
+async fn accept_dashboard_key(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, slug, key_sha256)): Path<(String, String, String, String)>,
+) -> Result<Json<InstallPreview>, Failure> {
+    let repo = repository(&owner, &repo);
+    Ok(Json(supervisor.accept_key(&repo, Some(&slug), &key_sha256).await?))
+}
+
+async fn install_dashboard(
+    State(supervisor): State<Supervisor>,
+    Path((owner, repo, slug, sha256)): Path<(String, String, String, String)>,
+) -> Result<Json<HubInfo>, Failure> {
+    supervisor.install(&repository(&owner, &repo), Some(&slug), &sha256).await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn check(State(supervisor): State<Supervisor>) -> Result<Json<HubInfo>, Failure> {
+    supervisor.check().await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn preview_update(
+    State(supervisor): State<Supervisor>,
+    Path(slug): Path<String>,
+) -> Result<Json<InstallPreview>, Failure> {
+    Ok(Json(supervisor.preview_update(&slug).await?))
+}
+
+async fn apply_update(
+    State(supervisor): State<Supervisor>,
+    Path((slug, sha256)): Path<(String, String)>,
+) -> Result<Json<HubInfo>, Failure> {
+    supervisor.apply_update(&slug, &sha256).await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn update(
+    State(supervisor): State<Supervisor>,
+    Path(slug): Path<String>,
+) -> Result<Json<HubInfo>, Failure> {
+    supervisor.update(&slug).await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn rollback(
+    State(supervisor): State<Supervisor>,
+    Path(slug): Path<String>,
+) -> Result<Json<HubInfo>, Failure> {
+    supervisor.rollback(&slug).await?;
+    Ok(Json(supervisor.list().await?))
+}
+
+async fn settings(State(supervisor): State<Supervisor>) -> Result<Json<HubSettings>, Failure> {
+    Ok(Json(supervisor.settings().await?))
+}
+
+async fn self_update(State(supervisor): State<Supervisor>) -> Result<Json<HubSelfUpdate>, Failure> {
+    Ok(Json(supervisor.self_update().await?))
+}
+
+async fn set_check_at_start(
+    State(supervisor): State<Supervisor>,
+    Path(switch): Path<String>,
+) -> Result<Json<HubSettings>, Failure> {
+    let on = match switch.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => {
+            tracing::debug!(switch, "hub request refused: neither on nor off");
+            return Err(Failure {
+                status: StatusCode::BAD_REQUEST,
+                body: ApiError {
+                    code: "hub_invalid_switch".to_owned(),
+                    message: format!("`{switch}` is neither `on` nor `off`"),
+                },
+            });
+        }
+    };
+    Ok(Json(supervisor.set_check_updates_at_start(on).await?))
 }

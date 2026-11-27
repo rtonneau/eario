@@ -10,17 +10,21 @@
 //!
 //! Every other argument is left to the application. Install and uninstall ask
 //! for a confirmation in the terminal unless `--yes` is given, and are refused
-//! while the dashboard runs from the hub. Their questions and messages, and
-//! the manifest, are the only text the contract writes on standard output.
+//! while the dashboard runs from the hub. An install never replaces a
+//! dashboard of the same slug installed from GitHub. Both change the registry
+//! under the hub directory's lock ([`HubDir::lock`]), so a hub or another
+//! command changing it at the same time loses nothing. Their questions and
+//! messages, and the manifest, are the only text the contract writes on
+//! standard output.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use eario_core::Manifest;
+use eario_core::{Manifest, Source};
 use eario_runtime::HubDirError;
-use eario_runtime::hub_dir::{self, HubDir, RegistryEntry};
+use eario_runtime::hub_dir::{self, HubDir, Registry, RegistryEntry};
 
 use crate::error::LaunchError;
 
@@ -98,12 +102,14 @@ pub(crate) fn print_manifest(manifest: &Manifest) -> Result<(), LaunchError> {
 }
 
 /// Copies the running executable into `<hub>/bin/<slug>/` and records it in
-/// the registry, replacing an earlier install of the same slug.
+/// the registry, replacing an earlier local install of the same slug. A
+/// dashboard of that slug installed from GitHub is never replaced.
 pub(crate) fn install(manifest: &Manifest, yes: bool) -> Result<(), LaunchError> {
     let hub = HubDir::resolve()?;
     let slug = &manifest.slug;
     refuse_if_running(&hub, slug)?;
     let registry = hub.read_registry()?;
+    refuse_github_entry(&registry, slug)?;
 
     let source = env::current_exe().map_err(LaunchError::CurrentExecutable)?;
     let file_name = source.file_name().ok_or_else(|| {
@@ -121,9 +127,13 @@ pub(crate) fn install(manifest: &Manifest, yes: bool) -> Result<(), LaunchError>
         return say("Nothing was changed.");
     }
     // The answer can take any time: a hub may have started this dashboard or
-    // changed the registry meanwhile.
+    // changed the registry meanwhile. From here to the write, nobody else
+    // changes it.
     refuse_if_running(&hub, slug)?;
+    let lock = hub.lock()?;
     let mut registry = hub.read_registry()?;
+    refuse_github_entry(&registry, slug)?;
+    let previous = registry.get(slug).cloned();
 
     // Reinstalling the hub's own copy keeps it as it is.
     if !same_file(&source, &destination) {
@@ -136,6 +146,10 @@ pub(crate) fn install(manifest: &Manifest, yes: bool) -> Result<(), LaunchError>
         size,
         sha256,
         manifest: manifest.clone(),
+        // A local install is never updated from GitHub, and has no key.
+        source: Source::Local,
+        pinned_key: None,
+        previous: None,
     });
     hub.write_registry(&registry)?;
 
@@ -157,6 +171,7 @@ pub(crate) fn install(manifest: &Manifest, yes: bool) -> Result<(), LaunchError>
             stale.display()
         ));
     }
+    drop(lock);
     say(&message)
 }
 
@@ -205,8 +220,10 @@ pub(crate) fn uninstall(manifest: &Manifest, yes: bool) -> Result<(), LaunchErro
     }
     let name = entry.manifest.name.clone();
     // The answer can take any time: a hub may have started this dashboard or
-    // changed the registry meanwhile.
+    // changed the registry meanwhile. From here to the write, nobody else
+    // changes it.
     refuse_if_running(&hub, slug)?;
+    let lock = hub.lock()?;
     let mut registry = hub.read_registry()?;
 
     // Only the hub's own directory for this slug is removed, never a path read
@@ -220,7 +237,19 @@ pub(crate) fn uninstall(manifest: &Manifest, yes: bool) -> Result<(), LaunchErro
     }
     registry.remove(slug);
     hub.write_registry(&registry)?;
+    drop(lock);
     say(&format!("Removed {name} (`{slug}`) from the hub."))
+}
+
+/// Refuses to replace a dashboard of `slug` installed from GitHub: the hub
+/// updates it from its repository, and the user removes it there.
+fn refuse_github_entry(registry: &Registry, slug: &str) -> Result<(), LaunchError> {
+    match registry.get(slug).map(|entry| &entry.source) {
+        Some(Source::Github { repo }) => {
+            Err(LaunchError::InstalledFromGitHub { slug: slug.to_owned(), repo: repo.clone() })
+        }
+        Some(Source::Local) | None => Ok(()),
+    }
 }
 
 /// Fails while the dashboard's run file answers with its token. A run file
@@ -356,6 +385,38 @@ mod tests {
             assert_eq!(output, b"Go? [y/N] ");
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_dashboard_installed_from_github_is_never_replaced() {
+        let entry = |slug: &str, source: Source| RegistryEntry {
+            slug: slug.to_owned(),
+            path: PathBuf::from("bin").join(slug).join(slug),
+            size: 1,
+            sha256: "ab".repeat(32),
+            manifest: Manifest {
+                name: slug.to_owned(),
+                slug: slug.to_owned(),
+                version: None,
+                eario_version: "0.2.0".to_owned(),
+                protocol: eario_core::LAUNCH_PROTOCOL_VERSION,
+                description: String::new(),
+            },
+            source,
+            pinned_key: None,
+            previous: None,
+        };
+        let mut registry = Registry::default();
+        registry.insert(entry("local", Source::Local));
+        registry.insert(entry("remote", Source::Github { repo: "lab/remote".to_owned() }));
+
+        assert!(refuse_github_entry(&registry, "local").is_ok(), "a local install is replaced");
+        assert!(refuse_github_entry(&registry, "absent").is_ok());
+        let error = refuse_github_entry(&registry, "remote").err();
+        assert_eq!(error.as_ref().map(LaunchError::code), Some("launch_installed_from_github"));
+        let message = error.map(|error| error.to_string()).unwrap_or_default();
+        assert!(message.contains("`remote`") && message.contains("lab/remote"), "{message}");
+        assert!(message.contains("uninstall it in the hub first"), "{message}");
     }
 
     #[test]

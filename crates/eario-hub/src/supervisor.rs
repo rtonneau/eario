@@ -1,12 +1,18 @@
 //! The supervisor: what the hub does, whoever asks.
 //!
 //! A [`Supervisor`] lists the installed dashboards with their state, and
-//! starts, opens, stops and uninstalls them, always by slug. The HTTP API is a
-//! thin adapter over it.
+//! starts, opens, stops and uninstalls them, always by slug. It also reads
+//! catalogs, previews and installs GitHub releases, checks for updates,
+//! updates and rolls back (ADR 0013; the blocking work is in
+//! [`crate::remote`]), and updates the hub itself ([`crate::self_update`]).
+//! The HTTP API and the command line are thin adapters over it.
 //!
 //! Nothing on disk is trusted. Every operation reads the registry again, so an
 //! install made meanwhile with `--eario-install` is seen at once, and a run
 //! file counts only while its dashboard answers with the token it records.
+//! Every change that reads a file of the hub directory and writes it back
+//! holds the hub directory's lock ([`HubDir::lock`]), as `eario-hub` given a
+//! command and `--eario-install` do, so no process undoes another's change.
 //! Before each start the hub's copy of the executable is checked against the
 //! size, SHA-256 and launch protocol version recorded at install time.
 //!
@@ -24,12 +30,20 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use eario_core::{
-    CHILD_ARGUMENT, DashboardState, HUB_LOG_LINES, HubDashboard, HubInfo, HubOpen,
-    LAUNCH_PROTOCOL_VERSION, RunFile, is_slug,
+    CHILD_ARGUMENT, DashboardState, HUB_LOG_LINES, HubCatalog, HubDashboard, HubInfo, HubOpen,
+    HubSelfUpdate, HubSettings, HubUpdate, InstallPreview, LAUNCH_PROTOCOL_VERSION, RunFile,
+    Source, UpdateCheck, is_repo, is_slug,
 };
 use eario_runtime::hub_dir::{self, HUB_DIR_VARIABLE, HubDir, RegistryEntry};
 use eario_runtime::{HubDirError, ServeError};
 use tokio::task::JoinSet;
+
+use crate::github::{GitHub, GitHubClient, GitHubError};
+use crate::remote::{
+    self, MANIFEST_TIMEOUT, MAX_STAGED, Purpose, StageRequest, Staged, StagingArea, same_repo,
+};
+use crate::self_update::{self, SelfUpdateConfig, SelfUpdateError};
+use crate::verify::{PublicKey, Target, VerifyError, is_sha256};
 
 /// Longest a started dashboard has to answer with its run file's token.
 pub const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -51,11 +65,18 @@ pub struct SupervisorOptions {
     pub start_timeout: Duration,
     /// See [`STOP_TIMEOUT`].
     pub stop_timeout: Duration,
+    /// See [`MANIFEST_TIMEOUT`]; it bounds the `--version` run of the hub's
+    /// own update too.
+    pub manifest_timeout: Duration,
 }
 
 impl Default for SupervisorOptions {
     fn default() -> Self {
-        Self { start_timeout: START_TIMEOUT, stop_timeout: STOP_TIMEOUT }
+        Self {
+            start_timeout: START_TIMEOUT,
+            stop_timeout: STOP_TIMEOUT,
+            manifest_timeout: MANIFEST_TIMEOUT,
+        }
     }
 }
 
@@ -166,6 +187,243 @@ pub enum HubError {
     /// The hub's server could not start or stopped with an error.
     #[error(transparent)]
     Serve(#[from] ServeError),
+    /// A request to GitHub failed.
+    #[error(transparent)]
+    GitHub(#[from] GitHubError),
+    /// A release, or a key for it, was refused by its verification.
+    #[error(transparent)]
+    Verify(#[from] VerifyError),
+    /// The hub did not update itself.
+    #[error(transparent)]
+    SelfUpdate(#[from] SelfUpdateError),
+    /// Releases are not published for the platform the hub runs on.
+    #[error(
+        "this hub runs on a platform GitHub releases of dashboards are not published for ({os} {arch}); install dashboards built for it with --eario-install",
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH
+    )]
+    UnsupportedPlatform,
+    /// The release has no asset for this machine.
+    #[error(
+        "the latest release of `{repo}` has no asset `{asset}` for this computer; ask its author to publish one built for this platform"
+    )]
+    NoAsset {
+        /// The repository.
+        repo: String,
+        /// The asset looked for, or the pattern of its name.
+        asset: String,
+    },
+    /// The release has several dashboards for this machine and the install
+    /// named none.
+    #[error(
+        "the latest release of `{repo}` has several dashboards for this computer, with assets ending in `{ending}` ({slugs}); choose the one to install by its slug"
+    )]
+    AmbiguousAsset {
+        /// The repository.
+        repo: String,
+        /// The ending of the asset names for this machine.
+        ending: String,
+        /// Their slugs.
+        slugs: String,
+    },
+    /// The verified executable did not print its manifest.
+    #[error(
+        "`{asset}` of `{repo}` was verified, but did not give its manifest: {detail}; nothing was installed"
+    )]
+    ManifestFailed {
+        /// The repository.
+        repo: String,
+        /// The asset.
+        asset: String,
+        /// What happened.
+        detail: String,
+    },
+    /// The verified executable is another dashboard than its name says.
+    #[error(
+        "`{asset}` of `{repo}` says it is the dashboard `{found}`, not `{expected}` as its name says; nothing was installed"
+    )]
+    ManifestMismatch {
+        /// The repository.
+        repo: String,
+        /// The asset.
+        asset: String,
+        /// The slug of its name.
+        expected: String,
+        /// The slug of its manifest.
+        found: String,
+    },
+    /// A dashboard of that slug is installed from somewhere else.
+    #[error(
+        "a dashboard `{slug}` is already installed from {installed_from}; uninstall it before installing `{repo}`"
+    )]
+    SlugTaken {
+        /// The slug.
+        slug: String,
+        /// The repository asked for.
+        repo: String,
+        /// Where the installed one comes from.
+        installed_from: String,
+    },
+    /// The dashboard is installed already from this repository.
+    #[error("`{slug}` is already installed from `{repo}`; update it instead")]
+    AlreadyInstalled {
+        /// The repository.
+        repo: String,
+        /// The slug it is installed as.
+        slug: String,
+    },
+    /// Nothing was previewed for the repository, or for that dashboard of
+    /// it.
+    #[error(
+        "no verified release of `{repo}`{dashboard} is waiting to be installed; preview it first"
+    )]
+    NoPreview {
+        /// The repository.
+        repo: String,
+        /// The dashboard asked for, as the message names it; empty when none
+        /// was named.
+        dashboard: String,
+    },
+    /// The verified file of a preview is no longer in the staging directory.
+    #[error(
+        "the verified release of `{repo}` is no longer in the hub's staging directory ({path}), so nothing was accepted or installed; preview it again"
+    )]
+    PreviewGone {
+        /// The repository.
+        repo: String,
+        /// Where the file was.
+        path: PathBuf,
+    },
+    /// The confirmation names another file than the preview.
+    #[error(
+        "the release of `{repo}` waiting to be installed has another SHA-256 than {sha256}; preview it again and confirm what the preview shows"
+    )]
+    PreviewMismatch {
+        /// The repository.
+        repo: String,
+        /// The SHA-256 given.
+        sha256: String,
+    },
+    /// A request gave something that is not a SHA-256.
+    #[error("`{0}` is not a SHA-256: give the 64 lower-case hexadecimal digits the preview shows")]
+    InvalidSha256(String),
+    /// The key is unknown and the user has not accepted it.
+    #[error(
+        "no catalog lists `{repo}`, so the key its release is signed with is not trusted yet, and the hub has not run the downloaded executable; compare that key with the one its author publishes, then accept it by its SHA-256 {key_sha256}"
+    )]
+    KeyNotAccepted {
+        /// The repository.
+        repo: String,
+        /// SHA-256 of the key.
+        key_sha256: String,
+    },
+    /// The key changed and the user has not accepted the new one.
+    #[error(
+        "the release of `{repo}` is signed with another key than the one trusted for it: its author may have changed keys, or someone else published this release; accept the new key (SHA-256 {key_sha256}) only once its author confirms the change"
+    )]
+    KeyChanged {
+        /// The repository.
+        repo: String,
+        /// SHA-256 of the new key.
+        key_sha256: String,
+    },
+    /// Another key was pinned for the repository while the release waited
+    /// to be installed.
+    #[error(
+        "the key trusted for `{repo}` changed while the release of `{slug}` waited to be installed: another of its dashboards was installed or updated with another key, or the last one pinning it was uninstalled, meanwhile; preview `{slug}` again"
+    )]
+    KeyPinnedMeanwhile {
+        /// The repository.
+        repo: String,
+        /// The dashboard of the refused release.
+        slug: String,
+    },
+    /// The key accepted is not the previewed one.
+    #[error(
+        "the key the release of `{repo}` is signed with has SHA-256 {expected}, not {given}; nothing was accepted"
+    )]
+    KeyMismatch {
+        /// The repository.
+        repo: String,
+        /// SHA-256 of the previewed key.
+        expected: String,
+        /// SHA-256 given.
+        given: String,
+    },
+    /// A local install is not updated from GitHub.
+    #[error(
+        "`{slug}` was installed from an executable on this computer, so it is not updated from GitHub; run the newer executable with --eario-install"
+    )]
+    NotFromGitHub {
+        /// The dashboard.
+        slug: String,
+    },
+    /// The release is not newer than what is installed.
+    #[error(
+        "the latest release of `{slug}` is version {found}, not newer than the installed version {installed}; nothing to update (only a rollback installs an older version)"
+    )]
+    NotNewer {
+        /// The dashboard.
+        slug: String,
+        /// Installed version.
+        installed: String,
+        /// Version of the release.
+        found: String,
+    },
+    /// The versions cannot be compared.
+    #[error(
+        "`{slug}` cannot be updated in place: its installed version ({installed}) or the release's ({found}) is not a SemVer version such as 1.2.0, so the hub cannot tell an update from a downgrade; uninstall it, then install it again"
+    )]
+    VersionNotComparable {
+        /// The dashboard.
+        slug: String,
+        /// Installed version.
+        installed: String,
+        /// Version of the release.
+        found: String,
+    },
+    /// No update left a previous version.
+    #[error(
+        "`{slug}` has no previous version to roll back to; only an update from GitHub keeps one"
+    )]
+    NoPrevious {
+        /// The dashboard.
+        slug: String,
+    },
+    /// The previous version's copy cannot be restored.
+    #[error(
+        "the previous version of `{slug}` kept at {path} is missing or was changed, so it cannot be restored"
+    )]
+    PreviousUnusable {
+        /// The dashboard.
+        slug: String,
+        /// The copy.
+        path: PathBuf,
+    },
+    /// The dashboard changed while an update was prepared.
+    #[error("`{slug}` was changed in the hub while the update was prepared; try again")]
+    ChangedMeanwhile {
+        /// The dashboard.
+        slug: String,
+    },
+    /// The repository is not a catalog of the hub.
+    #[error("`{repo}` is not one of the hub's catalogs")]
+    UnknownCatalog {
+        /// The repository.
+        repo: String,
+    },
+    /// A catalog is written in a format this hub does not read.
+    #[error(
+        "`catalog.json` of `{repo}` has format version {found}, but this hub reads up to {supported}; update the hub"
+    )]
+    CatalogVersion {
+        /// The catalog's repository.
+        repo: String,
+        /// Version found.
+        found: u32,
+        /// Newest version this hub reads.
+        supported: u32,
+    },
     /// The hub's asynchronous runtime could not be created.
     #[error("could not start the hub's runtime: {0}")]
     Runtime(io::Error),
@@ -193,6 +451,32 @@ impl HubError {
             Self::Remove { .. } => "hub_remove_failed",
             Self::HubDir(error) => error.code(),
             Self::Serve(error) => error.code(),
+            Self::GitHub(error) => error.code(),
+            Self::Verify(error) => error.code(),
+            Self::SelfUpdate(error) => error.code(),
+            Self::UnsupportedPlatform => "hub_unsupported_platform",
+            Self::NoAsset { .. } => "hub_no_asset",
+            Self::AmbiguousAsset { .. } => "hub_ambiguous_asset",
+            Self::ManifestFailed { .. } => "hub_manifest_failed",
+            Self::ManifestMismatch { .. } => "hub_manifest_mismatch",
+            Self::SlugTaken { .. } => "hub_slug_taken",
+            Self::AlreadyInstalled { .. } => "hub_already_installed",
+            Self::NoPreview { .. } => "hub_no_preview",
+            Self::PreviewGone { .. } => "hub_preview_gone",
+            Self::PreviewMismatch { .. } => "hub_preview_mismatch",
+            Self::InvalidSha256(_) => "hub_invalid_sha256",
+            Self::KeyNotAccepted { .. } => "hub_key_not_accepted",
+            Self::KeyChanged { .. } => "hub_key_changed",
+            Self::KeyPinnedMeanwhile { .. } => "hub_key_changed_meanwhile",
+            Self::KeyMismatch { .. } => "hub_key_mismatch",
+            Self::NotFromGitHub { .. } => "hub_not_from_github",
+            Self::NotNewer { .. } => "hub_not_newer",
+            Self::VersionNotComparable { .. } => "hub_version_not_comparable",
+            Self::NoPrevious { .. } => "hub_no_previous",
+            Self::PreviousUnusable { .. } => "hub_previous_unusable",
+            Self::ChangedMeanwhile { .. } => "hub_changed_meanwhile",
+            Self::UnknownCatalog { .. } => "hub_unknown_catalog",
+            Self::CatalogVersion { .. } => "hub_catalog_unknown_version",
             Self::Runtime(_) | Self::Task(_) => "internal_error",
         }
     }
@@ -209,9 +493,45 @@ struct Shared {
     hub: HubDir,
     options: SupervisorOptions,
     /// Serializes the operations that check and then act on the registry or
-    /// the processes: start and uninstall. Never held by a stop or a list.
+    /// the processes: start, uninstall, install, update and rollback. Never
+    /// held by a stop, a list or a download.
     operations: tokio::sync::Mutex<()>,
     processes: Mutex<Processes>,
+    github: GitHubAccess,
+    remote: Mutex<RemoteState>,
+    /// This supervisor's staging area, created at the first preview.
+    staging: Mutex<Option<Arc<StagingArea>>>,
+    /// How the hub updates itself.
+    self_update: SelfUpdateConfig,
+    /// Held for the whole of a self-update, its blocking work included, so
+    /// two never run at once, even when the request that started one was
+    /// dropped.
+    self_updating: Arc<tokio::sync::Mutex<()>>,
+    /// The executable a self-update installed, which the hub restarts with
+    /// once its server has stopped; `None` before.
+    restart: tokio::sync::watch::Sender<Option<PathBuf>>,
+}
+
+/// How the supervisor reaches GitHub.
+enum GitHubAccess {
+    /// Through this client: a fake GitHub in tests.
+    Given(Arc<dyn GitHub>),
+    /// Through a [`GitHubClient`] of this process's endpoint, created at
+    /// first use, so a hub that never contacts GitHub never reads the
+    /// system's certificates.
+    FromEnvironment(Mutex<Option<Arc<dyn GitHub>>>),
+}
+
+/// What only this hub process knows about installs from GitHub.
+#[derive(Default)]
+struct RemoteState {
+    /// Verified releases waiting to be confirmed, oldest first, at most one
+    /// per repository and slug and [`MAX_STAGED`] in all.
+    staged: Vec<Staged>,
+    /// Keys the user accepted, by repository in lower case (a key belongs to
+    /// the repository, whichever of its dashboards it was accepted for),
+    /// until an install or an update pins them.
+    accepted: HashMap<String, PublicKey>,
 }
 
 /// What only this hub process knows.
@@ -254,7 +574,47 @@ enum StartOutcome {
 
 impl Supervisor {
     /// A supervisor of the hub directory `hub`. Touches nothing on disk.
+    ///
+    /// It reaches GitHub with a [`GitHubClient`] of this process's endpoint
+    /// (see [`crate::github::Endpoint::from_env`]), created when first
+    /// needed.
     pub fn new(hub: HubDir, options: SupervisorOptions) -> Result<Self, HubError> {
+        let github = GitHubAccess::FromEnvironment(Mutex::new(None));
+        Self::with_access(hub, options, github, SelfUpdateConfig::compiled())
+    }
+
+    /// A supervisor of the hub directory `hub` that reaches GitHub through
+    /// `github`, for example a client of a fake GitHub. Touches nothing on
+    /// disk. The hub updates itself as [`Supervisor::new`]'s does, with the
+    /// Eario release key compiled into it.
+    pub fn with_github(
+        hub: HubDir,
+        options: SupervisorOptions,
+        github: Arc<dyn GitHub>,
+    ) -> Result<Self, HubError> {
+        let github = GitHubAccess::Given(github);
+        Self::with_access(hub, options, github, SelfUpdateConfig::compiled())
+    }
+
+    /// For tests: [`Supervisor::with_github`], whose self-update uses
+    /// `self_update` (see [`SelfUpdateConfig::for_tests`]) in place of the
+    /// compiled key and this process's executable.
+    #[cfg(feature = "fake-github")]
+    pub fn with_self_update(
+        hub: HubDir,
+        options: SupervisorOptions,
+        github: Arc<dyn GitHub>,
+        self_update: SelfUpdateConfig,
+    ) -> Result<Self, HubError> {
+        Self::with_access(hub, options, GitHubAccess::Given(github), self_update)
+    }
+
+    fn with_access(
+        hub: HubDir,
+        options: SupervisorOptions,
+        github: GitHubAccess,
+        self_update: SelfUpdateConfig,
+    ) -> Result<Self, HubError> {
         // Children run in another working directory and receive paths in the
         // hub directory, so those paths must be absolute.
         let root = std::path::absolute(hub.root())
@@ -264,6 +624,12 @@ impl Supervisor {
             options,
             operations: tokio::sync::Mutex::new(()),
             processes: Mutex::new(Processes::default()),
+            github,
+            remote: Mutex::new(RemoteState::default()),
+            staging: Mutex::new(None),
+            self_update,
+            self_updating: Arc::new(tokio::sync::Mutex::new(())),
+            restart: tokio::sync::watch::Sender::new(None),
         };
         Ok(Self { shared: Arc::new(shared) })
     }
@@ -277,6 +643,30 @@ impl Supervisor {
         // Every change under this lock is one insert or one remove, so the
         // maps are consistent even if a holder panicked.
         self.shared.processes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn remote_state(&self) -> MutexGuard<'_, RemoteState> {
+        // As for `processes`: one insert, one remove or one field set at a
+        // time.
+        self.shared.remote.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The GitHub client. Blocking: the first call may read the system's
+    /// certificates.
+    fn github(&self) -> Result<Arc<dyn GitHub>, HubError> {
+        match &self.shared.github {
+            GitHubAccess::Given(github) => Ok(Arc::clone(github)),
+            GitHubAccess::FromEnvironment(slot) => {
+                // Holds a client or nothing, whatever a holder did.
+                let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(github) = slot.as_ref() {
+                    return Ok(Arc::clone(github));
+                }
+                let github: Arc<dyn GitHub> = Arc::new(GitHubClient::new()?);
+                *slot = Some(Arc::clone(&github));
+                Ok(github)
+            }
+        }
     }
 
     /// What a hub does when it starts: keeps the run files whose dashboard
@@ -342,7 +732,7 @@ impl Supervisor {
     /// does not wait on them again.
     pub async fn list(&self) -> Result<HubInfo, HubError> {
         let hub = self.hub_dir().clone();
-        let (registry, runs) = blocking(move || {
+        let (registry, runs, last_check) = blocking(move || {
             let registry = hub.read_registry()?;
             let runs: Vec<(String, RunFile)> = registry
                 .dashboards
@@ -354,7 +744,12 @@ impl Supervisor {
                     _ => None,
                 })
                 .collect();
-            Ok((registry, runs))
+            // A check that cannot be read only hides the available updates.
+            let last_check = remote::read_last_check(&hub).unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not read the last update check");
+                None
+            });
+            Ok((registry, runs, last_check))
         })
         .await?;
         let probed: Vec<(String, String)> =
@@ -373,12 +768,16 @@ impl Supervisor {
             self.remove_run_files(stale).await;
         }
 
+        let config = &self.shared.self_update;
+        let version = config.version();
+        let available_version = self_update::available_version(last_check.as_ref(), config);
         let mut processes = self.processes();
         processes.reap();
         let dashboards = registry
             .dashboards
             .into_iter()
             .map(|entry| {
+                let available_version = remote::available_version(last_check.as_ref(), &entry);
                 let slug = entry.slug;
                 let (state, log_lines) = if processes.starting.contains_key(&slug) {
                     (DashboardState::Starting, Vec::new())
@@ -397,10 +796,13 @@ impl Supervisor {
                     description: entry.manifest.description,
                     state,
                     log_lines,
+                    source: entry.source,
+                    available_version,
+                    has_previous: entry.previous.is_some(),
                 }
             })
             .collect();
-        Ok(HubInfo { eario_version: env!("CARGO_PKG_VERSION").to_owned(), dashboards })
+        Ok(HubInfo { eario_version: version.to_owned(), dashboards, last_check, available_version })
     }
 
     /// Starts an installed dashboard and returns once its process is created.
@@ -722,24 +1124,36 @@ impl Supervisor {
         check_slug(slug)?;
         let _operation = self.shared.operations.lock().await;
         self.entry(slug).await?;
-        if self.processes().starting.contains_key(slug) {
-            return Err(HubError::Starting(slug.to_owned()));
-        }
-        if self.live_run(slug).await?.is_some() {
-            return Err(HubError::Running(slug.to_owned()));
-        }
-        // A process of this hub that no longer answers would keep running
-        // from the copy about to be removed.
-        let owned = self.processes().children.remove(slug);
-        if let Some(child) = owned {
-            kill(slug, child).await;
-        }
+        self.make_idle(slug).await?;
         let hub = self.hub_dir().clone();
         let name = slug.to_owned();
         blocking(move || remove_installed(&hub, &name)).await?;
         self.processes().failed.remove(slug);
         tracing::info!(dashboard = %slug, "uninstalled");
         Ok(())
+    }
+
+    /// Refuses when `slug` is starting or answers, so its copy can be
+    /// replaced or removed. A process of this hub that no longer answers is
+    /// killed: it would keep running from that copy.
+    async fn make_idle(&self, slug: &str) -> Result<(), HubError> {
+        if self.processes().starting.contains_key(slug) {
+            return Err(HubError::Starting(slug.to_owned()));
+        }
+        if self.live_run(slug).await?.is_some() {
+            return Err(HubError::Running(slug.to_owned()));
+        }
+        let owned = self.processes().children.remove(slug);
+        if let Some(child) = owned {
+            kill(slug, child).await;
+        }
+        Ok(())
+    }
+
+    /// The registry entry of `slug`, as installed now.
+    pub async fn installed(&self, slug: &str) -> Result<RegistryEntry, HubError> {
+        check_slug(slug)?;
+        self.entry(slug).await
     }
 
     /// The registry entry of `slug`, read again from disk.
@@ -810,6 +1224,661 @@ impl Supervisor {
     }
 }
 
+/// Catalogs, installs from GitHub, update checks, updates and rollbacks
+/// (ADR 0013). Every network, process and file access runs off the
+/// asynchronous runtime.
+impl Supervisor {
+    /// The repositories of the catalogs the hub reads, in order.
+    pub async fn catalogs(&self) -> Result<Vec<String>, HubError> {
+        let hub = self.hub_dir().clone();
+        blocking(move || remote::read_catalogs(&hub)).await
+    }
+
+    /// Adds the catalog of `repo` at the end of the list, after reading it
+    /// once from GitHub: a repository without a valid `catalog.json` is not
+    /// added. Adding a catalog that is listed already changes nothing.
+    /// Returns the list.
+    pub async fn add_catalog(&self, repo: &str) -> Result<Vec<String>, HubError> {
+        check_repo(repo)?;
+        let supervisor = self.clone();
+        let repo = repo.to_owned();
+        blocking(move || {
+            let hub = supervisor.hub_dir();
+            if remote::read_catalogs(hub)?.iter().any(|listed| same_repo(listed, &repo)) {
+                return remote::read_catalogs(hub);
+            }
+            remote::fetch_catalog(supervisor.github()?.as_ref(), &repo)?;
+            let _lock = hub.lock()?;
+            let mut catalogs = remote::read_catalogs(hub)?;
+            if !catalogs.iter().any(|listed| same_repo(listed, &repo)) {
+                catalogs.push(repo.clone());
+                remote::write_catalogs(hub, &catalogs)?;
+                tracing::info!(catalog = %repo, "catalog added");
+            }
+            Ok(catalogs)
+        })
+        .await
+    }
+
+    /// Removes the catalog of `repo`; the default one stays removed. Returns
+    /// the list.
+    pub async fn remove_catalog(&self, repo: &str) -> Result<Vec<String>, HubError> {
+        check_repo(repo)?;
+        let supervisor = self.clone();
+        let repo = repo.to_owned();
+        blocking(move || {
+            let hub = supervisor.hub_dir();
+            let _lock = hub.lock()?;
+            let mut catalogs = remote::read_catalogs(hub)?;
+            let count = catalogs.len();
+            catalogs.retain(|listed| !same_repo(listed, &repo));
+            if catalogs.len() == count {
+                return Err(HubError::UnknownCatalog { repo });
+            }
+            remote::write_catalogs(hub, &catalogs)?;
+            tracing::info!(catalog = %repo, "catalog removed");
+            Ok(catalogs)
+        })
+        .await
+    }
+
+    /// Every catalog, read from GitHub, with its dashboards and the slug
+    /// installed from each. A catalog that cannot be read is listed with the
+    /// reason.
+    pub async fn catalog_listing(&self) -> Result<Vec<HubCatalog>, HubError> {
+        let supervisor = self.clone();
+        blocking(move || {
+            let hub = supervisor.hub_dir();
+            let catalogs = remote::read_catalogs(hub)?;
+            if catalogs.is_empty() {
+                return Ok(Vec::new());
+            }
+            let registry = hub.read_registry()?;
+            Ok(match supervisor.github() {
+                Ok(github) => catalogs
+                    .iter()
+                    .map(|repo| remote::list_catalog(github.as_ref(), repo, &registry))
+                    .collect(),
+                Err(error) => {
+                    catalogs.iter().map(|repo| remote::unreadable_catalog(repo, &error)).collect()
+                }
+            })
+        })
+        .await
+    }
+
+    /// Previews a first install from `repo`: downloads the asset of its
+    /// latest release for this machine and verifies it, as
+    /// [`crate::remote`] describes, without writing outside `staging/`.
+    /// The preview waits for [`Supervisor::install`] with its SHA-256.
+    ///
+    /// With `slug`, the asset is exactly `<slug>-<target triple>[.exe]`, one
+    /// of the dashboards the repository publishes; without, the release must
+    /// have only one dashboard for this machine (`hub_ambiguous_asset`
+    /// otherwise, naming their slugs). The manifest must give that slug.
+    ///
+    /// Refused when a dashboard of that slug is installed already, from this
+    /// repository or elsewhere; with `slug`, before any request. The key
+    /// status is `pinned` when another dashboard of the repository is
+    /// installed with that key (and `changed` with another), else `catalog`
+    /// when a catalog lists the repository with that key, `unknown` when
+    /// none lists it, `changed` when the catalog lists another key; and
+    /// `accepted` once the user accepted it for the repository
+    /// ([`Supervisor::accept_key`]).
+    ///
+    /// With a key that is `unknown` or `changed`, the downloaded executable
+    /// is not run: the preview has no manifest, and only
+    /// [`Supervisor::accept_key`] completes it.
+    pub async fn preview(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+    ) -> Result<InstallPreview, HubError> {
+        check_repo(repo)?;
+        if let Some(slug) = slug {
+            check_slug(slug)?;
+        }
+        let supervisor = self.clone();
+        let (repo, slug) = (repo.to_owned(), slug.map(str::to_owned));
+        blocking(move || {
+            let hub = supervisor.hub_dir();
+            let registry = hub.read_registry()?;
+            // Before any request: an installed dashboard is updated, and a
+            // slug installed from elsewhere is refused.
+            if let Some(slug) = &slug {
+                remote::refuse_installed(&registry, &repo, slug)?;
+            }
+            let pinned = remote::pinned_key(&registry, &repo)?;
+            let github = supervisor.github()?;
+            // A pinned key decides: the catalogs are not read.
+            let catalog_key = match &pinned {
+                Some(_) => None,
+                None => {
+                    let catalogs = remote::read_catalogs(hub)?;
+                    remote::catalog_key(github.as_ref(), &catalogs, &repo)?
+                }
+            };
+            let request = StageRequest {
+                accepted: supervisor.accepted_key(&repo),
+                repo,
+                purpose: Purpose::Install { registry, catalog_key, slug },
+                pinned,
+                target: Target::CURRENT,
+                manifest_timeout: supervisor.shared.options.manifest_timeout,
+            };
+            let area = supervisor.staging_area()?;
+            let staged = remote::stage(&area, github.as_ref(), request)?;
+            Ok(supervisor.keep_staged(staged))
+        })
+        .await
+    }
+
+    /// Accepts the key of the release previewed for `slug` of `repo` (the
+    /// latest preview of `repo` without `slug`), which must have SHA-256
+    /// `key_sha256` (see [`InstallPreview::key_sha256`]): trust on first use,
+    /// or a key change the user confirms. The key is accepted for the
+    /// repository, so a later preview of another of its dashboards finds it
+    /// `accepted`. It is pinned when the release is installed; until then it
+    /// is trusted by this hub only.
+    ///
+    /// Only now is the verified executable run: its staged file is hashed
+    /// again, then run for its manifest, which is checked as for a trusted
+    /// key. Returns the full preview, `accepted`, that
+    /// [`Supervisor::install`] or [`Supervisor::apply_update`] takes. When
+    /// the file is gone (`hub_preview_gone`) or fails a check, the preview is
+    /// dropped and nothing is accepted. A preview whose key the hub trusts
+    /// already is returned as it is.
+    pub async fn accept_key(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+        key_sha256: &str,
+    ) -> Result<InstallPreview, HubError> {
+        check_repo(repo)?;
+        if let Some(slug) = slug {
+            check_slug(slug)?;
+        }
+        check_sha256(key_sha256)?;
+        let supervisor = self.clone();
+        let (repo, slug, key_sha256) =
+            (repo.to_owned(), slug.map(str::to_owned), key_sha256.to_owned());
+        blocking(move || {
+            let staged = {
+                let mut state = supervisor.remote_state();
+                let index =
+                    staged_index(&state.staged, &repo, slug.as_deref()).ok_or_else(|| {
+                        HubError::NoPreview {
+                            dashboard: remote::dashboard_text(slug.as_deref()),
+                            repo: repo.clone(),
+                        }
+                    })?;
+                let preview = &state.staged[index].preview;
+                if preview.key_sha256 != key_sha256 {
+                    return Err(HubError::KeyMismatch {
+                        repo,
+                        expected: preview.key_sha256.clone(),
+                        given: key_sha256,
+                    });
+                }
+                if remote::is_trusted(preview.key_status) {
+                    return Ok(preview.clone());
+                }
+                // Taken out while it runs, which can last the manifest
+                // timeout, so the state is not locked meanwhile.
+                state.staged.remove(index)
+            };
+            let key = staged.key.clone();
+            let slug = staged.preview.slug.clone();
+            // A release that fails is dropped here, its file with it.
+            let staged = remote::accept_staged(staged, supervisor.shared.options.manifest_timeout)?;
+            supervisor.remote_state().accepted.insert(repo.to_ascii_lowercase(), key);
+            tracing::info!(repo, dashboard = %slug, key_sha256, "key accepted, release checked");
+            Ok(supervisor.keep_staged(staged))
+        })
+        .await
+    }
+
+    /// Installs the release previewed for `slug` of `repo`, which must have
+    /// SHA-256 `sha256` (see [`InstallPreview::sha256`]), and returns its
+    /// slug. Without `slug`, the preview of `repo` with that SHA-256 is
+    /// taken.
+    ///
+    /// Refused when nothing was previewed, the SHA-256 differs, the key is
+    /// `unknown` or `changed` and was not accepted (so the preview has no
+    /// manifest), the slug was installed since, or another key was pinned
+    /// for the repository since (`hub_key_changed_meanwhile`). The file is
+    /// moved into `bin/<slug>/` and recorded with its key pinned for the
+    /// repository, under the hub directory's lock; the preview is used up
+    /// either way, unless it was refused for its SHA-256 or its key.
+    pub async fn install(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+        sha256: &str,
+    ) -> Result<String, HubError> {
+        check_repo(repo)?;
+        if let Some(slug) = slug {
+            check_slug(slug)?;
+        }
+        check_sha256(sha256)?;
+        let _operation = self.shared.operations.lock().await;
+        let supervisor = self.clone();
+        let (repo, slug, sha256) = (repo.to_owned(), slug.map(str::to_owned), sha256.to_owned());
+        let entry = blocking(move || {
+            let staged = supervisor.take_staged(&repo, slug.as_deref(), &sha256)?;
+            let installed = remote::install_staged(supervisor.hub_dir(), &staged);
+            // Removes what is left of the staged release, here, off the
+            // asynchronous runtime.
+            drop(staged);
+            let entry = installed?;
+            supervisor.forget_accepted(&repo);
+            tracing::info!(dashboard = %entry.slug, repo, sha256, "installed from GitHub");
+            Ok(entry)
+        })
+        .await?;
+        self.processes().failed.remove(&entry.slug);
+        Ok(entry.slug)
+    }
+
+    /// Checks GitHub for a newer release of each dashboard installed from
+    /// it, and of the hub itself, stores the result in the hub directory,
+    /// where [`Supervisor::list`] reads it, and returns it. Only the latest
+    /// releases are read; nothing is downloaded. A repository that cannot be
+    /// read is reported in the result (it "could not be checked"), not as an
+    /// error; so is a hub that holds no release key
+    /// (`self_update_not_configured`), without a request.
+    pub async fn check(&self) -> Result<UpdateCheck, HubError> {
+        let supervisor = self.clone();
+        blocking(move || {
+            let hub = supervisor.hub_dir();
+            let registry = hub.read_registry()?;
+            let installed: Vec<(&RegistryEntry, &str)> = registry
+                .dashboards
+                .iter()
+                .filter_map(|entry| match &entry.source {
+                    Source::Github { repo } => Some((entry, repo.as_str())),
+                    Source::Local => None,
+                })
+                .collect();
+            let dashboards = if installed.is_empty() {
+                Vec::new()
+            } else {
+                match supervisor.github() {
+                    Ok(github) => remote::check_entries(github.as_ref(), &installed),
+                    Err(error) => installed
+                        .iter()
+                        .map(|(entry, repo)| remote::could_not_check(entry, repo, &error))
+                        .collect(),
+                }
+            };
+            let config = &supervisor.shared.self_update;
+            let hub_update = self_update::check(config, || supervisor.github());
+            let check = UpdateCheck {
+                checked_at: crate::unix_seconds(),
+                dashboards,
+                hub: Some(hub_update),
+            };
+            remote::write_last_check(hub, &check)?;
+            Ok(check)
+        })
+        .await
+    }
+
+    /// What the last update check found; `None` before the first one.
+    pub async fn last_check(&self) -> Result<Option<UpdateCheck>, HubError> {
+        let hub = self.hub_dir().clone();
+        blocking(move || remote::read_last_check(&hub)).await
+    }
+
+    /// Previews an update of `slug` to the latest release of the repository
+    /// it was installed from, as [`Supervisor::preview`] does: the asset of
+    /// that slug, with the key pinned for the repository. Refused before any
+    /// download when `slug` is running or starting, was installed locally,
+    /// or the release's tag is not a newer version; after the download, when
+    /// the executable's version is not newer than the installed one. The
+    /// preview waits for
+    /// [`Supervisor::apply_update`] with its SHA-256.
+    pub async fn preview_update(&self, slug: &str) -> Result<InstallPreview, HubError> {
+        check_slug(slug)?;
+        let entry = self.entry(slug).await?;
+        let Source::Github { repo } = entry.source.clone() else {
+            return Err(HubError::NotFromGitHub { slug: slug.to_owned() });
+        };
+        if self.processes().starting.contains_key(slug) {
+            return Err(HubError::Starting(slug.to_owned()));
+        }
+        if self.live_run(slug).await?.is_some() {
+            return Err(HubError::Running(slug.to_owned()));
+        }
+        let supervisor = self.clone();
+        blocking(move || {
+            let pinned = remote::pinned_key(&supervisor.hub_dir().read_registry()?, &repo)?;
+            let github = supervisor.github()?;
+            let request = StageRequest {
+                accepted: supervisor.accepted_key(&repo),
+                repo,
+                purpose: Purpose::Update { entry: Box::new(entry) },
+                pinned,
+                target: Target::CURRENT,
+                manifest_timeout: supervisor.shared.options.manifest_timeout,
+            };
+            let area = supervisor.staging_area()?;
+            let staged = remote::stage(&area, github.as_ref(), request)?;
+            Ok(supervisor.keep_staged(staged))
+        })
+        .await
+    }
+
+    /// Installs the update of `slug` previewed by
+    /// [`Supervisor::preview_update`], which must have SHA-256 `sha256`.
+    ///
+    /// Refused while `slug` runs or starts, when the key changed and was not
+    /// accepted, when the dashboard changed since the preview, and when
+    /// another dashboard of its repository pinned another key since
+    /// (`hub_key_changed_meanwhile`). The key is pinned for the repository.
+    /// The version it replaces is kept as the previous version, for
+    /// [`Supervisor::rollback`]; the older previous version is removed.
+    pub async fn apply_update(&self, slug: &str, sha256: &str) -> Result<(), HubError> {
+        check_slug(slug)?;
+        check_sha256(sha256)?;
+        let _operation = self.shared.operations.lock().await;
+        let entry = self.entry(slug).await?;
+        let Source::Github { repo } = entry.source.clone() else {
+            return Err(HubError::NotFromGitHub { slug: slug.to_owned() });
+        };
+        self.make_idle(slug).await?;
+        let supervisor = self.clone();
+        let (name, sha256) = (slug.to_owned(), sha256.to_owned());
+        let entry = blocking(move || {
+            let staged = supervisor.take_staged(&repo, Some(&name), &sha256)?;
+            let updated = remote::update_staged(supervisor.hub_dir(), &staged);
+            drop(staged);
+            let entry = updated?;
+            supervisor.forget_accepted(&repo);
+            Ok(entry)
+        })
+        .await?;
+        self.processes().failed.remove(slug);
+        tracing::info!(
+            dashboard = %slug,
+            version = entry.manifest.version.as_deref().unwrap_or("unknown"),
+            "updated from GitHub"
+        );
+        Ok(())
+    }
+
+    /// Updates `slug` to the latest release of its repository in one step:
+    /// [`Supervisor::preview_update`], then [`Supervisor::apply_update`] of
+    /// that preview. A key change is refused (`hub_key_changed`) until the
+    /// user accepts the new key; the preview stays for
+    /// [`Supervisor::accept_key`].
+    pub async fn update(&self, slug: &str) -> Result<(), HubError> {
+        let preview = self.preview_update(slug).await?;
+        self.apply_update(slug, &preview.sha256).await
+    }
+
+    /// Restores the version the last update of `slug` replaced, after
+    /// checking its copy, and removes the newer copy. Refused while `slug`
+    /// runs or starts, and when there is no previous version. The restored
+    /// version has none: an update installs the newer release again.
+    pub async fn rollback(&self, slug: &str) -> Result<(), HubError> {
+        check_slug(slug)?;
+        let _operation = self.shared.operations.lock().await;
+        self.entry(slug).await?;
+        self.make_idle(slug).await?;
+        let hub = self.hub_dir().clone();
+        let name = slug.to_owned();
+        let entry = blocking(move || remote::rollback_entry(&hub, &name)).await?;
+        self.processes().failed.remove(slug);
+        tracing::info!(
+            dashboard = %slug,
+            version = entry.manifest.version.as_deref().unwrap_or("unknown"),
+            "rolled back"
+        );
+        Ok(())
+    }
+
+    /// The latest release of the hub itself and whether it is newer than
+    /// this hub. Downloads and stores nothing. Refused
+    /// (`self_update_not_configured`) before any request when the hub holds
+    /// no release key.
+    pub async fn check_hub(&self) -> Result<HubUpdate, HubError> {
+        let supervisor = self.clone();
+        blocking(move || {
+            self_update::latest(&supervisor.shared.self_update, || supervisor.github())
+        })
+        .await
+    }
+
+    /// Replaces the hub's executable with the latest release of
+    /// [`self_update::HUB_REPO`], once it passed every check
+    /// [`crate::self_update`] describes: signed with the Eario release key
+    /// compiled into the hub, the SHA-256 the signed list gives, a version
+    /// strictly newer than this hub's. Refused when the hub holds no key
+    /// (`self_update_not_configured`), cannot write beside its executable, or
+    /// has updated itself already. On failure the executable is left as it
+    /// was.
+    ///
+    /// Running dashboards are not touched. Once the executable is replaced,
+    /// a hub serving this supervisor ([`crate::start`]) stops its server, and
+    /// [`crate::run`] starts the new executable; see
+    /// [`Supervisor::restart_executable`].
+    ///
+    /// The work runs to its end even when this future is dropped, as when
+    /// the client of the request goes away: the restart is then asked all
+    /// the same, and a self-update asked meanwhile waits for it.
+    pub async fn self_update(&self) -> Result<HubSelfUpdate, HubError> {
+        // Moved into the blocking work, which a dropped future does not
+        // cancel, and released only when that work ends.
+        let update = Arc::clone(&self.shared.self_updating).lock_owned().await;
+        if self.shared.restart.borrow().is_some() {
+            return Err(SelfUpdateError::Pending.into());
+        }
+        let supervisor = self.clone();
+        let updated = blocking(move || {
+            let _update = update;
+            let config = &supervisor.shared.self_update;
+            // Before any request, so before the system's certificates are
+            // read.
+            if !config.is_configured() {
+                return Err(SelfUpdateError::NotConfigured.into());
+            }
+            let github = supervisor.github()?;
+            let area = supervisor.staging_area()?;
+            let timeout = supervisor.shared.options.manifest_timeout;
+            let updated =
+                self_update::update(&area, github.as_ref(), config, Target::CURRENT, timeout)?;
+            // Here, not after the await: the executable is replaced, so the
+            // hub must restart even if nobody waits for this answer.
+            supervisor.shared.restart.send_replace(Some(updated.executable.clone()));
+            Ok(updated)
+        })
+        .await?;
+        Ok(HubSelfUpdate { previous_version: updated.previous_version, version: updated.version })
+    }
+
+    /// The executable a self-update installed, which the hub starts once its
+    /// server has stopped; `None` before any.
+    pub fn restart_executable(&self) -> Option<PathBuf> {
+        self.shared.restart.borrow().clone()
+    }
+
+    /// [`Supervisor::restart_executable`], once a self-update in progress
+    /// has ended. A hub whose server stopped asks it before it exits, so that
+    /// a self-update whose request was dropped, by Quit for example, still
+    /// restarts the hub on the executable it installed.
+    pub async fn restart_after_self_update(&self) -> Option<PathBuf> {
+        let _update = self.shared.self_updating.lock().await;
+        self.restart_executable()
+    }
+
+    /// A receiver that changes when a self-update asks the hub to restart.
+    /// It does not keep the supervisor alive.
+    pub(crate) fn restart_requests(&self) -> tokio::sync::watch::Receiver<Option<PathBuf>> {
+        self.shared.restart.subscribe()
+    }
+
+    /// Removes the executable the last self-update replaced, in the
+    /// background, as a hub does when it starts; see
+    /// [`self_update::remove_old`].
+    pub(crate) fn remove_old_executable(&self) {
+        let config = self.shared.self_update.clone();
+        // Detached: it ends on its own, at the latest after its patience.
+        drop(tokio::task::spawn_blocking(move || self_update::remove_old_executable(&config)));
+    }
+
+    /// The hub's settings.
+    pub async fn settings(&self) -> Result<HubSettings, HubError> {
+        let hub = self.hub_dir().clone();
+        blocking(move || remote::read_settings(&hub)).await
+    }
+
+    /// Turns the update check at the hub's start on or off. Returns the
+    /// settings.
+    pub async fn set_check_updates_at_start(&self, on: bool) -> Result<HubSettings, HubError> {
+        let supervisor = self.clone();
+        blocking(move || {
+            let hub = supervisor.hub_dir();
+            let _lock = hub.lock()?;
+            let mut settings = remote::read_settings(hub)?;
+            settings.check_updates_at_start = on;
+            remote::write_settings(hub, &settings)?;
+            tracing::info!(on, "update check at start set");
+            Ok(settings)
+        })
+        .await
+    }
+
+    /// Removes the staging areas left by processes that ended, as a hub does
+    /// when it starts; see [`remote::clean_staging`]. A failure is logged.
+    pub(crate) async fn clean_staging(&self) {
+        let hub = self.hub_dir().clone();
+        if let Err(error) = blocking(move || remote::clean_staging(&hub)).await {
+            tracing::warn!(%error, "could not clean the staging directory");
+        }
+    }
+
+    /// Runs [`Supervisor::check`] in the background, unless the setting
+    /// `check_updates_at_start` is off or cannot be read. A failure is
+    /// logged and never stops the hub.
+    pub(crate) fn check_in_background(&self) {
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            match supervisor.settings().await {
+                Ok(settings) if settings.check_updates_at_start => {}
+                Ok(_) => {
+                    tracing::info!("the update check at start is off");
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not read the settings; no update check at start");
+                    return;
+                }
+            }
+            match supervisor.check().await {
+                Ok(check) => {
+                    let failed = check.dashboards.iter().filter(|found| found.error.is_some());
+                    tracing::info!(
+                        checked = check.dashboards.len(),
+                        failed = failed.count(),
+                        "update check at start done"
+                    );
+                }
+                Err(error) => tracing::warn!(%error, "could not check for updates at start"),
+            }
+        });
+    }
+
+    /// This supervisor's staging area, created at its first call. Blocking:
+    /// creating it takes the hub directory's lock.
+    fn staging_area(&self) -> Result<Arc<StagingArea>, HubError> {
+        // Holds an area or nothing, whatever a holder did.
+        let mut slot = self.shared.staging.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(area) = slot.as_ref() {
+            return Ok(Arc::clone(area));
+        }
+        let area = Arc::new(StagingArea::create(self.hub_dir())?);
+        *slot = Some(Arc::clone(&area));
+        Ok(area)
+    }
+
+    /// The key the user accepted for `repo` in this hub.
+    fn accepted_key(&self, repo: &str) -> Option<PublicKey> {
+        self.remote_state().accepted.get(&repo.to_ascii_lowercase()).cloned()
+    }
+
+    /// Forgets the key accepted for `repo`, which an install has pinned.
+    fn forget_accepted(&self, repo: &str) {
+        self.remote_state().accepted.remove(&repo.to_ascii_lowercase());
+    }
+
+    /// Keeps a staged release until it is confirmed, replacing the one of
+    /// the same repository and slug and dropping the oldest beyond
+    /// [`MAX_STAGED`]. Returns its preview. Blocking: removes the files of
+    /// those dropped.
+    fn keep_staged(&self, staged: Staged) -> InstallPreview {
+        let preview = staged.preview.clone();
+        let dropped = {
+            let mut state = self.remote_state();
+            let mut dropped = Vec::new();
+            if let Some(index) = staged_index(&state.staged, &preview.repo, Some(&preview.slug)) {
+                dropped.push(state.staged.remove(index));
+            }
+            while state.staged.len() >= MAX_STAGED {
+                dropped.push(state.staged.remove(0));
+            }
+            state.staged.push(staged);
+            dropped
+        };
+        // Their files are removed here, outside the lock.
+        drop(dropped);
+        preview
+    }
+
+    /// Takes the staged release of `slug` of `repo` to install it, when its
+    /// SHA-256 is `sha256` and its preview is complete: its key trusted and
+    /// its manifest read. Without `slug`, the staged release of `repo` with
+    /// that SHA-256, else its latest. Otherwise leaves it and refuses.
+    fn take_staged(
+        &self,
+        repo: &str,
+        slug: Option<&str>,
+        sha256: &str,
+    ) -> Result<Staged, HubError> {
+        let mut state = self.remote_state();
+        let by_hash = || {
+            state.staged.iter().rposition(|staged| {
+                same_repo(&staged.preview.repo, repo) && staged.preview.sha256 == sha256
+            })
+        };
+        let index = match slug {
+            Some(_) => staged_index(&state.staged, repo, slug),
+            None => by_hash().or_else(|| staged_index(&state.staged, repo, None)),
+        }
+        .ok_or_else(|| HubError::NoPreview {
+            repo: repo.to_owned(),
+            dashboard: remote::dashboard_text(slug),
+        })?;
+        let staged = &state.staged[index];
+        if staged.preview.sha256 != sha256 {
+            return Err(HubError::PreviewMismatch {
+                repo: repo.to_owned(),
+                sha256: sha256.to_owned(),
+            });
+        }
+        staged.manifest()?;
+        Ok(state.staged.remove(index))
+    }
+}
+
+/// Index of the staged release of `slug` of `repo`; without `slug`, of the
+/// latest staged release of `repo`.
+fn staged_index(staged: &[Staged], repo: &str, slug: Option<&str>) -> Option<usize> {
+    staged.iter().rposition(|staged| {
+        same_repo(&staged.preview.repo, repo) && slug.is_none_or(|slug| staged.preview.slug == slug)
+    })
+}
+
 /// Runs blocking work (file system, hashing, processes) off the asynchronous
 /// runtime.
 async fn blocking<T, F>(call: F) -> Result<T, HubError>
@@ -822,6 +1891,14 @@ where
 
 fn check_slug(slug: &str) -> Result<(), HubError> {
     if is_slug(slug) { Ok(()) } else { Err(HubError::InvalidSlug(slug.to_owned())) }
+}
+
+fn check_repo(repo: &str) -> Result<(), HubError> {
+    if is_repo(repo) { Ok(()) } else { Err(GitHubError::InvalidRepo(repo.to_owned()).into()) }
+}
+
+fn check_sha256(sha256: &str) -> Result<(), HubError> {
+    if is_sha256(sha256) { Ok(()) } else { Err(HubError::InvalidSha256(sha256.to_owned())) }
 }
 
 /// The run files that answer with their token, by slug, probed together.
@@ -870,7 +1947,7 @@ fn spawn(executable: &Path, directory: &Path, run_file: &Path, hub: &Path) -> io
 /// No console window, and a process group of its own, so that a Ctrl+C in
 /// the hub's console does not reach the dashboard.
 #[cfg(windows)]
-fn detach(command: &mut Command) {
+pub(crate) fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -880,13 +1957,13 @@ fn detach(command: &mut Command) {
 /// A process group of its own, so that a Ctrl+C in the hub's terminal does
 /// not reach the dashboard.
 #[cfg(unix)]
-fn detach(command: &mut Command) {
+pub(crate) fn detach(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(not(any(windows, unix)))]
-fn detach(_command: &mut Command) {}
+pub(crate) fn detach(_command: &mut Command) {}
 
 /// Waits up to `patience` for `child` to exit; returns it if it has not.
 async fn wait_for_exit(mut child: Child, patience: Duration) -> Option<Child> {
@@ -924,10 +2001,12 @@ async fn kill(slug: &str, mut child: Child) {
 }
 
 /// Removes the hub's copy of `slug`, then its registry entry, as
-/// `--eario-uninstall` does. Only the hub's own directory for this slug is
-/// removed, never a path read from the registry; it goes first, so if it
-/// cannot be removed the entry stays and the user can try again.
+/// `--eario-uninstall` does, under the hub directory's lock. Only the hub's
+/// own directory for this slug is removed, never a path read from the
+/// registry; it goes first, so if it cannot be removed the entry stays and
+/// the user can try again.
 fn remove_installed(hub: &HubDir, slug: &str) -> Result<(), HubError> {
+    let _lock = hub.lock()?;
     let directory = hub.bin_dir(slug)?;
     match fs::remove_dir_all(&directory) {
         Ok(()) => {}

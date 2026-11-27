@@ -1,0 +1,379 @@
+{
+  "session_id": "2026-11-27__dashboard-launcher",
+  "feature_name": "dashboard-launcher",
+  "scratch_dir": ".scratch/tests/2026-11-27__dashboard-launcher",
+  "created_at": "2026-11-27T07:20:41.277Z",
+  "template_version": 2,
+  "history": [
+    {
+      "at": "2026-11-27T07:20:41.277Z",
+      "event": "session_started",
+      "phase": "grill",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T07:33:26.080Z",
+      "event": "auto_started",
+      "phase": "grill",
+      "detail": {
+        "target": "finish",
+        "steps": "write:grill → plan → write:plan → ship → finish"
+      }
+    },
+    {
+      "at": "2026-11-27T07:33:58.201Z",
+      "event": "grill_written",
+      "phase": "plan-not-started",
+      "files": [
+        "01-grill/resume.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T07:34:06.370Z",
+      "event": "plan_started",
+      "phase": "plan",
+      "files": [
+        "02-plan/plan.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T07:37:18.577Z",
+      "event": "branch_created",
+      "phase": "plan",
+      "detail": {
+        "branch": "feat/hub-github-install",
+        "base": "main"
+      }
+    },
+    {
+      "at": "2026-11-27T07:37:18.610Z",
+      "event": "plan_written",
+      "phase": "ship",
+      "files": [
+        "02-plan/plan.md",
+        "02-plan/tickets/01-contract-and-registry-v2.md",
+        "02-plan/tickets/02-release-verification.md",
+        "02-plan/tickets/03-github-client.md",
+        "02-plan/tickets/04-supervisor-install-update.md",
+        "02-plan/tickets/05-hub-routes-and-security-docs.md",
+        "02-plan/tickets/06-hub-self-update.md",
+        "02-plan/tickets/07-hub-view-remote.md",
+        "02-plan/tickets/08-release-workflow.md",
+        "02-plan/tickets/09-author-and-catalog-docs.md"
+      ],
+      "detail": {
+        "tickets": 9
+      }
+    },
+    {
+      "at": "2026-11-27T07:37:30.301Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/01-contract-and-registry-v2.md",
+        "03-implement/01-contract-and-registry-v2/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-registry-v2"
+      }
+    },
+    {
+      "at": "2026-11-27T07:47:45.412Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/01-contract-and-registry-v2/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "01-contract-and-registry-v2",
+        "commit": "5464f1e"
+      }
+    },
+    {
+      "at": "2026-11-27T07:48:01.697Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-release-verification.md",
+        "03-implement/02-release-verification/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-release-verification"
+      }
+    },
+    {
+      "at": "2026-11-27T08:18:30.335Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-release-verification/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-release-verification",
+        "commit": "57995d9"
+      }
+    },
+    {
+      "at": "2026-11-27T08:18:45.238Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/03-github-client.md",
+        "03-implement/03-github-client/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-github-client"
+      }
+    },
+    {
+      "at": "2026-11-27T08:53:18.905Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/03-github-client/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "03-github-client",
+        "commit": "136a926"
+      }
+    },
+    {
+      "at": "2026-11-27T08:53:29.022Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-supervisor-install-update.md",
+        "03-implement/04-supervisor-install-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-supervisor-install-update"
+      }
+    },
+    {
+      "at": "2026-11-27T10:45:20.753Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-supervisor-install-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-supervisor-install-update",
+        "commit": "76e6ad2"
+      }
+    },
+    {
+      "at": "2026-11-27T10:45:36.948Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/05-hub-routes-and-security-docs.md",
+        "03-implement/05-hub-routes-and-security-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-routes-and-security-docs"
+      }
+    },
+    {
+      "at": "2026-11-27T11:28:19.988Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/05-hub-routes-and-security-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "05-hub-routes-and-security-docs",
+        "commit": "caaa002"
+      }
+    },
+    {
+      "at": "2026-11-27T11:28:30.127Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-hub-self-update.md",
+        "03-implement/06-hub-self-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-hub-self-update"
+      }
+    },
+    {
+      "at": "2026-11-27T13:09:57.785Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/06-hub-self-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-hub-self-update",
+        "commit": "a98a35f"
+      }
+    },
+    {
+      "at": "2026-11-27T13:10:12.694Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/07-hub-view-remote.md",
+        "03-implement/07-hub-view-remote/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-hub-view-remote"
+      }
+    },
+    {
+      "at": "2026-11-27T14:41:47.393Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/07-hub-view-remote/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-hub-view-remote",
+        "commit": "6dccf8b"
+      }
+    },
+    {
+      "at": "2026-11-27T14:42:00.881Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/08-release-workflow.md",
+        "03-implement/08-release-workflow/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "08-release-workflow"
+      }
+    },
+    {
+      "at": "2026-11-27T15:35:32.133Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/08-release-workflow/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "08-release-workflow",
+        "commit": "20a7ec8"
+      }
+    },
+    {
+      "at": "2026-11-27T15:36:06.061Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/10-several-dashboards-per-repo.md",
+        "03-implement/10-several-dashboards-per-repo/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "10-several-dashboards-per-repo"
+      }
+    },
+    {
+      "at": "2026-11-27T16:30:32.700Z",
+      "event": "handoff_saved",
+      "phase": "ship",
+      "files": [
+        "HANDOFF.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T17:02:10.966Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/10-several-dashboards-per-repo/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "10-several-dashboards-per-repo",
+        "commit": "97c295c"
+      }
+    },
+    {
+      "at": "2026-11-27T17:02:29.112Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/09-author-and-catalog-docs.md",
+        "03-implement/09-author-and-catalog-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "09-author-and-catalog-docs"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:01.886Z",
+      "event": "ticket_done",
+      "phase": "finish-pending",
+      "files": [
+        "03-implement/09-author-and-catalog-docs/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "09-author-and-catalog-docs",
+        "commit": "f658844"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:33.181Z",
+      "event": "changelog_written",
+      "phase": "finish-pending",
+      "detail": {
+        "bump": "minor"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:47.314Z",
+      "event": "pr_opened",
+      "phase": "finish-pending",
+      "detail": {
+        "url": "https://github.com/rtonneau/eario/pull/4"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:40.446Z",
+      "event": "session_finished",
+      "phase": "finished",
+      "files": [
+        "INDEX.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T17:21:49.462Z",
+      "event": "scratch_cleaned",
+      "phase": "finished",
+      "detail": {
+        "policy": "build-artifacts",
+        "removed": [
+          ".scratch/tests/2026-11-27__dashboard-launcher/02-msrv/target",
+          ".scratch/tests/2026-11-27__dashboard-launcher/02-target-188/debug/build",
+          ".scratch/tests/2026-11-27__dashboard-launcher/02-vectors/target",
+          ".scratch/tests/2026-11-27__dashboard-launcher/03-msrv-target/debug/build",
+          ".scratch/tests/2026-11-27__dashboard-launcher/03-msrv-target/debug/incremental/build_script_build-2a50yaszecbhh",
+          ".scratch/tests/2026-11-27__dashboard-launcher/06-msrv-target/debug/build",
+          ".scratch/tests/2026-11-27__dashboard-launcher/06-msrv-target/debug/incremental/build_script_build-2a50yaszecbhh",
+          ".scratch/tests/2026-11-27__dashboard-launcher/build-sim"
+        ],
+        "freedBytes": 943443632
+      }
+    }
+  ],
+  "current_phase": "finished",
+  "git": {
+    "branch": "feat/hub-github-install",
+    "base_branch": "main",
+    "branch_created_at": "2026-11-27T07:37:18.577Z",
+    "pr_url": "https://github.com/rtonneau/eario/pull/4"
+  },
+  "ship_mode": "delegate",
+  "changelog": {
+    "bump": "minor",
+    "floor": "minor",
+    "reason": null,
+    "bullets": 8,
+    "path": ".work/changelog/2026-11-27__dashboard-launcher.md",
+    "written_at": "2026-11-27T17:21:33.170Z"
+  },
+  "finished_at": "2026-11-27T17:21:40.446Z"
+}

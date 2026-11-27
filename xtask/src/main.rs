@@ -28,9 +28,9 @@ Commands:
                (not the browser tests, cargo deny or the minimum Rust version)
   dist         Build the frontend, then the data-explorer example and the hub in
                release mode, and print the paths of the executables
-  e2e          Build the frontend, the examples and the hub, then run the browser tests
-               (Playwright, Chromium). --prebuilt-frontend: keep the frontend
-               already in crates/eario-runtime/frontend-dist
+  e2e          Build the frontend, the examples, the hub and a fake GitHub, then
+               run the browser tests (Playwright, Chromium). --prebuilt-frontend:
+               keep the frontend already in crates/eario-runtime/frontend-dist
   bench        Run the benchmarks and write docs/benchmarks/<date>.md with the
                results, the machine and the commit
   help         Show this message
@@ -139,9 +139,10 @@ fn check() -> TaskResult {
     npm(&["run", "test"])
 }
 
-/// Builds the examples and the hub the browser tests start, prepares an empty
-/// directory for their temporary hub directories, installs Chromium for
-/// Playwright if it is missing, and runs the tests in `frontend/e2e`.
+/// Builds the examples, the hub and the fake GitHub the browser tests start,
+/// prepares an empty directory for their temporary hub directories, installs
+/// Chromium for Playwright if it is missing, and runs the tests in
+/// `frontend/e2e`.
 fn e2e(prebuilt_frontend: bool) -> TaskResult {
     if prebuilt_frontend {
         // Still needed: Playwright itself is a frontend dependency.
@@ -159,6 +160,17 @@ fn e2e(prebuilt_frontend: bool) -> TaskResult {
         "signal-lab",
         "--package",
         "eario-hub",
+    ])?;
+    // The fake GitHub the hub tests install from, as a process. Built apart,
+    // so the hub under test is built without `fake-github`, as it ships.
+    cargo(&[
+        "build",
+        "--package",
+        "eario-hub",
+        "--features",
+        "fake-github",
+        "--bin",
+        "fake-github",
     ])?;
     npm(&["exec", "--", "playwright", "install", "chromium"])?;
     // Executables land in <target>/debug. A relative CARGO_TARGET_DIR is

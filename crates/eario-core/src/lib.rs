@@ -23,8 +23,10 @@ pub mod spec;
 pub use filter::{Filter, FilterOp, FilterValue};
 pub use id::{ComponentId, DatasetId, StateKey};
 pub use launch::{
-    CHILD_ARGUMENT, DashboardState, HUB_LOG_LINES, HubDashboard, HubInfo, HubOpen,
-    LAUNCH_PROTOCOL_VERSION, Manifest, RunFile, is_slug, slug,
+    CATALOG_FORMAT_VERSION, CHILD_ARGUMENT, Catalog, CatalogEntry, DashboardState, DashboardUpdate,
+    HUB_LOG_LINES, HubCatalog, HubCatalogEntry, HubDashboard, HubInfo, HubOpen, HubSelfUpdate,
+    HubSettings, HubUpdate, InstallPreview, KeyStatus, LAUNCH_PROTOCOL_VERSION, MANIFEST_ARGUMENT,
+    Manifest, RunFile, Source, UpdateCheck, is_repo, is_slug, slug,
 };
 pub use payload::{
     ApiError, AppInfo, AppResponse, ChartData, ColumnInfo, ColumnKind, ColumnStats, ComponentData,

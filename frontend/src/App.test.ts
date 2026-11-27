@@ -180,4 +180,30 @@ describe('App', () => {
     expect(await screen.findByText(/opened without its session token/)).toBeTruthy();
     expect(requests.filter((request) => request.url === '/api/app')).toHaveLength(0);
   });
+
+  it('shows an error, not endless loading, for a component id that is not a path segment', async () => {
+    const page = info.spec.pages[0];
+    const row = page?.rows[0];
+    const select = row?.items[1];
+    if (page === undefined || row === undefined || select === undefined) {
+      throw new Error('fixture changed');
+    }
+    const odd: AppInfo = {
+      ...info,
+      spec: {
+        ...info.spec,
+        pages: [{ ...page, rows: [{ ...row, items: [{ ...select, id: '..' }] }] }],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
+        String(input) === '/api/app' ? json({ kind: 'dashboard', ...odd }) : backend(input, init),
+      ),
+    );
+    render(App);
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/must not be empty, "\." or "\.\."/);
+    expect(requests.some((request) => request.url.includes('/api/components/'))).toBe(false);
+  });
 });

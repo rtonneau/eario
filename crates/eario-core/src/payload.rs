@@ -333,10 +333,18 @@ mod tests {
         assert_eq!(serde_json::to_value(AppResponse::Dashboard(info.clone()))?, expected);
         assert_eq!(serde_json::from_value::<AppResponse>(expected)?, AppResponse::Dashboard(info));
 
-        let hub = HubInfo { eario_version: "0.2.0".to_owned(), dashboards: Vec::new() };
+        let hub = HubInfo {
+            eario_version: "0.2.0".to_owned(),
+            dashboards: Vec::new(),
+            last_check: None,
+            available_version: None,
+        };
         assert_eq!(
             serde_json::to_value(AppResponse::Hub(hub))?,
-            serde_json::json!({ "kind": "hub", "eario_version": "0.2.0", "dashboards": [] })
+            serde_json::json!({
+                "kind": "hub", "eario_version": "0.2.0", "dashboards": [], "last_check": null,
+                "available_version": null
+            })
         );
         Ok(())
     }

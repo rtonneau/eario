@@ -8,6 +8,7 @@ import { ApiFailure, api, errorMessage, initToken } from './api';
 import type { AppInfo } from './generated/AppInfo';
 import type { ComponentData } from './generated/ComponentData';
 import type { HubInfo } from './generated/HubInfo';
+import type { HubSelfUpdate } from './generated/HubSelfUpdate';
 import type { StateUpdate } from './generated/StateUpdate';
 import type { Theme } from './generated/Theme';
 import type { JsonValue } from './generated/serde_json/JsonValue';
@@ -36,6 +37,11 @@ class Session {
   fatal = $state<string | null>(null);
   /** Set once the application has been stopped from this page. */
   stopped = $state(false);
+  /**
+   * Set once the hub has replaced itself with a newer version: it then stops
+   * and starts again at a new address, so this page no longer reaches it.
+   */
+  hubRestart = $state<HubSelfUpdate | null>(null);
 
   private nextNotificationId = 1;
   /** Counts the hub actions that came back, so a list asked for earlier is dropped. */
@@ -149,6 +155,34 @@ class Session {
     return this.hubAction(() => api.hubStopAll());
   }
 
+  /** Installs the previewed release of `repo` by its SHA-256. Throws when the hub refuses. */
+  installFromGitHub(repo: string, slug: string, sha256: string): Promise<void> {
+    return this.hubAction(() => api.hubInstall(repo, slug, sha256));
+  }
+
+  /** Installs the previewed update of `slug` by its SHA-256. Throws when the hub refuses. */
+  updateDashboard(slug: string, sha256: string): Promise<void> {
+    return this.hubAction(() => api.hubUpdate(slug, sha256));
+  }
+
+  /** Restores the version an update replaced. Throws when the hub refuses. */
+  rollbackDashboard(slug: string): Promise<void> {
+    return this.hubAction(() => api.hubRollback(slug));
+  }
+
+  /** Checks GitHub for updates now. Throws when the hub refuses. */
+  checkForUpdates(): Promise<void> {
+    return this.hubAction(() => api.hubCheck());
+  }
+
+  /**
+   * Updates the hub itself. Once it has answered, the hub stops and starts
+   * again at a new address, in a new tab. Throws when the hub refuses.
+   */
+  async updateHub(): Promise<void> {
+    this.hubRestart = await api.hubSelfUpdate();
+  }
+
   /**
    * Opens a running dashboard in a new tab, at the address the hub returns.
    * Throws when the hub refuses.
@@ -210,8 +244,10 @@ export function componentData(id: () => string, offset: () => number = () => 0):
 
     const request = ++latestRequest;
     loading = true;
-    api
-      .componentData(componentId, requestedOffset)
+    // Started inside `then`, so a refusal thrown before any request (an id
+    // that is not a path segment) ends in `catch` like a refused request.
+    Promise.resolve()
+      .then(() => api.componentData(componentId, requestedOffset))
       .then((result) => {
         if (request === latestRequest) {
           data = result;

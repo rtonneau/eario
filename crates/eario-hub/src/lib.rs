@@ -1,25 +1,49 @@
 //! The Eario hub: one place to see, start, open and stop the dashboards a
-//! user installed (ADR 0011).
+//! user installed (ADR 0011), and to install and update them from GitHub
+//! releases (ADR 0013).
 //!
-//! A dashboard enters the hub only through `--eario-install`, run by the user
-//! from its own executable, which copies it into the hub directory and
-//! records it in the registry. The hub then starts that copy with
-//! `--eario-child` when asked, by slug.
+//! A dashboard enters the hub through `--eario-install`, run by the user from
+//! its own executable, which copies it into the hub directory and records it
+//! in the registry; or from the signed release of a GitHub repository, once
+//! the user confirmed what the hub verified. The hub then starts that copy
+//! with `--eario-child` when asked, by slug.
 //!
 //! - [`supervisor`]: the hub's services. A [`Supervisor`] lists, starts,
-//!   opens, stops and uninstalls dashboards. The HTTP API is a thin adapter
-//!   over it.
+//!   opens, stops and uninstalls dashboards; reads catalogs; previews and
+//!   installs releases; checks for updates, updates and rolls back. The HTTP
+//!   API and the command line are thin adapters over it.
+//! - [`remote`]: the blocking work of installing and updating from GitHub:
+//!   staging, verification, the manifest of a downloaded executable, the
+//!   one previous version kept, the version rule.
+//! - [`self_update`]: the hub replaces its own executable with a newer
+//!   release, verified with the Eario release key compiled into it, and
+//!   restarts.
 //! - [`start`] serves the hub on the loopback interface, behind the same
 //!   Host/Origin check and session token as a dashboard, with the generic
-//!   frontend.
-//! - [`run`] is the `eario-hub` executable: one hub per user, recorded in
-//!   `hub.json`, in a terminal that shows its address.
+//!   frontend, and checks for updates in the background.
+//! - [`run`] is the `eario-hub` executable without arguments: one hub per
+//!   user, recorded in `hub.json`, in a terminal that shows its address.
+//!   [`cli`] is the executable with a command, such as `install` or
+//!   `update`.
+//! - [`verify`] checks a GitHub release before anything from it is installed
+//!   (ADR 0013): the minisign signature of its checksum list, the key pinned
+//!   for its repository, and the name of the asset for this machine.
+//! - [`github`] reads releases and catalogs from GitHub over HTTPS, the
+//!   hub's only network access; `fake_github` (feature `fake-github`)
+//!   stands in for GitHub in tests.
 //!
 //! Quitting the hub leaves the dashboards running. The next hub re-attaches
 //! to those whose run file answers with its token, and deletes the others.
 
+pub mod cli;
+#[cfg(feature = "fake-github")]
+pub mod fake_github;
+pub mod github;
 mod http;
+pub mod remote;
+pub mod self_update;
 pub mod supervisor;
+pub mod verify;
 
 use std::net::SocketAddr;
 use std::time::SystemTime;
@@ -72,14 +96,37 @@ impl RunningHub {
 }
 
 /// Starts a hub: re-attaches to the dashboards of its directory that are
-/// still running, deletes the stale run files, then serves the hub's API and
-/// the frontend on the loopback interface.
+/// still running, deletes the stale run files, removes the staging areas
+/// left by processes that ended (not that of a command still running), then
+/// serves the hub's API and the frontend on the loopback interface.
+///
+/// Once serving, it checks GitHub for updates of the dashboards installed
+/// from it and of itself, in the background, unless the setting
+/// `check_updates_at_start` is off; that check never delays or stops the
+/// hub. Also in the background, it removes the executable a self-update
+/// replaced (`<executable>.old`), if one is left.
+///
+/// When a self-update has replaced the hub's executable, the server stops
+/// as if asked to quit, and [`RunningHub::wait`] returns; the new
+/// executable is then [`Supervisor::restart_executable`].
 ///
 /// It does not write `hub.json`, open a browser or handle Ctrl+C; [`run`]
 /// does.
 pub async fn start(supervisor: Supervisor, config: ServerConfig) -> Result<RunningHub, HubError> {
     supervisor.reattach().await?;
+    supervisor.clean_staging().await;
     let server = eario_runtime::start_routes(http::routes(supervisor.clone()), config).await?;
+    let shutdown = server.shutdown_handle();
+    let mut restart = supervisor.restart_requests();
+    tokio::spawn(async move {
+        // An error means the supervisor is gone: nothing will restart.
+        if restart.wait_for(Option::is_some).await.is_ok() {
+            tracing::info!("the hub updated itself; stopping its server to restart");
+            shutdown.shutdown();
+        }
+    });
+    supervisor.check_in_background();
+    supervisor.remove_old_executable();
     Ok(RunningHub { server, supervisor })
 }
 
@@ -91,6 +138,13 @@ pub async fn start(supervisor: Supervisor, config: ServerConfig) -> Result<Runni
 /// its address, opens the browser (unless `EARIO_NO_BROWSER` is set), and
 /// returns when the user chooses Quit in the hub or presses Ctrl+C. The
 /// dashboards it started keep running.
+///
+/// After a self-update it returns too, once its server has stopped and
+/// `hub.json` is removed, having started the new executable without
+/// arguments, standard streams or console window, in a process group of its
+/// own: the new hub then finds none running and starts. If the new
+/// executable cannot be started, `self-update.log` in the hub directory says
+/// so, since this hub may have no terminal.
 pub fn run() -> Result<(), HubError> {
     init_logging();
     let hub = HubDir::resolve()?;
@@ -142,12 +196,50 @@ async fn serve(hub: HubDir, config: ServerConfig) -> Result<(), HubError> {
         }
     });
 
+    let supervisor = running.supervisor().clone();
     let served = running.wait().await;
     if let Err(error) = remove_hub_file(&hub, &record.token).await {
         tracing::warn!(%error, file = %hub_file.display(), "could not remove hub.json");
     }
-    println!("The Eario hub stopped. Dashboards it started keep running.");
+    // Only now, with the server stopped and `hub.json` removed, so the new
+    // hub finds none running; and once a self-update still in progress has
+    // ended, so that one whose request Quit cut short restarts the hub too.
+    match supervisor.restart_after_self_update().await {
+        Some(executable) => {
+            // Blocking: it tries again while the system holds the new file.
+            let restarted = tokio::task::spawn_blocking(move || restart(&hub, &executable));
+            if let Err(error) = restarted.await {
+                tracing::error!(%error, "could not start the new hub");
+            }
+        }
+        None => println!("The Eario hub stopped. Dashboards it started keep running."),
+    }
     served
+}
+
+/// Starts the new hub a self-update installed at `executable`, detached, and
+/// says so; the new hub has no terminal and opens the browser itself. A
+/// failure is also recorded in `self-update.log` of `hub`
+/// ([`self_update::restart`]). Blocking.
+fn restart(hub: &HubDir, executable: &std::path::Path) {
+    match self_update::restart(hub, executable) {
+        // Not waited for: it outlives this process, which exits now.
+        Ok(child) => {
+            tracing::info!(pid = child.id(), "the new hub started");
+            println!(
+                "The Eario hub updated itself and restarts without this terminal. Dashboards keep running. If no browser opens, run {} again.",
+                executable.display()
+            );
+        }
+        Err(error) => {
+            tracing::error!(%error, executable = %executable.display(), "could not start the new hub");
+            println!(
+                "The Eario hub updated itself but could not start the new version ({error}); start {} again. This is recorded in {}.",
+                executable.display(),
+                hub.self_update_log_path().display()
+            );
+        }
+    }
 }
 
 /// The hub recorded in `hub.json` when it answers with its token.
@@ -156,7 +248,7 @@ async fn serve(hub: HubDir, config: ServerConfig) -> Result<(), HubError> {
 /// reads the registry, so a stale run file (two seconds to a closed port on
 /// Windows) or a broken registry would hide a running hub, and this start
 /// would replace it in `hub.json`.
-async fn running_hub(hub: &HubDir) -> Option<RunFile> {
+pub(crate) async fn running_hub(hub: &HubDir) -> Option<RunFile> {
     let path = hub.hub_file_path();
     let read = tokio::task::spawn_blocking(move || hub_dir::read_run_file_at(&path)).await;
     let recorded = match read {
@@ -212,7 +304,7 @@ fn open_in_browser(url: &str) {
 }
 
 /// Seconds since the Unix epoch; 0 when the clock is set before it.
-fn unix_seconds() -> u64 {
+pub(crate) fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -221,7 +313,7 @@ fn unix_seconds() -> u64 {
 
 /// Installs a log subscriber writing to standard error, unless one is
 /// installed. `EARIO_LOG` sets the filter, for example `EARIO_LOG=info`.
-fn init_logging() {
+pub(crate) fn init_logging() {
     let filter = tracing_subscriber::EnvFilter::try_from_env("EARIO_LOG")
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     // Fails when a subscriber is already installed, which is fine.

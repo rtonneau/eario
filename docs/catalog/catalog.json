@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "name": "Eario examples",
+  "dashboards": [
+    {
+      "repo": "rtonneau/eario",
+      "slug": "data-explorer",
+      "name": "Data Explorer",
+      "description": "Explore a CSV, TSV or XLSX file: preview, filter, chart and statistics.",
+      "public_key": "REPLACE-WITH-THE-KEY-LINE-OF-THE-EARIO-RELEASE-KEY"
+    },
+    {
+      "repo": "rtonneau/eario",
+      "slug": "signal-lab",
+      "name": "Signal Lab",
+      "description": "Custom Rust logic: a moving average and histogram of a time series, and per-group aggregates.",
+      "public_key": "REPLACE-WITH-THE-KEY-LINE-OF-THE-EARIO-RELEASE-KEY"
+    }
+  ]
+}

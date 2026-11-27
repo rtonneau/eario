@@ -43,7 +43,7 @@ flowchart TD
 | `eario-data` | `TableReader` interface and its CSV, TSV, XLSX implementations; `Dataset`; filtering, paging, chart preparation, statistics; `Computation`, `ComputeContext` and the registry; the `polars` re-export. | polars, calamine |
 | `eario-runtime` | `App` (the application services, evaluation and cache of derived datasets), the Axum server and its security layer, user preferences, the embedded frontend. | axum, tokio, rust-embed |
 | `eario-mcp` | MCP tools over `App`, served on `/mcp`. | rmcp |
-| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
+| `eario-hub` | The hub: `Supervisor` (list, start, open, stop, uninstall installed dashboards; install, update and roll back from GitHub releases; update the hub itself), its HTTP API, and the `eario-hub` executable. No crate depends on it. | eario-runtime, axum |
 | `eario` | What a dashboard author imports: `Dashboard`, `Page`, `State<T>`, widget constructors, `run()`, and `eario::polars`. | the crates above |
 
 Crates named in the initial plan but not created, because nothing needs them
@@ -292,11 +292,20 @@ Eario's configuration directory (`directories::ProjectDirs`: on Windows
 
 ```text
 hub/
-├── registry.json     installed dashboards: slug, path, size, SHA-256, manifest
+├── registry.json     installed dashboards: slug, path, size, SHA-256, manifest,
+│                     source (local or a GitHub repository), and for a GitHub
+│                     install its version, pinned key and previous version
 ├── hub.json          address and token of the running hub (one hub per user)
-├── bin/<slug>/       the hub's copy of each installed executable
+├── hub.lock          lock held while a file of the directory is read and written back
+├── catalogs.json     the repositories whose catalogs the hub reads
+├── settings.json     the hub's settings (the update check at start)
+├── updates.json      what the last update check found
+├── bin/<slug>/       the hub's copy of each installed executable, and the one
+│                     previous version an update keeps for rollback
+├── staging/          downloads being verified, one directory per hub process
 ├── run/<slug>.json   one per running dashboard, written by the dashboard
-└── logs/<slug>.log   output of each dashboard
+├── logs/<slug>.log   output of each dashboard
+└── self-update.log   written only when a self-updated hub could not start its successor
 ```
 
 `eario-hub` is a separate executable, a terminal process that prints its
@@ -334,8 +343,10 @@ the hub leaves dashboards running. A new hub keeps the run files that answer
 and deletes the others.
 
 Hub routes, under `/api`, behind the same Host and Origin checks and session
-token as a dashboard. The only handle they accept is the slug of an installed
-dashboard: no route takes a path, a command or arguments.
+token as a dashboard. They read no body or query: every parameter is a path
+segment, validated strictly (a slug, an `{owner}/{repo}`, a SHA-256 of 64
+lower-case hexadecimal digits, `on` or `off`). No route takes a path, a URL,
+a command or arguments.
 
 | Method and path | Answer |
 | --- | --- |
@@ -345,12 +356,52 @@ dashboard: no route takes a path, a command or arguments.
 | `POST /api/dashboards/{slug}/open` | `HubOpen`: the address with its token, to open in a new tab |
 | `POST /api/dashboards/{slug}/uninstall` | `HubInfo`; refused while it runs |
 | `POST /api/stop-all` | `HubInfo` |
+| `GET /api/catalogs` | `HubCatalog[]`, each catalog read from GitHub with its dashboards |
+| `POST /api/catalogs/{owner}/{repo}/add`, `/remove` | `HubCatalog[]` |
+| `POST /api/sources/{owner}/{repo}/preview` | `InstallPreview` of the latest release, downloaded and verified, not installed |
+| `POST /api/sources/{owner}/{repo}/accept-key/{key_sha256}` | `InstallPreview`, complete, once the previewed key is accepted |
+| `POST /api/sources/{owner}/{repo}/install/{sha256}` | `HubInfo`; installs the preview of that SHA-256 |
+| `POST /api/sources/{owner}/{repo}/dashboards/{slug}/preview`, `/accept-key/{key_sha256}`, `/install/{sha256}` | The same for the dashboard `slug` of a repository that publishes several in one release |
+| `POST /api/check` | `HubInfo` with the new `last_check` |
+| `POST /api/dashboards/{slug}/update-preview` | `InstallPreview` of the newer release |
+| `POST /api/dashboards/{slug}/update/{sha256}` | `HubInfo`; installs that previewed update |
+| `POST /api/dashboards/{slug}/update` | `HubInfo`; preview and update in one step |
+| `POST /api/dashboards/{slug}/rollback` | `HubInfo`; restores the previous version |
+| `GET /api/settings` | `HubSettings` |
+| `POST /api/settings/check-at-start/{on\|off}` | `HubSettings` |
+| `POST /api/self-update` | `HubSelfUpdate`; the hub replaced its executable with a newer release verified with the Eario key compiled into it, and restarts at a new address |
 | `GET /api/alive` | 204; lets a second hub find the first |
 | `POST /api/shutdown` | 204; quits the hub only |
 
-Installing is not an API route: it is the dashboard's own `--eario-install`.
-There is no tray yet (ADR 0011, amendment). The security consequences are in
+A local executable is installed by its own `--eario-install`; a GitHub
+release through the routes above or the `eario-hub` command line, under ADR
+0013. There is no tray yet (ADR 0011, amendment). The security consequences are in
 [security.md](security.md).
+
+### Installing from GitHub releases
+
+Only the hub contacts GitHub (HTTPS, a fixed set of hosts, public repositories,
+no token); the dashboards stay offline. A release is installable when it has,
+for the user's machine, an executable `<slug>-<target triple>[.exe]` listed in
+a signed `SHA256SUMS.txt` (`SHA256SUMS.txt.minisig`), and a key to verify it
+with: the release's `minisign.pub`, or the key a catalog gives for the
+repository, or the key already pinned. The flow is two steps. A preview
+downloads the asset into `staging/`, checks the signature and the SHA-256 and,
+only when the key is trusted, runs the file with `--eario-manifest` to read
+its slug and version. The user then confirms by the executable's SHA-256, and
+the file moves into `bin/<slug>/`. A key the hub does not know, or that has
+changed, is accepted separately, by the SHA-256 of its whole key line.
+
+Updates, the check at start, rollback and the hub's own update follow the same
+verification; an update needs a strictly newer manifest version. The command
+line (`eario-hub help`) does the same as the routes: `catalog list|add|remove`,
+`install <owner/repo> [--slug <slug>]`, `check`, `update <slug>`,
+`rollback <slug>`, `check-at-start [on|off]` and `self-update`. A repository's
+release may carry several dashboards, which are installed one at a time by
+slug. The rules, with their reasons, are in
+[ADR 0013](../adr/0013-github-install-and-update.md); the author's side, with
+the catalog file format, is in
+[Publishing a dashboard](../development/publishing-a-dashboard.md).
 
 ## Frontend
 

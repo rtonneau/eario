@@ -1,8 +1,11 @@
 # Project status
 
-Last updated: 27 November 2026, at the end of milestone M3 (standalone and hub), except the tray, which was deferred.
-Version: 0.2.0 (tagged), M3 work unreleased. Not published on crates.io. The source is public
-at https://github.com/rtonneau/eario.
+Last updated: 27 November 2026, after installing and updating dashboards from
+GitHub releases (ADR 0013), built on milestone M3 (standalone and hub). The tray
+is still deferred.
+Version: 0.2.0 (tagged); the M3 work and what followed it are unreleased, and no
+release has been made through the release workflows yet. Not published on
+crates.io. The source is public at https://github.com/rtonneau/eario.
 
 This document, with [architecture/overview.md](architecture/overview.md) and
 [roadmap.md](roadmap.md), is meant to let someone resume the work without the
@@ -50,6 +53,16 @@ Verified by automated tests unless noted.
 | `eario-hub` executable: lists installed dashboards, starts, opens, stops, stops all, uninstalls; one hub per user (`hub.json`); quitting the hub leaves dashboards running and the next hub re-attaches to those that answer, removing stale run files | Works; `eario-hub` integration tests with real executables, browser tests |
 | Hub API by slug only (no route takes a path or arguments), behind the same Host, Origin and token checks as a dashboard; `GET /api/alive` for another hub | Works; HTTP tests |
 | Hub view in the generic frontend, chosen by what `/api/app` reports: states starting, running, stopped, failed, last log lines | Works; Vitest, and Chromium with axe-core in both themes for the main flows (`hub.spec.ts`) |
+| Install from a GitHub release, from a catalog or by `owner/repo`: the hub downloads the release, verifies it and shows a preview (version, size, SHA-256, key); the user confirms by the executable's SHA-256 | Works; hub tests and Chromium tests against a fake GitHub on loopback (`fake-github`); never run against the real GitHub |
+| Signed releases: executables `<slug>-<target triple>[.exe]`, `SHA256SUMS.txt` signed with minisign (`SHA256SUMS.txt.minisig`, pre-hashed), the key as `minisign.pub`; the executable is run (`--eario-manifest`) only once signature, SHA-256 and a trusted key agree | Works; unit and integration tests with real minisign signatures |
+| Key trust: status `catalog`, `pinned`, `unknown`, `accepted` or `changed`; an unknown or changed key is accepted only by the SHA-256 of its whole key line, in the terminal or with `--accept-key`, never by `--yes`; the key is pinned per repository | Works; tests, including that an executable signed with a key not trusted is never run |
+| Update of an installed dashboard from the hub (one step for a pinned key, or with a preview), only to a strictly newer manifest version; check at start (can be turned off) and on "Check now"; rollback to the one previous version | Works; tests and Chromium |
+| Catalogs: `catalog.json` of a GitHub repository, added and removed in the hub or with `eario-hub catalog`; `rtonneau/eario-catalog` is read until removed; format in [publishing-a-dashboard.md](development/publishing-a-dashboard.md) | Works; the catalog repository itself does not exist yet |
+| Several dashboards in one repository's release, installed one at a time by slug (`eario-hub install owner/repo --slug <slug>`, a catalog entry's `slug`) | Works; hub tests and Chromium |
+| Hub self-update from the latest release of `rtonneau/eario`, verified with the Eario release key compiled into the hub (`eario-hub self-update`, a button in the hub view); the hub restarts and re-attaches to the running dashboards | Works with a test key; disabled in a build that holds the placeholder key (`self_update_not_configured`), which is every build until the release key is committed |
+| `eario-hub` command line: `catalog list\|add\|remove`, `install [--slug]`, `check`, `update`, `rollback`, `check-at-start`, `self-update`, `--version`, `--yes`, `--accept-key`, `help`; works beside a running hub, under the hub directory's lock | Works; tests drive the real executable |
+| Hub view for all of the above: install dialog with the key shown and trusted explicitly, update and rollback, catalogs, the check setting, self-update | Works; Vitest, and Chromium with axe-core in both themes (`hub.spec.ts`) |
+| Reusable release workflow for any dashboard repository (`release-dashboard.yml`), used by Eario's own `release.yml` for the examples and the hub; see [publishing-a-dashboard.md](development/publishing-a-dashboard.md) | Written and checked, never run on GitHub (see Not verified) |
 | Dated benchmark results (`cargo xtask bench`, `docs/benchmarks/`) | Works; first result 2026-11-26 on the development machine |
 
 ## Verification performed
@@ -85,6 +98,27 @@ commit logs; summary:
 - Never run on Linux or macOS: the Unix-only code (file modes `0700`/`0600`,
   process group of a child) is compiled and tested for the first time by CI on
   ubuntu.
+
+GitHub install and update (ADR 0013), Windows 11, run at the end of the last
+ticket of that work (Node.js 22.14 locally):
+
+- `CARGO_BUILD_JOBS=4 cargo xtask check`: format, clippy with warnings denied,
+  the Rust tests (407 passed, 0 failed, including `eario-hub` with its
+  integration tests that install, update, roll back and self-update from a fake
+  GitHub with the real example executables), the documentation build and
+  `npm run check` (0 errors, 0 warnings) pass. It stops at Vitest, which cannot
+  start its workers on Node.js 22.14 (Vitest needs 22.19 or later, as the
+  development guide says); run with a small shim for that Node.js (an earlier
+  ticket's workaround, kept outside the repository), Vitest passes: 113 tests.
+- `cargo xtask e2e` (Chromium, axe-core, both themes, a fake GitHub): 15 tests
+  passed when the last code ticket was finished (hub install, update, rollback,
+  changed key, catalogs, two dashboards of one repository). The documentation
+  ticket changed no code, so it was not run again.
+- `docs/catalog/catalog.json` is read in a test (`crates/eario-hub/tests/catalog_example.rs`)
+  with the type the hub uses; the commands in the documentation were checked
+  against `eario-hub help`, `cargo xtask help` and the workflow files.
+- The workflows were checked with actionlint, and their shell steps run
+  locally with throwaway keys; they have not run on GitHub.
 
 On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
@@ -132,8 +166,33 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
 - **The hub on Linux and macOS.** Not built or run by hand; Linux is covered by CI only.
 - **macOS.** Never built or run. Linux is covered by CI only (build, tests,
-  browser tests), not by manual use.
-- **The release workflow.** It was written, not run.
+  browser tests), not by manual use. The macOS executables the release
+  workflow makes are unsigned (no Apple signature or notarization) and
+  x86_64-apple-darwin is cross-compiled and never run.
+- **The Unix code of the GitHub install and update.** The permission bits of a
+  downloaded file, the hard-link swap of a self-update and the advisory lock
+  of the hub directory were compiled and run for the first time by CI on
+  ubuntu; nothing was run on a Unix system by hand.
+- **A real GitHub.** Every install, update and catalog test talks to a fake
+  GitHub on loopback. Redirects to the asset hosts, GitHub's rate-limit answers
+  and a proxy were not exercised against the real service.
+- **The restart after a hub self-update, end to end.** The pieces are tested
+  (verification, swap, restart request, a start that is retried), but no test
+  replaces a running hub's executable and watches the new one come up, and the
+  case of `EARIO_PORT` fixing the port (the new hub binds it right after the
+  old one closed) was not tried.
+- **The release workflows.** `release.yml` and the reusable
+  `release-dashboard.yml` (four targets, signed `SHA256SUMS.txt`) were
+  checked with actionlint and shellcheck, and their shell steps were run
+  locally with throwaway keys, but they have never run on GitHub: that needs
+  the release key's secrets and a tag. The apt version of minisign on the
+  runner, `rustup toolchain install` without an argument and `gh release view`
+  finding a draft by its tag are assumed, and the workflow fails the job if
+  they do not hold. Eario's release stops before building while
+  `crates/eario-hub/eario-release.pub` is the placeholder, so no hub has ever
+  updated itself from a real release. The steps that only the maintainer can
+  do are listed in the
+  [development guide](development/guide.md#what-only-the-maintainer-can-do).
 - **Opening the default browser** (`webbrowser::open`). The code path exists;
   all runs used `EARIO_NO_BROWSER`.
 - **Ctrl+C handling.** Implemented; only shutdown through the API and from
@@ -201,18 +260,13 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
   opens the browser, on every platform. On Windows its console window stays
   open (children have none). The tray was deferred (ADR 0011, "Amendment: the
   tray is deferred"); it moves to roadmap M11, next to the desktop shell.
-- No install from the hub interface: a dashboard enters the hub only through
-  its own `--eario-install`.
-- No side-by-side versions: one registry entry per slug; reinstalling replaces
-  it and is refused while the dashboard runs.
-- No update action in the hub: updating means running `--eario-install` from
-  the newer executable.
+- No side-by-side versions: one registry entry per slug, plus the one previous
+  version that an update keeps for Rollback. Reinstalling, updating and rolling
+  back are refused while the dashboard runs.
 - Two hubs launched at nearly the same instant can both run; the single
-  instance check reads `hub.json` and is not a lock.
-- Concurrent `--eario-install` runs into one hub directory, or an install
-  racing a hub uninstall, can lose one registry update (the registry is
-  written atomically but read-modify-write is not locked). Seen in a test
-  fixture of the hub view.
+  instance check reads `hub.json` and is not a lock. (Changes to the registry,
+  the catalogs and the settings are locked: `--eario-install`, the hub and the
+  `eario-hub` commands share the hub directory's lock.)
 - A dashboard that misses one 2-second liveness probe while the hub lists
   dashboards loses its run file and shows as stopped, though it may still run.
 - The hub has no theme preference (no `/api/preferences`).
@@ -220,6 +274,43 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
   browser test.
 - Hub directory: `%APPDATA%\eario\config\hub` on Windows, `~/.config/eario/hub`
   on Linux (from `directories::ProjectDirs`), unless `EARIO_HUB_DIR` is set.
+
+### Install and update from GitHub
+
+- Public repositories only. There is no token, so a private repository cannot
+  be read. Unauthenticated GitHub allows about 60 API requests per hour: enough
+  for a check at start, but listing catalogs reads each one at each call, so
+  the view does not poll it.
+- A signature proves who published a file, not that the code is safe. A user
+  who accepts a key lets its holder run code on the machine.
+- A key the user accepted but did not install with is remembered only by the
+  running hub, not on disk. Uninstalling the last dashboard of a repository
+  drops the key pinned for it, so a reinstall trusts on first use again.
+- A new key is accepted for a repository, not for one dashboard of it. A
+  preview made before another dashboard of the repository pinned a new key, or
+  before the dashboard itself changed, has to be made again.
+- Downloads have per-read timeouts (30 seconds between reads) and a size cap,
+  but no limit on the whole transfer, so a very slow server can keep one open.
+- A self-update replaces the hub's executable and restarts it at a new address.
+  The new hub has no console. If it cannot be started, the old one exits
+  anyway and writes a line to `self-update.log` in the hub directory; nothing
+  shows or rotates that file. On Windows, and on a Unix file system without
+  hard links, a crash between the two renames of the swap leaves
+  `<name>.old` and `<name>.new` and no executable under the hub's name; the user
+  renames one.
+- A hub with the placeholder `eario-release.pub` never updates itself and lists
+  no newer version of itself.
+- A route that is given a path segment that is not valid UTF-8 answers 400 with
+  a plain-text body, not an `ApiError` with a code.
+- A process killed during a preview leaves its `staging/<pid>-<n>/` until the
+  next hub start. At most four previews are kept.
+- Rollback and catalog removal ask for confirmation with the browser's
+  `confirm` dialog; install and update use the accessible dialog.
+- A release with several executables for one target is installed only by slug.
+  A user who omits the slug is refused, with the slugs named.
+- Local frontend tests need Node.js 22.19 or later. With an older Node.js,
+  `cargo xtask check` stops at Vitest; use a newer Node.js as the
+  [development guide](development/guide.md) says.
 
 ## Naming
 
@@ -231,15 +322,20 @@ On Windows 11, Rust 1.99.1, Node.js 25.6.1:
 
 ## Repository state
 
-- Branch `main`, pushed to `origin` (`github.com/rtonneau/eario`).
+- Branch `main` is pushed to `origin` (`github.com/rtonneau/eario`). The
+  install-and-update work is on the branch `feat/hub-github-install` and is not
+  merged into `main` yet.
 - Not tracked: `target/`, `node_modules/`,
   `crates/eario-runtime/frontend-dist/` (build output), `fixtures/generated/`.
 
 ## Where to start next
 
 Milestones M1 (custom Rust computations), M2 (trust and continuous
-verification) and M3 (standalone and hub, without the tray) are done; the next ones are in the
-[roadmap](roadmap.md). Entry points for what exists:
+verification) and M3 (standalone and hub, without the tray) are done, and so is
+updating an installed dashboard from the hub (part of M11); the next ones are in
+the [roadmap](roadmap.md). What still needs the maintainer before the first
+release is in the
+[development guide](development/guide.md#what-only-the-maintainer-can-do). Entry points for what exists:
 
 - `eario_data::compute` (`Computation`, `ComputeContext`, `ComputeError`) and
   `eario_runtime::compute` (dependency order, evaluation, panic catching).
@@ -247,7 +343,9 @@ verification) and M3 (standalone and hub, without the tray) are done; the next o
   the cached-only reads used by MCP.
 - `eario_core::DatasetSource` and `ComponentKind` for the contract.
 - `eario_runtime::hub_dir` (launch contract, hub
-  directory) and the `eario-hub` crate (`Supervisor`, hub API).
+  directory) and the `eario-hub` crate (`Supervisor`, hub API, `remote` for
+  install and update, `verify` for signatures, `github` for the one client that
+  talks to GitHub, `cli` for the commands).
 - `examples/signal-lab` as the model of a dashboard with computations.
 
 The limits above, and ADR 0012, say what M1 did not do.

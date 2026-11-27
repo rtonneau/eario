@@ -19,6 +19,9 @@
   --color-accent-contrast: light-dark(#ffffff, #06202a);
   --color-danger: light-dark(#b3261e, #ff8a80);
   --color-danger-surface: light-dark(#fdecea, #3a1c1c);
+  --color-warning: light-dark(#9a5b00, #f0b45a);
+  --color-warning-surface: light-dark(#fff4de, #33270f);
+  --color-backdrop: rgb(12 21 34 / 0.6);
   --color-header: #12305a;
   --color-header-text: #e6edf5;
   --color-star: #f5c66a;

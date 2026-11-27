@@ -120,6 +120,17 @@ pub enum LaunchError {
         /// The underlying failure.
         source: io::Error,
     },
+    /// A dashboard of this slug is installed from a GitHub repository, which
+    /// the hub updates; an executable on this computer does not replace it.
+    #[error(
+        "`{slug}` is installed from GitHub {repo}; uninstall it in the hub first, then install this executable again"
+    )]
+    InstalledFromGitHub {
+        /// The dashboard.
+        slug: String,
+        /// The repository it was installed from, as `owner/repo`.
+        repo: String,
+    },
 }
 
 impl fmt::Debug for LaunchError {
@@ -143,6 +154,7 @@ impl LaunchError {
             Self::CurrentExecutable(_) => "launch_current_executable_unknown",
             Self::NotInstalled { .. } => "launch_not_installed",
             Self::Remove { .. } => "launch_remove_failed",
+            Self::InstalledFromGitHub { .. } => "launch_installed_from_github",
         }
     }
 }

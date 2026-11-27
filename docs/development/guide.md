@@ -63,7 +63,7 @@ backtraces, and your own crates keep full debug information.
 | `cargo xtask test` | Runs Rust and frontend tests. |
 | `cargo xtask check` | Runs every CI check except the browser tests, `cargo deny` and the minimum-version build. |
 | `cargo xtask dist` | Builds the frontend, then `data-explorer` and `eario-hub` in release mode, and prints the path of each executable. |
-| `cargo xtask e2e` | Builds the frontend, the examples and the hub, then runs the browser tests in Chromium. |
+| `cargo xtask e2e` | Builds the frontend, the examples, the hub and the fake GitHub, then runs the browser tests in Chromium. |
 | `cargo xtask bench` | Runs the benchmarks and records the results in `docs/benchmarks/<date>.md`. |
 
 Environment variables read by an Eario application:
@@ -210,10 +210,10 @@ Do not edit the generated files. Change the Rust type and regenerate.
 | Import tests | `crates/eario-data/tests/import.rs` | Every file in `fixtures/`, including malformed ones. |
 | HTTP tests | `crates/eario-runtime/src/http_tests.rs` | Every endpoint, invalidation, errors, and the security layer, through the router. |
 | End-to-end tests | `crates/eario/tests/end_to_end.rs` | A dashboard built with the public API, served on a real socket, including MCP. |
-| Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting. |
+| Frontend unit tests | `frontend/src/lib/*.test.ts` | API client, chart option, formatting, the hub's texts for keys and update checks. |
 | Frontend rendering test | `frontend/src/App.test.ts` | A whole dashboard rendered from a specification, with the backend mocked. |
-| Hub tests | `crates/eario-hub/tests/hub.rs`, `examples/*/tests/launch.rs`, `crates/eario-runtime/src/hub_dir.rs` | The launch contract and the hub with the real example executables in a temporary hub directory: install, start, open, stop, re-attach, changed executable, slug-only routes. |
-| Browser tests | `frontend/e2e/*.spec.ts` | The real examples and the real hub in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, inputs that recompute a derived dataset in Rust, and the hub view (list, start, open, stop, stop all, uninstall). |
+| Hub tests | `crates/eario-hub/tests/hub.rs`, `crates/eario-hub/tests/catalog_example.rs`, `examples/*/tests/launch.rs`, `crates/eario-runtime/src/hub_dir.rs` | The launch contract and the hub with the real example executables in a temporary hub directory: install, start, open, stop, re-attach, changed executable, slug-only routes; install and update from a fake GitHub; `catalog_example.rs` reads `docs/catalog/catalog.json` with the hub's catalog type. |
+| Browser tests | `frontend/e2e/*.spec.ts` | The real examples and the real hub in Chromium, each state checked with axe-core: import through the file picker, chart drawn in its canvas, filter, table pagination, inputs that recompute a derived dataset in Rust, and the hub view (list, start, open, stop, stop all, uninstall; against a fake GitHub: install from a catalog and from a repository with an unknown key, update, rollback, a changed key, a check that could not reach GitHub, catalogs and the check-at-start setting). |
 
 ### Browser tests
 
@@ -237,6 +237,20 @@ and for the `--eario-install --yes` runs of the examples, and removes it
 afterwards. If a run was interrupted and a hub or dashboard process still
 holds the directory, the next `cargo xtask e2e` fails with a message asking
 you to stop it.
+
+The hub tests never reach GitHub either. `cargo xtask e2e` also builds
+`fake-github` (`crates/eario-hub/src/bin/fake-github.rs`, feature
+`fake-github`, built apart so the hub under test is built as it ships).
+Each hub test starts one and points the debug hub at it with
+`EARIO_HUB_GITHUB_API`. It serves the default catalog and, for the tests
+that install, signed releases of `data-explorer` and `signal-lab` made from
+the executables in `EARIO_E2E_BIN_DIR`, with test keys from fixed seeds. A
+test changes what it serves through its control address (a newer build, a
+build signed with another key, a refused release), never through the hub.
+Every example's manifest says the workspace version, and so do the releases
+the fake serves, so a test that updates first sets the installed version
+back to a pre-release of it in the hub directory's `registry.json`, as
+`crates/eario-hub/tests/hub.rs` does.
 
 Wait on what the user sees (roles, labels, `role="status"` text), never on
 a fixed delay. `cargo xtask check` does not run these tests, because they
@@ -336,6 +350,74 @@ produces `target/release/data-explorer` and `target/release/eario-hub` (`.exe`
 on Windows) with the frontend embedded, and prints their paths. To build
 your own application the same way, build the frontend once, then
 `cargo build --release` your crate.
+
+## Publishing a release
+
+`.github/workflows/release-dashboard.yml` is a reusable workflow
+(`workflow_call`) that makes a release the hub can install from and update
+(ADR 0013). For each target (`x86_64-pc-windows-msvc`,
+`x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, `x86_64-apple-darwin`) it
+builds each executable given, names it `<slug>-<target triple>` (`.exe` on
+Windows), writes `SHA256SUMS.txt` with `sha256sum`, signs it with minisign,
+verifies the signature with the committed public key, and attaches the files,
+with that key as `minisign.pub`, to the release of the tag. The header of the
+workflow lists its inputs and shows a caller. Before building, it refuses a
+tag that is not `v<SemVer version>`, a package whose version is not the
+tag's, and a public key file that is missing, malformed or the placeholder.
+On the runners that can run them, it checks that each dashboard's
+`--eario-manifest` gives its slug and the tag's version, which needs
+`.version(env!("CARGO_PKG_VERSION"))` in the dashboard. The release stays a
+draft unless the caller sets `publish: true`; a hub sees only published
+releases. A release may carry several dashboards, which a hub installs one at a
+time by slug.
+
+A dashboard in another repository calls the workflow the same way. How to make
+the key pair (`minisign -G`), store the secrets `MINISIGN_SECRET_KEY` and
+`MINISIGN_PASSWORD`, write the caller, name the tag and get listed in a catalog
+is in [Publishing a dashboard](publishing-a-dashboard.md); this section covers
+only Eario's own release.
+
+Eario's own `.github/workflows/release.yml` calls it on a `v*` tag for
+data-explorer, signal-lab and the hub, which take the workspace version, so
+the tag must be `v<workspace version>`. It builds the frontend first
+(`cargo xtask frontend`), signs with the key whose public key file is
+`crates/eario-hub/eario-release.pub`, the key compiled into the hub, and
+leaves a draft to review and publish. While that file is the placeholder,
+the release stops before building. To release Eario: replace the
+placeholder with the release key's `minisign.pub` (the hub's unit test
+refuses a file that is neither), set the secrets, set the version in
+`Cargo.toml`, tag `v<version>`, and publish the draft once its files are
+attached. A hub installs the examples from that release one at a time, by
+slug (`eario-hub install rtonneau/eario --slug data-explorer`, or a catalog
+entry with a `slug`); it finds its own executable by name.
+
+### What only the maintainer can do
+
+Nothing below can be done from the repository's source alone, and none of it
+has been done yet. In this order:
+
+1. Make the Eario release key pair, as in
+   [The signing key](publishing-a-dashboard.md#the-signing-key). Keep
+   `minisign.key` and a backup outside the repository.
+2. Replace `crates/eario-hub/eario-release.pub` with that key's `minisign.pub`
+   and commit it. The hub's unit test accepts only the placeholder or a valid
+   key.
+3. In the Actions secrets of `rtonneau/eario`, set `MINISIGN_SECRET_KEY` and
+   `MINISIGN_PASSWORD`.
+4. Create the public repository `rtonneau/eario-catalog`, the catalog a hub
+   reads by default. Put in its root a `catalog.json` copied from
+   [`docs/catalog/catalog.json`](../catalog/catalog.json), with each
+   `public_key` replaced by the key line (the second line) of the release key's
+   `minisign.pub`.
+5. Raise `version` in `[workspace.package]` of `Cargo.toml` (the tag `v0.2.0`
+   already exists), commit, tag `v<version>` and push the tag. The `Release`
+   workflow builds, signs and attaches the files to a draft.
+6. Review the draft, then publish it. Try it with a throwaway hub directory:
+   `EARIO_HUB_DIR=<empty directory> eario-hub install rtonneau/eario --slug
+   data-explorer`.
+
+The workflows have never run on GitHub, so step 5 is also their first run: read
+its log before publishing.
 
 ## Publishing the crates (not done yet)
 
