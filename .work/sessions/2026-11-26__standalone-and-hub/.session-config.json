@@ -136,6 +136,30 @@
         "ticket": "03-server-route-sets",
         "commit": "8703711"
       }
+    },
+    {
+      "at": "2026-11-26T23:06:38.952Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-hub-crate.md",
+        "03-implement/04-hub-crate/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-hub-crate"
+      }
+    },
+    {
+      "at": "2026-11-27T00:30:07.301Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-hub-crate/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-hub-crate",
+        "commit": "53fa14f"
+      }
     }
   ],
   "current_phase": "ship",
