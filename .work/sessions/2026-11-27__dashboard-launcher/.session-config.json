@@ -138,6 +138,30 @@
         "ticket": "03-github-client",
         "commit": "136a926"
       }
+    },
+    {
+      "at": "2026-11-27T08:53:29.022Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/04-supervisor-install-update.md",
+        "03-implement/04-supervisor-install-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-supervisor-install-update"
+      }
+    },
+    {
+      "at": "2026-11-27T10:45:20.753Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/04-supervisor-install-update/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "04-supervisor-install-update",
+        "commit": "76e6ad2"
+      }
     }
   ],
   "current_phase": "ship",
