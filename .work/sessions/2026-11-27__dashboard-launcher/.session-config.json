@@ -314,14 +314,66 @@
         "ticket": "09-author-and-catalog-docs",
         "commit": "f658844"
       }
+    },
+    {
+      "at": "2026-11-27T17:21:33.181Z",
+      "event": "changelog_written",
+      "phase": "finish-pending",
+      "detail": {
+        "bump": "minor"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:47.314Z",
+      "event": "pr_opened",
+      "phase": "finish-pending",
+      "detail": {
+        "url": "https://github.com/rtonneau/eario/pull/4"
+      }
+    },
+    {
+      "at": "2026-11-27T17:21:40.446Z",
+      "event": "session_finished",
+      "phase": "finished",
+      "files": [
+        "INDEX.md"
+      ]
+    },
+    {
+      "at": "2026-11-27T17:21:49.462Z",
+      "event": "scratch_cleaned",
+      "phase": "finished",
+      "detail": {
+        "policy": "build-artifacts",
+        "removed": [
+          ".scratch/tests/2026-11-27__dashboard-launcher/02-msrv/target",
+          ".scratch/tests/2026-11-27__dashboard-launcher/02-target-188/debug/build",
+          ".scratch/tests/2026-11-27__dashboard-launcher/02-vectors/target",
+          ".scratch/tests/2026-11-27__dashboard-launcher/03-msrv-target/debug/build",
+          ".scratch/tests/2026-11-27__dashboard-launcher/03-msrv-target/debug/incremental/build_script_build-2a50yaszecbhh",
+          ".scratch/tests/2026-11-27__dashboard-launcher/06-msrv-target/debug/build",
+          ".scratch/tests/2026-11-27__dashboard-launcher/06-msrv-target/debug/incremental/build_script_build-2a50yaszecbhh",
+          ".scratch/tests/2026-11-27__dashboard-launcher/build-sim"
+        ],
+        "freedBytes": 943443632
+      }
     }
   ],
-  "current_phase": "finish-pending",
+  "current_phase": "finished",
   "git": {
     "branch": "feat/hub-github-install",
     "base_branch": "main",
     "branch_created_at": "2026-11-27T07:37:18.577Z",
-    "pr_url": null
+    "pr_url": "https://github.com/rtonneau/eario/pull/4"
   },
-  "ship_mode": "delegate"
+  "ship_mode": "delegate",
+  "changelog": {
+    "bump": "minor",
+    "floor": "minor",
+    "reason": null,
+    "bullets": 8,
+    "path": ".work/changelog/2026-11-27__dashboard-launcher.md",
+    "written_at": "2026-11-27T17:21:33.170Z"
+  },
+  "finished_at": "2026-11-27T17:21:40.446Z"
 }
