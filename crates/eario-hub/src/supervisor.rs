@@ -31,6 +31,8 @@ use eario_runtime::hub_dir::{self, HUB_DIR_VARIABLE, HubDir, RegistryEntry};
 use eario_runtime::{HubDirError, ServeError};
 use tokio::task::JoinSet;
 
+use crate::github::GitHubError;
+
 /// Longest a started dashboard has to answer with its run file's token.
 pub const START_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -166,6 +168,9 @@ pub enum HubError {
     /// The hub's server could not start or stopped with an error.
     #[error(transparent)]
     Serve(#[from] ServeError),
+    /// A request to GitHub failed.
+    #[error(transparent)]
+    GitHub(#[from] GitHubError),
     /// The hub's asynchronous runtime could not be created.
     #[error("could not start the hub's runtime: {0}")]
     Runtime(io::Error),
@@ -193,6 +198,7 @@ impl HubError {
             Self::Remove { .. } => "hub_remove_failed",
             Self::HubDir(error) => error.code(),
             Self::Serve(error) => error.code(),
+            Self::GitHub(error) => error.code(),
             Self::Runtime(_) | Self::Task(_) => "internal_error",
         }
     }

@@ -15,20 +15,29 @@ categories.workspace = true
 name = "eario-hub"
 path = "src/main.rs"
 
+[features]
+# `fake_github`: a fake GitHub on the loopback interface, for the tests of
+# this crate and of others. Never enabled in a release of the hub.
+fake-github = []
+
 [dependencies]
 eario-core.workspace = true
 eario-runtime.workspace = true
 axum.workspace = true
 minisign-verify.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ureq.workspace = true
 webbrowser.workspace = true
 
 [dev-dependencies]
-serde.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

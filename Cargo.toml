@@ -64,6 +64,15 @@ sha2 = "0.11"
 # Hub only: checks the minisign signature of a release's SHA256SUMS.txt
 # (ADR 0013). Verification only, no dependency of its own.
 minisign-verify = "0.3"
+# Hub only: blocking HTTPS client for GitHub releases (ADR 0013), called
+# through `spawn_blocking`. No default feature: no gzip, no webpki-roots
+# (CDLA-Permissive-2.0 data) and no built-in crypto provider; the hub gives it
+# rustls with ring and the system's root certificates, both already in the
+# dependency tree through polars (reqwest, hyper-rustls). ring rather than
+# aws-lc-rs, which needs cmake and nasm to build on Windows.
+ureq = { version = "3.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8"
 
 # MCP
 rmcp = { version = "3", default-features = false }

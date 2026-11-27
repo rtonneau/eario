@@ -17,10 +17,16 @@
 //! - [`verify`] checks a GitHub release before anything from it is installed
 //!   (ADR 0013): the minisign signature of its checksum list, the key pinned
 //!   for its repository, and the name of the asset for this machine.
+//! - [`github`] reads releases and catalogs from GitHub over HTTPS, the
+//!   hub's only network access; `fake_github` (feature `fake-github`)
+//!   stands in for GitHub in tests.
 //!
 //! Quitting the hub leaves the dashboards running. The next hub re-attaches
 //! to those whose run file answers with its token, and deletes the others.
 
+#[cfg(any(test, feature = "fake-github"))]
+pub mod fake_github;
+pub mod github;
 mod http;
 pub mod supervisor;
 pub mod verify;

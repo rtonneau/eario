@@ -26,6 +26,7 @@ use axum::{Json, Router};
 use eario_core::{ApiError, AppResponse, HubInfo, HubOpen};
 use eario_runtime::HubDirError;
 
+use crate::github::GitHubError;
 use crate::supervisor::{HubError, Supervisor};
 
 /// Path of the route that answers `204` without looking at any dashboard or
@@ -75,6 +76,13 @@ impl From<HubError> for Failure {
             | HubError::MissingExecutable { .. }
             | HubError::ForeignExecutable { .. } => StatusCode::CONFLICT,
             HubError::StopTimeout { .. } => StatusCode::GATEWAY_TIMEOUT,
+            HubError::GitHub(GitHubError::InvalidRepo(_)) => StatusCode::BAD_REQUEST,
+            // Local failures: the disk or the system's certificate store.
+            HubError::GitHub(GitHubError::Write { .. } | GitHubError::Certificates { .. }) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            // GitHub, not the hub, failed or refused.
+            HubError::GitHub(_) => StatusCode::BAD_GATEWAY,
             HubError::Spawn { .. }
             | HubError::Remove { .. }
             | HubError::HubDir(_)
