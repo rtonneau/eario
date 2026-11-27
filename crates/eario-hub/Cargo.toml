@@ -19,6 +19,7 @@ path = "src/main.rs"
 eario-core.workspace = true
 eario-runtime.workspace = true
 axum.workspace = true
+minisign-verify.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true

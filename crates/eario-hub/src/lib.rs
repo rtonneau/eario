@@ -14,12 +14,16 @@
 //!   frontend.
 //! - [`run`] is the `eario-hub` executable: one hub per user, recorded in
 //!   `hub.json`, in a terminal that shows its address.
+//! - [`verify`] checks a GitHub release before anything from it is installed
+//!   (ADR 0013): the minisign signature of its checksum list, the key pinned
+//!   for its repository, and the name of the asset for this machine.
 //!
 //! Quitting the hub leaves the dashboards running. The next hub re-attaches
 //! to those whose run file answers with its token, and deletes the others.
 
 mod http;
 pub mod supervisor;
+pub mod verify;
 
 use std::net::SocketAddr;
 use std::time::SystemTime;
