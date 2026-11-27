@@ -397,6 +397,10 @@ impl Supervisor {
                     description: entry.manifest.description,
                     state,
                     log_lines,
+                    source: entry.source,
+                    // Filled by the update check, which a later ticket adds.
+                    available_version: None,
+                    has_previous: entry.previous.is_some(),
                 }
             })
             .collect();

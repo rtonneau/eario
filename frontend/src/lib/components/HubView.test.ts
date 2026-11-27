@@ -19,6 +19,9 @@ function dashboard(slug: string, name: string, patch: Partial<HubDashboard> = {}
     description: `${name} description`,
     state: 'stopped',
     log_lines: [],
+    source: { kind: 'local' },
+    available_version: null,
+    has_previous: false,
     ...patch,
   };
 }

@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use directories::ProjectDirs;
-use eario_core::{Manifest, RunFile, is_slug};
+use eario_core::{Manifest, RunFile, Source, is_slug};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,7 +41,11 @@ use crate::error::HubDirError;
 pub const HUB_DIR_VARIABLE: &str = "EARIO_HUB_DIR";
 
 /// Newest registry format version this build reads and writes.
-pub const REGISTRY_FORMAT_VERSION: u32 = 1;
+///
+/// Format 2 added `source`, `pinned_key` and `previous` to the entries. A
+/// format-1 file is read as local entries with no key and no previous
+/// version, and is written back as format 2.
+pub const REGISTRY_FORMAT_VERSION: u32 = 2;
 
 /// Longest a [`probe`] waits for an answer, connection included.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -58,6 +62,34 @@ pub struct RegistryEntry {
     /// SHA-256 of the executable, in lower-case hexadecimal.
     pub sha256: String,
     /// Manifest the executable printed at install time.
+    pub manifest: Manifest,
+    /// Where the dashboard was installed from. Absent in a format-1 file,
+    /// which reads as [`Source::Local`].
+    #[serde(default)]
+    pub source: Source,
+    /// Minisign public key pinned for a GitHub install, as the base64 text of
+    /// its key line; the key every later release of this repository must be
+    /// signed with. `None` for a local install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_key: Option<String>,
+    /// The version this one replaced, kept for rollback; `None` when there is
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous: Option<PreviousVersion>,
+}
+
+/// The copy kept of the version an update replaced, in the same `bin/<slug>/`
+/// directory as the current one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousVersion {
+    /// File name of the copy inside `bin/<slug>/`. Never a path: it is joined
+    /// to that directory by the hub.
+    pub file_name: String,
+    /// Size of the copy in bytes.
+    pub size: u64,
+    /// SHA-256 of the copy, in lower-case hexadecimal.
+    pub sha256: String,
+    /// Manifest of that version.
     pub manifest: Manifest,
 }
 
@@ -173,7 +205,8 @@ impl HubDir {
         Ok(self.logs_dir().join(format!("{slug}.log")))
     }
 
-    /// Reads the registry. A missing file is an empty registry.
+    /// Reads the registry. A missing file is an empty registry; a format-1
+    /// file is read as local entries (see [`REGISTRY_FORMAT_VERSION`]).
     pub fn read_registry(&self) -> Result<Registry, HubDirError> {
         let path = self.registry_path();
         let Some(text) = read_optional(&path)? else {
@@ -193,7 +226,10 @@ impl HubDir {
                 supported: REGISTRY_FORMAT_VERSION,
             });
         }
-        parse(&path, &text).map_err(invalid_registry)
+        let mut registry: Registry = parse(&path, &text).map_err(invalid_registry)?;
+        // An older file is upgraded in memory; the next write stores format 2.
+        registry.format_version = REGISTRY_FORMAT_VERSION;
+        Ok(registry)
     }
 
     /// Writes the registry atomically.
@@ -533,6 +569,9 @@ mod tests {
             size,
             sha256: "ab".repeat(32),
             manifest: manifest(name),
+            source: Source::Local,
+            pinned_key: None,
+            previous: None,
         };
         let mut registry = Registry::default();
         registry.insert(entry("Alpha", 1));
@@ -546,6 +585,59 @@ mod tests {
         assert_eq!(read.get("alpha").map(|entry| entry.size), Some(3));
         assert!(registry.remove("beta").is_some());
         assert!(registry.remove("beta").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_format_1_registry_reads_as_local_entries() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path());
+        let old = format!(
+            r#"{{"format_version": 1, "dashboards": [{{
+                "slug": "alpha", "path": "bin/alpha/alpha", "size": 5,
+                "sha256": "{}", "manifest": {}}}]}}"#,
+            "ab".repeat(32),
+            serde_json::to_string(&manifest("Alpha"))?,
+        );
+        fs::write(hub.registry_path(), old)?;
+
+        let registry = hub.read_registry()?;
+        assert_eq!(registry.format_version, REGISTRY_FORMAT_VERSION);
+        let entry = registry.get("alpha").ok_or("alpha must be read")?;
+        assert_eq!(entry.source, Source::Local);
+        assert_eq!(entry.pinned_key, None);
+        assert_eq!(entry.previous, None);
+
+        // Writing stores format 2, and that reads back unchanged.
+        hub.write_registry(&registry)?;
+        let text = fs::read_to_string(hub.registry_path())?;
+        assert!(text.contains(r#""format_version": 2"#), "{text}");
+        assert_eq!(hub.read_registry()?, registry);
+        Ok(())
+    }
+
+    #[test]
+    fn source_key_and_previous_version_round_trip() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let hub = HubDir::at(directory.path());
+        let mut registry = Registry::default();
+        registry.insert(RegistryEntry {
+            slug: "alpha".to_owned(),
+            path: PathBuf::from("bin/alpha/alpha"),
+            size: 9,
+            sha256: "cd".repeat(32),
+            manifest: manifest("Alpha"),
+            source: Source::Github { repo: "owner/alpha".to_owned() },
+            pinned_key: Some("RWQabc".to_owned()),
+            previous: Some(PreviousVersion {
+                file_name: "alpha.previous".to_owned(),
+                size: 8,
+                sha256: "ef".repeat(32),
+                manifest: manifest("Alpha"),
+            }),
+        });
+        hub.write_registry(&registry)?;
+        assert_eq!(hub.read_registry()?, registry);
         Ok(())
     }
 

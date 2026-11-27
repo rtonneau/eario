@@ -71,6 +71,22 @@ pub enum DashboardState {
     Failed,
 }
 
+/// Where an installed dashboard came from, and so how it is updated.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Source {
+    /// Installed from an executable on this machine with `--eario-install`.
+    /// Never updated from GitHub.
+    #[default]
+    Local,
+    /// Installed from a release of a GitHub repository.
+    Github {
+        /// The repository, as `owner/repo`; see [`is_repo`].
+        repo: String,
+    },
+}
+
 /// One installed dashboard in the hub API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -89,6 +105,12 @@ pub struct HubDashboard {
     /// Last lines of the dashboard's log when `state` is `failed`; empty
     /// otherwise.
     pub log_lines: Vec<String>,
+    /// Where the dashboard was installed from.
+    pub source: Source,
+    /// Newer version found by the last update check, when there is one.
+    pub available_version: Option<String>,
+    /// Whether an update left a previous version that can be restored.
+    pub has_previous: bool,
 }
 
 /// The hub's answer to a list request.
@@ -108,6 +130,99 @@ pub struct HubOpen {
     /// Address to open in a new tab: the dashboard's own address, with its
     /// session token in the fragment.
     pub url: String,
+}
+
+/// Version of the catalog file format; see [`Catalog`].
+pub const CATALOG_FORMAT_VERSION: u32 = 1;
+
+/// A list of dashboards published on GitHub: the `catalog.json` file of a
+/// repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Catalog {
+    /// Format version of the file, see [`CATALOG_FORMAT_VERSION`].
+    pub format_version: u32,
+    /// Name of the catalog, shown to the user.
+    pub name: String,
+    /// The dashboards it lists.
+    pub dashboards: Vec<CatalogEntry>,
+}
+
+/// One dashboard in a [`Catalog`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct CatalogEntry {
+    /// Repository that publishes the dashboard, as `owner/repo`; see
+    /// [`is_repo`].
+    pub repo: String,
+    /// Name of the dashboard, shown to the user.
+    pub name: String,
+    /// One-line description, empty when the catalog gives none.
+    #[serde(default)]
+    pub description: String,
+    /// Minisign public key (the base64 text of a `.pub` file's key line) the
+    /// repository's releases are signed with. The catalog's author vouches for
+    /// it.
+    pub public_key: String,
+}
+
+/// How the key that signed a release relates to what the hub trusts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "snake_case")]
+pub enum KeyStatus {
+    /// The key comes from a catalog entry.
+    Catalog,
+    /// The key is the one already pinned for this repository.
+    Pinned,
+    /// No key is known for this repository: the user must confirm the
+    /// fingerprint to trust it (trust on first use).
+    Unknown,
+    /// The key differs from the one pinned for this repository. Refused.
+    Changed,
+}
+
+/// What the hub found for an install, shown to the user before anything is
+/// written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct InstallPreview {
+    /// The repository, as `owner/repo`.
+    pub repo: String,
+    /// Version of the release that would be installed.
+    pub version: String,
+    /// Name of the release asset for this machine.
+    pub asset: String,
+    /// Size of the asset in bytes.
+    pub size: u64,
+    /// SHA-256 of the asset from the signed checksum list, in lower-case
+    /// hexadecimal. The install request must repeat it.
+    pub sha256: String,
+    /// Fingerprint of the signing key, for the user to compare.
+    pub key_fingerprint: String,
+    /// How the key relates to what the hub trusts.
+    pub key_status: KeyStatus,
+}
+
+/// Whether `text` is a GitHub repository, as `owner/repo`.
+///
+/// The owner has 1 to 39 characters among ASCII letters, digits and `-`; the
+/// repository 1 to 100 among ASCII letters, digits, `.`, `_` and `-`, and is
+/// neither `.` nor `..`. Nothing else is accepted: no URL, scheme, path,
+/// query or space. Such a text is safe in a URL path and never a path on disk
+/// by itself.
+pub fn is_repo(text: &str) -> bool {
+    let Some((owner, repo)) = text.split_once('/') else {
+        return false;
+    };
+    (1..=39).contains(&owner.len())
+        && owner.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && (1..=100).contains(&repo.len())
+        && repo
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && repo != "."
+        && repo != ".."
 }
 
 /// Reduces a name to lower-case ASCII letters, digits and dashes.
@@ -183,6 +298,77 @@ mod tests {
         let manifest: Manifest = serde_json::from_str(text)?;
         assert_eq!(manifest.version, None);
         assert_eq!(manifest.description, "");
+        Ok(())
+    }
+
+    #[test]
+    fn repositories_are_strict() {
+        for good in ["rtonneau/eario", "a/b", "Some-Owner/my.repo_1-x", "o/.hidden", "o/a..b"] {
+            assert!(is_repo(good), "{good}");
+        }
+        let long_owner = format!("{}/r", "a".repeat(40));
+        let long_repo = format!("o/{}", "r".repeat(101));
+        let bad = [
+            "",
+            "/",
+            "owner",
+            "owner/",
+            "/repo",
+            "a/b/c",
+            "o/.",
+            "o/..",
+            "own_er/repo",
+            "owner/re po",
+            "owner/rép",
+            "ow ner/repo",
+            "owner/repo?x=1",
+            "owner/repo#x",
+            "owner/repo\n",
+            "https://github.com/owner/repo",
+            "github.com/owner/repo",
+            "../repo",
+            "owner/..%2f",
+            "owner\\repo",
+            &long_owner,
+            &long_repo,
+        ];
+        for text in bad {
+            assert!(!is_repo(text), "{text:?}");
+        }
+        assert!(is_repo(&format!("{}/{}", "a".repeat(39), "r".repeat(100))));
+    }
+
+    #[test]
+    fn sources_are_tagged_and_local_by_default() -> Result<(), serde_json::Error> {
+        assert_eq!(Source::default(), Source::Local);
+        assert_eq!(serde_json::to_string(&Source::Local)?, r#"{"kind":"local"}"#);
+        let github = Source::Github { repo: "o/r".to_owned() };
+        let text = serde_json::to_string(&github)?;
+        assert_eq!(text, r#"{"kind":"github","repo":"o/r"}"#);
+        assert_eq!(serde_json::from_str::<Source>(&text)?, github);
+        Ok(())
+    }
+
+    #[test]
+    fn catalogs_and_previews_round_trip() -> Result<(), serde_json::Error> {
+        let text = r#"{"format_version":1,"name":"Lab","dashboards":[
+            {"repo":"o/r","name":"Signal Lab","public_key":"RWQabc"}]}"#;
+        let catalog: Catalog = serde_json::from_str(text)?;
+        assert_eq!(catalog.dashboards[0].description, "");
+        assert_eq!(serde_json::from_str::<Catalog>(&serde_json::to_string(&catalog)?)?, catalog);
+
+        let preview = InstallPreview {
+            repo: "o/r".to_owned(),
+            version: "1.0.0".to_owned(),
+            asset: "r-x86_64-pc-windows-msvc.exe".to_owned(),
+            size: 10,
+            sha256: "ab".repeat(32),
+            key_fingerprint: "AB12".to_owned(),
+            key_status: KeyStatus::Unknown,
+        };
+        let text = serde_json::to_string(&preview)?;
+        assert!(text.contains(r#""key_status":"unknown""#), "{text}");
+        assert_eq!(serde_json::from_str::<InstallPreview>(&text)?, preview);
         Ok(())
     }
 

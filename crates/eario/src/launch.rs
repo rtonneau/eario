@@ -18,7 +18,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use eario_core::Manifest;
+use eario_core::{Manifest, Source};
 use eario_runtime::HubDirError;
 use eario_runtime::hub_dir::{self, HubDir, RegistryEntry};
 
@@ -136,6 +136,10 @@ pub(crate) fn install(manifest: &Manifest, yes: bool) -> Result<(), LaunchError>
         size,
         sha256,
         manifest: manifest.clone(),
+        // A local install is never updated from GitHub, and has no key.
+        source: Source::Local,
+        pinned_key: None,
+        previous: None,
     });
     hub.write_registry(&registry)?;
 
