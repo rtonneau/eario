@@ -184,6 +184,30 @@
         "ticket": "05-hub-view",
         "commit": "e6576cd"
       }
+    },
+    {
+      "at": "2026-11-27T00:52:31.269Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/06-windows-tray.md",
+        "03-implement/06-windows-tray/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-windows-tray"
+      }
+    },
+    {
+      "at": "2026-11-27T06:33:21.290Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/06-windows-tray/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "06-windows-tray",
+        "commit": "36578e5"
+      }
     }
   ],
   "current_phase": "ship",
