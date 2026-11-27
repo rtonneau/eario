@@ -210,6 +210,30 @@
         "ticket": "06-hub-self-update",
         "commit": "a98a35f"
       }
+    },
+    {
+      "at": "2026-11-27T13:10:12.694Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/07-hub-view-remote.md",
+        "03-implement/07-hub-view-remote/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-hub-view-remote"
+      }
+    },
+    {
+      "at": "2026-11-27T14:41:47.393Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/07-hub-view-remote/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "07-hub-view-remote",
+        "commit": "6dccf8b"
+      }
     }
   ],
   "current_phase": "ship",
