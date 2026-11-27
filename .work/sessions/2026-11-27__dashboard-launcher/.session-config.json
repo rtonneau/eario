@@ -90,6 +90,30 @@
         "ticket": "01-contract-and-registry-v2",
         "commit": "5464f1e"
       }
+    },
+    {
+      "at": "2026-11-27T07:48:01.697Z",
+      "event": "ticket_started",
+      "phase": "ship",
+      "files": [
+        "02-plan/tickets/02-release-verification.md",
+        "03-implement/02-release-verification/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-release-verification"
+      }
+    },
+    {
+      "at": "2026-11-27T08:18:30.335Z",
+      "event": "ticket_done",
+      "phase": "ship",
+      "files": [
+        "03-implement/02-release-verification/commit-log.md"
+      ],
+      "detail": {
+        "ticket": "02-release-verification",
+        "commit": "57995d9"
+      }
     }
   ],
   "current_phase": "ship",
